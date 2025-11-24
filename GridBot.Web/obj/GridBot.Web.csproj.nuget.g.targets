@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <Import Project="$(NuGetPackageRoot)microsoft.extensions.telemetry.abstractions\10.0.0\buildTransitive\net8.0\Microsoft.Extensions.Telemetry.Abstractions.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.extensions.telemetry.abstractions\10.0.0\buildTransitive\net8.0\Microsoft.Extensions.Telemetry.Abstractions.targets')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.extensions.http.resilience\10.0.0\buildTransitive\net8.0\Microsoft.Extensions.Http.Resilience.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.extensions.http.resilience\10.0.0\buildTransitive\net8.0\Microsoft.Extensions.Http.Resilience.targets')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.aspnetcore.app.internal.assets\10.0.0\buildTransitive\Microsoft.AspNetCore.App.Internal.Assets.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.aspnetcore.app.internal.assets\10.0.0\buildTransitive\Microsoft.AspNetCore.App.Internal.Assets.targets')" />
+    <Import Project="$(NuGetPackageRoot)aspire.stackexchange.redis\13.0.0\buildTransitive\net10.0\Aspire.StackExchange.Redis.targets" Condition="Exists('$(NuGetPackageRoot)aspire.stackexchange.redis\13.0.0\buildTransitive\net10.0\Aspire.StackExchange.Redis.targets')" />
+    <Import Project="$(NuGetPackageRoot)aspire.stackexchange.redis.outputcaching\13.0.0\buildTransitive\net10.0\Aspire.StackExchange.Redis.OutputCaching.targets" Condition="Exists('$(NuGetPackageRoot)aspire.stackexchange.redis.outputcaching\13.0.0\buildTransitive\net10.0\Aspire.StackExchange.Redis.OutputCaching.targets')" />
+  </ImportGroup>
+</Project>
