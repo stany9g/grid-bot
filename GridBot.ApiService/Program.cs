@@ -31,28 +31,9 @@ public partial class Program
             });
         }
 
-        string[] summaries = ["Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"];
 
-        app.MapGet("/", () => "API service is running. Navigate to /weatherforecast to see sample data.");
-
-        app.MapGet("/weatherforecast", () =>
-        {
-            var forecast = Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                (
-                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    Random.Shared.Next(-20, 55),
-                    summaries[Random.Shared.Next(summaries.Length)]
-                ))
-                .ToArray();
-            return forecast;
-        })
-        .WithName("GetWeatherForecast");
-
-        // Lighter API Endpoints
         var lighter = app.MapGroup("/api/lighter")
-            .WithTags("Lighter Trading")
-            .WithOpenApi();
+            .WithTags("Lighter Trading");
 
         // Order Management Endpoints
         lighter.MapPost("/orders", async (GridBot.Lighter.Models.CreateOrderRequest request, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
@@ -198,7 +179,7 @@ public partial class Program
         .WithDescription("Modifies an existing order's price, size, or other parameters.");
 
         // Account Management Endpoints
-        lighter.MapGet("/account/{accountIndex}", async (long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}", async ( long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
         {
             try
             {
@@ -224,7 +205,7 @@ public partial class Program
         .WithSummary("Get account information")
         .WithDescription("Gets account information including positions and balances.");
 
-        lighter.MapGet("/account/{accountIndex}/metadata", async (long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}/metadata", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
         {
             try
             {
@@ -250,7 +231,7 @@ public partial class Program
         .WithSummary("Get account metadata")
         .WithDescription("Gets account metadata including public key and status.");
 
-        lighter.MapGet("/account/{accountIndex}/orders", async (long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}/orders", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
         {
             try
             {
@@ -444,9 +425,4 @@ public partial class Program
 
         app.Run();
     }
-}
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
 }

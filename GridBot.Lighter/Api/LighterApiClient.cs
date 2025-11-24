@@ -19,7 +19,7 @@ public sealed class LighterApiClient : IDisposable
     /// <summary>
     /// Default base URL for the Lighter mainnet API.
     /// </summary>
-    public const string DefaultBaseUrl = "https://mainnet.zklighter.elliot.ai/api/v1/";
+    public const string DefaultVersion = "/api/v1";
 
 
 
@@ -27,7 +27,7 @@ public sealed class LighterApiClient : IDisposable
     /// Initializes a new instance of the <see cref="LighterApiClient"/> class with a custom base URL.
     /// </summary>
     /// <param name="baseUrl">The base URL for the Lighter API.</param>
-    public LighterApiClient(string baseUrl) : this(CreateHttpClient(baseUrl))
+    public LighterApiClient(string baseUrl) : this(CreateHttpClient($"{baseUrl}{DefaultVersion}/"))
     {
     }
 
@@ -161,7 +161,7 @@ public sealed class LighterApiClient : IDisposable
         long accountIndex,
         CancellationToken cancellationToken = default)
     {
-        return await GetAsync<Account>($"account?index={accountIndex}", cancellationToken);
+        return await GetAsync<Account>($"account?by=index&value={accountIndex}", cancellationToken);
     }
 
     /// <summary>
