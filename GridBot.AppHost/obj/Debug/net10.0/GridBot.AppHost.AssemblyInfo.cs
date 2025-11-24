@@ -26,7 +26,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("GridBot.AppHost")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5be77aae8c4ab8675c9984fba37c49a1d6c197a7")]
 [assembly: System.Reflection.AssemblyProductAttribute("GridBot.AppHost")]
 [assembly: System.Reflection.AssemblyTitleAttribute("GridBot.AppHost")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

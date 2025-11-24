@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\GridBot.ServiceDefaults\GridBot.ServiceDefaults.csproj" />
+    <ProjectReference Include="..\GridBot.Lighter\GridBot.Lighter.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -402,6 +402,16 @@
           }
         }
       },
+      "GridBot.Lighter/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v10.0",
+        "compile": {
+          "bin/placeholder/GridBot.Lighter.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/GridBot.Lighter.dll": {}
+        }
+      },
       "GridBot.ServiceDefaults/1.0.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v10.0",
@@ -1041,6 +1051,11 @@
         "polly.ratelimiting.nuspec"
       ]
     },
+    "GridBot.Lighter/1.0.0": {
+      "type": "project",
+      "path": "../GridBot.Lighter/GridBot.Lighter.csproj",
+      "msbuildProject": "../GridBot.Lighter/GridBot.Lighter.csproj"
+    },
     "GridBot.ServiceDefaults/1.0.0": {
       "type": "project",
       "path": "../GridBot.ServiceDefaults/GridBot.ServiceDefaults.csproj",
@@ -1049,6 +1064,7 @@
   },
   "projectFileDependencyGroups": {
     "net10.0": [
+      "GridBot.Lighter >= 1.0.0",
       "GridBot.ServiceDefaults >= 1.0.0",
       "Microsoft.AspNetCore.OpenApi >= 10.0.0"
     ]
@@ -1096,6 +1112,9 @@
         "net10.0": {
           "targetAlias": "net10.0",
           "projectReferences": {
+            "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.Lighter\\GridBot.Lighter.csproj": {
+              "projectPath": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.Lighter\\GridBot.Lighter.csproj"
+            },
             "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.ServiceDefaults\\GridBot.ServiceDefaults.csproj": {
               "projectPath": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.ServiceDefaults\\GridBot.ServiceDefaults.csproj"
             }

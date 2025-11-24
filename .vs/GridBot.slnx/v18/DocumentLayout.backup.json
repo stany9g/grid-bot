@@ -1,7 +1,24 @@
 {
   "Version": 1,
   "WorkspaceRootPath": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\",
-  "Documents": [],
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{08C02D9F-FBCB-0509-13A1-A6EB64F8843F}|GridBot.Lighter\\GridBot.Lighter.csproj|c:\\users\\stany\\source\\repos\\plan\\gridbot\\gridbot.lighter\\signerclient.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08C02D9F-FBCB-0509-13A1-A6EB64F8843F}|GridBot.Lighter\\GridBot.Lighter.csproj|solutionrelative:gridbot.lighter\\signerclient.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{1057075E-C75C-54CD-B1F3-640AD8011051}|GridBot.ApiService\\GridBot.ApiService.csproj|c:\\users\\stany\\source\\repos\\plan\\gridbot\\gridbot.apiservice\\gridbot.apiservice.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|",
+      "RelativeMoniker": "D:0:0:{1057075E-C75C-54CD-B1F3-640AD8011051}|GridBot.ApiService\\GridBot.ApiService.csproj|solutionrelative:gridbot.apiservice\\gridbot.apiservice.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{471F68AE-3D20-40D5-55F4-C103F4FDD1C9}|GridBot.Web\\GridBot.Web.csproj|c:\\users\\stany\\source\\repos\\plan\\gridbot\\gridbot.web\\gridbot.web.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|",
+      "RelativeMoniker": "D:0:0:{471F68AE-3D20-40D5-55F4-C103F4FDD1C9}|GridBot.Web\\GridBot.Web.csproj|solutionrelative:gridbot.web\\gridbot.web.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{F18A5463-1595-D5C3-525C-A39A1BADAD80}|GridBot.AppHost\\GridBot.AppHost.csproj|c:\\users\\stany\\source\\repos\\plan\\gridbot\\gridbot.apphost\\gridbot.apphost.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|",
+      "RelativeMoniker": "D:0:0:{F18A5463-1595-D5C3-525C-A39A1BADAD80}|GridBot.AppHost\\GridBot.AppHost.csproj|solutionrelative:gridbot.apphost\\gridbot.apphost.csproj||{FA3CD31E-987B-443A-9B81-186104E8DAC1}|"
+    }
+  ],
   "DocumentGroupContainers": [
     {
       "Orientation": 0,
@@ -9,7 +26,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": -1,
+          "SelectedChildIndex": 20,
           "Children": [
             {
               "$type": "Bookmark",
@@ -90,6 +107,58 @@
             {
               "$type": "Bookmark",
               "Name": "ST:129:0:{13b12e3e-c1b4-4539-9371-4fe9a0d523fc}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "SignerClient.cs",
+              "DocumentMoniker": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.Lighter\\SignerClient.cs",
+              "RelativeDocumentMoniker": "GridBot.Lighter\\SignerClient.cs",
+              "ToolTip": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.Lighter\\SignerClient.cs",
+              "RelativeToolTip": "GridBot.Lighter\\SignerClient.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABUAAAARAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-11-24T10:33:57.9Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "GridBot.Web",
+              "DocumentMoniker": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.Web\\GridBot.Web.csproj",
+              "RelativeDocumentMoniker": "GridBot.Web\\GridBot.Web.csproj",
+              "ToolTip": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.Web\\GridBot.Web.csproj",
+              "RelativeToolTip": "GridBot.Web\\GridBot.Web.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABEAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2025-11-24T10:01:33.017Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "GridBot.ApiService",
+              "DocumentMoniker": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.ApiService\\GridBot.ApiService.csproj",
+              "RelativeDocumentMoniker": "GridBot.ApiService\\GridBot.ApiService.csproj",
+              "ToolTip": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.ApiService\\GridBot.ApiService.csproj",
+              "RelativeToolTip": "GridBot.ApiService\\GridBot.ApiService.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABIAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2025-11-24T10:01:31.196Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "GridBot.AppHost",
+              "DocumentMoniker": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.AppHost\\GridBot.AppHost.csproj",
+              "RelativeDocumentMoniker": "GridBot.AppHost\\GridBot.AppHost.csproj",
+              "ToolTip": "C:\\Users\\stany\\source\\repos\\plan\\GridBot\\GridBot.AppHost\\GridBot.AppHost.csproj",
+              "RelativeToolTip": "GridBot.AppHost\\GridBot.AppHost.csproj",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000758|",
+              "WhenOpened": "2025-11-24T10:01:28.928Z",
+              "EditorCaption": ""
             }
           ]
         }
