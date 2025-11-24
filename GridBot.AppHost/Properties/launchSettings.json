@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "https": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://gridbot.dev.localhost:17018;http://gridbot.dev.localhost:15225",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "https://localhost:21192",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "https://localhost:23147",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "https://localhost:22027"
+      }
+    },
+    "http": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "http://gridbot.dev.localhost:15225",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:19286",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "http://localhost:18108",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "http://localhost:20047"
+      }
+    }
+  }
+}
