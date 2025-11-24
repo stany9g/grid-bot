@@ -21,12 +21,7 @@ public sealed class LighterApiClient : IDisposable
     /// </summary>
     public const string DefaultBaseUrl = "https://mainnet.zklighter.elliot.ai/api/v1/";
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="LighterApiClient"/> class with default settings.
-    /// </summary>
-    public LighterApiClient() : this(DefaultBaseUrl)
-    {
-    }
+
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LighterApiClient"/> class with a custom base URL.
@@ -309,7 +304,7 @@ public sealed class LighterApiClient : IDisposable
             Timeout = TimeSpan.FromSeconds(30)
         };
 
-        client.DefaultRequestHeaders.Add("User-Agent", "GridBot.Lighter/1.0");
+        //client.DefaultRequestHeaders.Add("User-Agent", "GridBot.Lighter/1.0");
         client.DefaultRequestHeaders.Add("Accept", "application/json");
 
         return client;

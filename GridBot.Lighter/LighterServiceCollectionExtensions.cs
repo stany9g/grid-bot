@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using System.Buffers.Text;
 
 namespace GridBot.Lighter;
 
@@ -37,11 +38,11 @@ public static class LighterServiceCollectionExtensions
             throw new InvalidOperationException(
                 $"Invalid Lighter configuration: {validationError}");
 
-        // Register LighterClient as a singleton
-        services.AddSingleton(sp =>
+        // Register ILighterClient as a singleton
+        services.AddSingleton<ILighterClient>(sp =>
         {
             var opts = sp.GetRequiredService<IOptions<LighterOptions>>().Value;
-            var client = new LighterClient();
+            var client = new LighterClient(opts.ApiUrl);
 
             // Initialize synchronously (consider using async factory in production)
             var initTask = client.Signer.InitializeAsync(
@@ -83,9 +84,9 @@ public static class LighterServiceCollectionExtensions
             throw new InvalidOperationException(
                 $"Invalid Lighter configuration: {validationError}");
 
-        services.AddSingleton(sp =>
+        services.AddSingleton<ILighterClient>(sp =>
         {
-            var client = new LighterClient();
+            var client = new LighterClient(options.ApiUrl);
 
             var initTask = client.Signer.InitializeAsync(
                 url: options.ApiUrl,

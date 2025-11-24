@@ -8,7 +8,7 @@ namespace GridBot.Lighter;
 /// Unified client for the Lighter protocol that combines local signing with API operations.
 /// Provides high-level convenience methods for common workflows.
 /// </summary>
-public sealed class LighterClient : IDisposable
+public sealed class LighterClient : ILighterClient
 {
     private readonly SignerClient _signer;
     private readonly LighterApiClient _api;
@@ -27,7 +27,7 @@ public sealed class LighterClient : IDisposable
     /// <summary>
     /// Initializes a new instance of the <see cref="LighterClient"/> class with default settings.
     /// </summary>
-    public LighterClient() : this(new LighterApiClient())
+    public LighterClient(string baseUrl) : this(new LighterApiClient(baseUrl))
     {
     }
 
