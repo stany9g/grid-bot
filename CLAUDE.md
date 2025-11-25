@@ -26,6 +26,15 @@ When adding features or making changes:
 - Avoid adding layers of indirection without clear benefit
 - Keep functions and classes focused on a single responsibility
 
+## Code Style Guidelines
+
+### C# Coding Standards
+
+**Region Directives**
+- Never use `#region` directives - they obscure code structure and violate the KISS principle
+- Use meaningful class/interface organization and file structure instead
+- If a class needs regions, it's too large - split it into multiple focused classes
+
 ## Architecture
 
 ### Project Structure

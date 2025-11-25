@@ -1,47 +1,37 @@
-using GridBot.Lighter.Api;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using GridBot.Lighter.Models;
 using GridBot.Lighter.Models.Api;
 
 namespace GridBot.Lighter;
 
 /// <summary>
-/// Unified client for the Lighter protocol that combines local signing with API operations.
-/// Provides high-level convenience methods for common workflows.
+/// Client for Lighter command operations (orders and transactions).
+/// Handles signing and submission of write operations.
 /// </summary>
-public sealed class LighterClient : ILighterClient
+public sealed class LighterCommandClient : ILighterCommandClient
 {
     private readonly SignerClient _signer;
-    private readonly LighterApiClient _api;
+    private readonly ILighterQueryClient _queryClient;
+    private readonly HttpClient _writeHttpClient;
+    private readonly JsonSerializerOptions _jsonOptions;
     private bool _disposed;
 
     /// <summary>
-    /// Gets the underlying SignerClient for direct access to signing operations.
+    /// Initializes a new instance of the <see cref="LighterCommandClient"/> class.
     /// </summary>
-    public SignerClient Signer => _signer;
-
-    /// <summary>
-    /// Gets the underlying API client for direct access to API operations.
-    /// </summary>
-    public LighterApiClient Api => _api;
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="LighterClient"/> class with default settings.
-    /// </summary>
-    public LighterClient(string baseUrl) : this(new LighterApiClient(baseUrl))
+    /// <param name="queryClient">The query client for fetching nonce data.</param>
+    /// <param name="writeHttpClient">The HTTP client for write operations.</param>
+    /// <param name="signer">The signer client for signing transactions.</param>
+    public LighterCommandClient(ILighterQueryClient queryClient, HttpClient writeHttpClient, SignerClient signer)
     {
+        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _writeHttpClient = writeHttpClient ?? throw new ArgumentNullException(nameof(writeHttpClient));
+        _signer = signer ?? throw new ArgumentNullException(nameof(signer));
+        _jsonOptions = CreateJsonOptions();
     }
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="LighterClient"/> class with a custom API client.
-    /// </summary>
-    /// <param name="apiClient">The API client to use for REST operations.</param>
-    public LighterClient(LighterApiClient apiClient)
-    {
-        _api = apiClient ?? throw new ArgumentNullException(nameof(apiClient));
-        _signer = new SignerClient();
-    }
-
-    #region High-Level Order Operations
 
     /// <summary>
     /// Creates and submits a limit, market, stop-loss, or take-profit order in a single operation.
@@ -63,7 +53,7 @@ public sealed class LighterClient : ILighterClient
             throw new LighterApiException($"Failed to sign order: {error}");
 
         // Submit to API
-        return await _api.SendTransactionAsync(
+        return await SendTransactionAsync(
             TransactionTypes.CreateOrder,
             txInfo!,
             priceProtection,
@@ -88,7 +78,7 @@ public sealed class LighterClient : ILighterClient
             throw new LighterApiException($"Failed to sign grouped orders: {error}");
 
         // Submit to API
-        return await _api.SendTransactionAsync(
+        return await SendTransactionAsync(
             TransactionTypes.CreateGroupedOrders,
             txInfo!,
             cancellationToken: cancellationToken);
@@ -114,7 +104,7 @@ public sealed class LighterClient : ILighterClient
             throw new LighterApiException($"Failed to sign order cancellation: {result.error}");
 
         // Submit to API
-        return await _api.SendTransactionAsync(
+        return await SendTransactionAsync(
             TransactionTypes.CancelOrder,
             result.txInfo!,
             cancellationToken: cancellationToken);
@@ -140,7 +130,7 @@ public sealed class LighterClient : ILighterClient
             throw new LighterApiException($"Failed to sign cancel all orders: {result.error}");
 
         // Submit to API
-        return await _api.SendTransactionAsync(
+        return await SendTransactionAsync(
             TransactionTypes.CancelAllOrders,
             result.txInfo!,
             cancellationToken: cancellationToken);
@@ -164,7 +154,7 @@ public sealed class LighterClient : ILighterClient
             throw new LighterApiException($"Failed to sign order modification: {error}");
 
         // Submit to API
-        return await _api.SendTransactionAsync(
+        return await SendTransactionAsync(
             TransactionTypes.ModifyOrder,
             txInfo!,
             cancellationToken: cancellationToken);
@@ -188,98 +178,13 @@ public sealed class LighterClient : ILighterClient
             throw new LighterApiException($"Failed to sign leverage update: {error}");
 
         // Submit to API
-        return await _api.SendTransactionAsync(
+        return await SendTransactionAsync(
             TransactionTypes.UpdateLeverage,
             txInfo!,
             cancellationToken: cancellationToken);
     }
 
-    #endregion
 
-    #region Account & Market Data Operations
-
-    /// <summary>
-    /// Gets account information including positions and balances.
-    /// </summary>
-    /// <param name="accountIndex">Account index.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Account details.</returns>
-    public Task<Account> GetAccountAsync(
-        long accountIndex,
-        CancellationToken cancellationToken = default)
-        => _api.GetAccountAsync(accountIndex, cancellationToken);
-
-    /// <summary>
-    /// Gets account metadata including public key and status.
-    /// </summary>
-    /// <param name="accountIndex">Account index.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Account metadata.</returns>
-    public Task<AccountMetadata> GetAccountMetadataAsync(
-        long accountIndex,
-        CancellationToken cancellationToken = default)
-        => _api.GetAccountMetadataAsync(accountIndex, cancellationToken);
-
-    /// <summary>
-    /// Gets active orders for an account.
-    /// </summary>
-    /// <param name="accountIndex">Account index.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>List of active orders.</returns>
-    public Task<List<Order>> GetActiveOrdersAsync(
-        long accountIndex,
-        CancellationToken cancellationToken = default)
-        => _api.GetActiveOrdersAsync(accountIndex, cancellationToken);
-
-    /// <summary>
-    /// Gets all order book metadata for all markets.
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>List of order books.</returns>
-    public Task<List<OrderBook>> GetOrderBooksAsync(CancellationToken cancellationToken = default)
-        => _api.GetOrderBooksAsync(cancellationToken);
-
-    /// <summary>
-    /// Gets detailed order book data for a specific market.
-    /// </summary>
-    /// <param name="marketId">Market ID.</param>
-    /// <param name="depth">Maximum number of price levels to return (optional).</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Order book details with bid/ask levels.</returns>
-    public Task<OrderBookDetail> GetOrderBookDetailsAsync(
-        int marketId,
-        int? depth = null,
-        CancellationToken cancellationToken = default)
-        => _api.GetOrderBookDetailsAsync(marketId, depth, cancellationToken);
-
-    /// <summary>
-    /// Gets a transaction by its hash or sequence index.
-    /// </summary>
-    /// <param name="hashOrIndex">Transaction hash (0x...) or sequence index.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Transaction details.</returns>
-    public Task<Tx> GetTransactionAsync(
-        string hashOrIndex,
-        CancellationToken cancellationToken = default)
-        => _api.GetTransactionAsync(hashOrIndex, cancellationToken);
-
-    #endregion
-
-    #region Nonce Management
-
-    /// <summary>
-    /// Gets the next nonce for an account from the server.
-    /// Useful for nonce recovery and synchronization.
-    /// </summary>
-    /// <param name="accountIndex">Account index.</param>
-    /// <param name="apiKeyIndex">API key index.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Response containing the next nonce value.</returns>
-    public Task<NextNonce> GetNextNonceAsync(
-        long accountIndex,
-        int apiKeyIndex,
-        CancellationToken cancellationToken = default)
-        => _api.GetNextNonceAsync(accountIndex, apiKeyIndex, cancellationToken);
 
     /// <summary>
     /// Synchronizes the local signer nonce with the server.
@@ -294,14 +199,12 @@ public sealed class LighterClient : ILighterClient
         int apiKeyIndex,
         CancellationToken cancellationToken = default)
     {
-        var response = await _api.GetNextNonceAsync(accountIndex, apiKeyIndex, cancellationToken);
+        var response = await _queryClient.GetNextNonceAsync(accountIndex, apiKeyIndex, cancellationToken);
         _signer.SetNonce(response.Nonce);
         return response.Nonce;
     }
 
-    #endregion
 
-    #region Key Management
 
     /// <summary>
     /// Generates a new API key pair for signing transactions.
@@ -310,9 +213,122 @@ public sealed class LighterClient : ILighterClient
     public static Task<(string? privateKey, string? publicKey, string? error)> GenerateApiKeyAsync(string? seed = null)
         => SignerClient.GenerateApiKeyAsync(seed);
 
-    #endregion
 
-    #region IDisposable
+
+    /// <summary>
+    /// Submits a single signed transaction to the Lighter API.
+    /// </summary>
+    /// <param name="txType">Transaction type (see <see cref="TransactionTypes"/>).</param>
+    /// <param name="txInfo">Signed transaction info JSON string from SignerClient.</param>
+    /// <param name="priceProtection">Enable price protection (optional).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Response containing transaction hash and predicted execution time.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    internal async Task<RespSendTx> SendTransactionAsync(
+        int txType,
+        string txInfo,
+        bool? priceProtection = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(txInfo))
+            throw new ArgumentException("Transaction info cannot be null or empty.", nameof(txInfo));
+
+        var request = new
+        {
+            tx_type = txType,
+            tx_info = txInfo,
+            price_protection = priceProtection
+        };
+
+        var response = await PostAsync<RespSendTx>("sendTx", request, cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Transaction submission failed", response.Code);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Submits multiple signed transactions in a batch to the Lighter API.
+    /// </summary>
+    /// <param name="txTypes">Array of transaction types.</param>
+    /// <param name="txInfos">Array of signed transaction info JSON strings.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Response containing transaction hashes and predicted execution times.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    internal async Task<RespSendTxBatch> SendTransactionBatchAsync(
+        int[] txTypes,
+        string[] txInfos,
+        CancellationToken cancellationToken = default)
+    {
+        if (txTypes == null || txTypes.Length == 0)
+            throw new ArgumentException("Transaction types cannot be null or empty.", nameof(txTypes));
+
+        if (txInfos == null || txInfos.Length == 0)
+            throw new ArgumentException("Transaction infos cannot be null or empty.", nameof(txInfos));
+
+        if (txTypes.Length != txInfos.Length)
+            throw new ArgumentException("Transaction types and infos arrays must have the same length.");
+
+        var request = new
+        {
+            tx_types = string.Join(",", txTypes),
+            tx_infos = string.Join(",", txInfos)
+        };
+
+        var response = await PostAsync<RespSendTxBatch>("sendTxBatch", request, cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Batch transaction submission failed", response.Code);
+
+        return response;
+    }
+
+
+
+    private async Task<T> PostAsync<T>(string endpoint, object request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await _writeHttpClient.PostAsJsonAsync(endpoint, request, _jsonOptions, cancellationToken);
+            await EnsureSuccessStatusCodeAsync(response);
+
+            return await response.Content.ReadFromJsonAsync<T>(_jsonOptions, cancellationToken)
+                ?? throw new LighterApiException("Failed to deserialize response");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new LighterApiException($"HTTP request failed: {ex.Message}", ex);
+        }
+        catch (TaskCanceledException ex)
+        {
+            throw new LighterApiException("Request timed out", ex);
+        }
+    }
+
+    private static async Task EnsureSuccessStatusCodeAsync(HttpResponseMessage response)
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            var content = await response.Content.ReadAsStringAsync();
+            throw new LighterApiException(
+                $"API request failed with status {(int)response.StatusCode}: {content}",
+                (int)response.StatusCode);
+        }
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        return new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNameCaseInsensitive = true,
+            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
+        };
+    }
+
+
 
     /// <summary>
     /// Disposes the client and releases resources.
@@ -322,9 +338,8 @@ public sealed class LighterClient : ILighterClient
         if (_disposed) return;
 
         _signer?.Dispose();
-        _api?.Dispose();
+        _writeHttpClient?.Dispose();
         _disposed = true;
     }
 
-    #endregion
 }

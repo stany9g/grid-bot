@@ -64,7 +64,6 @@ internal static partial class NativeMethods
         }
     }
 
-    #region Client Management
 
     /// <summary>
     /// Generates a new API key pair for signing transactions.
@@ -92,9 +91,7 @@ internal static partial class NativeMethods
         int apiKeyIndex,
         long accountIndex);
 
-    #endregion
 
-    #region Order Operations
 
     /// <summary>
     /// Signs a single order creation request.
@@ -185,9 +182,7 @@ internal static partial class NativeMethods
         long newPrice,
         long nonce);
 
-    #endregion
 
-    #region Position Management
 
     /// <summary>
     /// Signs a request to update position leverage settings.
@@ -204,5 +199,4 @@ internal static partial class NativeMethods
         int leverage,
         long nonce);
 
-    #endregion
 }

@@ -1,7 +1,5 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
-using System.Buffers.Text;
 
 namespace GridBot.Lighter;
 
@@ -21,49 +19,22 @@ public static class LighterServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        // Bind configuration
-        var section = configuration.GetSection(LighterOptions.SectionName);
-        services.Configure<LighterOptions>(section);
-
-        // Validate configuration
         var options = new LighterOptions();
-        section.Bind(options);
-
-        if (options == null)
-            throw new InvalidOperationException(
-                $"Missing '{LighterOptions.SectionName}' configuration section in appsettings.json");
+        configuration.GetSection(LighterOptions.SectionName).Bind(options);
 
         var validationError = options.Validate();
         if (validationError != null)
-            throw new InvalidOperationException(
-                $"Invalid Lighter configuration: {validationError}");
+            throw new InvalidOperationException($"Lighter configuration is invalid: {validationError}");
 
-        // Register ILighterClient as a singleton
-        services.AddSingleton<ILighterClient>(sp =>
+        return services.AddLighterClient(opts =>
         {
-            var opts = sp.GetRequiredService<IOptions<LighterOptions>>().Value;
-            var client = new LighterClient(opts.ApiUrl);
-
-            // Initialize synchronously (consider using async factory in production)
-            var initTask = client.Signer.InitializeAsync(
-                url: opts.ApiUrl,
-                privateKey: opts.PrivateKey,
-                chainId: opts.ChainId,
-                apiKeyIndex: opts.ApiKeyIndex,
-                accountIndex: opts.AccountIndex,
-                initialNonce: opts.InitialNonce
-            );
-
-            initTask.Wait();
-
-            if (initTask.Result != null)
-                throw new InvalidOperationException(
-                    $"Failed to initialize Lighter client: {initTask.Result}");
-
-            return client;
+            opts.ApiUrl = options.ApiUrl;
+            opts.PrivateKey = options.PrivateKey;
+            opts.ChainId = options.ChainId;
+            opts.ApiKeyIndex = options.ApiKeyIndex;
+            opts.AccountIndex = options.AccountIndex;
+            opts.InitialNonce = options.InitialNonce;
         });
-
-        return services;
     }
 
     /// <summary>
@@ -72,6 +43,7 @@ public static class LighterServiceCollectionExtensions
     /// <param name="services">The service collection.</param>
     /// <param name="configureOptions">Action to configure options.</param>
     /// <returns>The service collection for chaining.</returns>
+    /// <exception cref="InvalidOperationException">Thrown if configuration is invalid or SignerClient initialization fails.</exception>
     public static IServiceCollection AddLighterClient(
         this IServiceCollection services,
         Action<LighterOptions> configureOptions)
@@ -81,29 +53,45 @@ public static class LighterServiceCollectionExtensions
 
         var validationError = options.Validate();
         if (validationError != null)
-            throw new InvalidOperationException(
-                $"Invalid Lighter configuration: {validationError}");
+            throw new InvalidOperationException($"Lighter configuration is invalid: {validationError}");
 
-        services.AddSingleton<ILighterClient>(sp =>
+        // Register query client with HttpClientFactory
+        services.AddHttpClient<ILighterQueryClient, LighterQueryClient>((serviceProvider, client) =>
         {
-            var client = new LighterClient(options.ApiUrl);
+            client.BaseAddress = new Uri($"{options.ApiUrl}/api/v1/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.Add("Accept", "application/json");
+        });
 
-            var initTask = client.Signer.InitializeAsync(
-                url: options.ApiUrl,
-                privateKey: options.PrivateKey,
-                chainId: options.ChainId,
-                apiKeyIndex: options.ApiKeyIndex,
-                accountIndex: options.AccountIndex,
-                initialNonce: options.InitialNonce
-            );
+        // Register write HttpClient separately
+        services.AddHttpClient("LighterWriteClient", client =>
+        {
+            client.BaseAddress = new Uri($"{options.ApiUrl}/api/v1/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.Add("Accept", "application/json");
+        });
 
-            initTask.Wait();
+        // Register command client as singleton
+        services.AddSingleton<ILighterCommandClient>(serviceProvider =>
+        {
+            var queryClient = serviceProvider.GetRequiredService<ILighterQueryClient>();
+            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+            var writeClient = httpClientFactory.CreateClient("LighterWriteClient");
 
-            if (initTask.Result != null)
-                throw new InvalidOperationException(
-                    $"Failed to initialize Lighter client: {initTask.Result}");
+            var signer = new SignerClient();
+            var error = signer.InitializeAsync(
+                options.ApiUrl,
+                options.PrivateKey,
+                options.ChainId,
+                options.ApiKeyIndex,
+                options.AccountIndex,
+                options.InitialNonce
+            ).GetAwaiter().GetResult();
 
-            return client;
+            if (error != null)
+                throw new InvalidOperationException($"Failed to initialize SignerClient: {error}");
+
+            return new LighterCommandClient(queryClient, writeClient, signer);
         });
 
         return services;

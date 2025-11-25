@@ -1,4 +1,6 @@
 using GridBot.Lighter;
+using Scalar.AspNetCore;
+
 public partial class Program
 {
     private static void Main(string[] args)
@@ -22,21 +24,16 @@ public partial class Program
         // Configure the HTTP request pipeline.
         app.UseExceptionHandler();
 
-        if (app.Environment.IsDevelopment())
-        {
+       
             app.MapOpenApi();
-            app.UseSwaggerUI(options =>
-            {
-                options.SwaggerEndpoint("/openapi/v1.json", "GridBot API v1");
-            });
-        }
+            app.MapScalarApiReference();
 
 
         var lighter = app.MapGroup("/api/lighter")
             .WithTags("Lighter Trading");
 
         // Order Management Endpoints
-        lighter.MapPost("/orders", async (GridBot.Lighter.Models.CreateOrderRequest request, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapPost("/orders", async (GridBot.Lighter.Models.CreateOrderRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
@@ -47,7 +44,7 @@ public partial class Program
                 var result = await client.CreateOrderAsync(request, cancellationToken: ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -66,7 +63,7 @@ public partial class Program
         .WithSummary("Create a new order")
         .WithDescription("Creates and submits a limit, market, stop-loss, or take-profit order.");
 
-        lighter.MapPost("/orders/grouped", async (GridBot.Lighter.Models.CreateGroupedOrdersRequest request, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapPost("/orders/grouped", async (GridBot.Lighter.Models.CreateGroupedOrdersRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
@@ -77,7 +74,7 @@ public partial class Program
                 var result = await client.CreateGroupedOrdersAsync(request, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -96,14 +93,14 @@ public partial class Program
         .WithSummary("Create grouped orders")
         .WithDescription("Creates and submits grouped orders (OCO, OTO, OTOCO).");
 
-        lighter.MapDelete("/orders/{marketId}/{orderId}", async (int marketId, long orderId, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapDelete("/orders/{marketId}/{orderId}", async ([Microsoft.AspNetCore.Mvc.FromRoute] int marketId, [Microsoft.AspNetCore.Mvc.FromRoute] long orderId, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.CancelOrderAsync(marketId, orderId, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -122,14 +119,14 @@ public partial class Program
         .WithSummary("Cancel a specific order")
         .WithDescription("Cancels a specific order by market ID and order ID.");
 
-        lighter.MapDelete("/orders/{marketId}/cancel-all", async (int marketId, long timeInForce, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapDelete("/orders/{marketId}/cancel-all", async ([Microsoft.AspNetCore.Mvc.FromRoute] int marketId, [Microsoft.AspNetCore.Mvc.FromQuery] long timeInForce, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.CancelAllOrdersAsync(marketId, timeInForce, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -148,7 +145,7 @@ public partial class Program
         .WithSummary("Cancel all orders in a market")
         .WithDescription("Cancels all orders in a specific market.");
 
-        lighter.MapPut("/orders", async (GridBot.Lighter.Models.ModifyOrderRequest request, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapPut("/orders", async (GridBot.Lighter.Models.ModifyOrderRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
@@ -159,7 +156,7 @@ public partial class Program
                 var result = await client.ModifyOrderAsync(request, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -179,14 +176,14 @@ public partial class Program
         .WithDescription("Modifies an existing order's price, size, or other parameters.");
 
         // Account Management Endpoints
-        lighter.MapGet("/account/{accountIndex}", async ( long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetAccountAsync(accountIndex, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -205,14 +202,14 @@ public partial class Program
         .WithSummary("Get account information")
         .WithDescription("Gets account information including positions and balances.");
 
-        lighter.MapGet("/account/{accountIndex}/metadata", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}/metadata", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetAccountMetadataAsync(accountIndex, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -231,14 +228,14 @@ public partial class Program
         .WithSummary("Get account metadata")
         .WithDescription("Gets account metadata including public key and status.");
 
-        lighter.MapGet("/account/{accountIndex}/orders", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}/orders", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetActiveOrdersAsync(accountIndex, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -258,14 +255,14 @@ public partial class Program
         .WithDescription("Gets all active orders for an account.");
 
         // Market Data Endpoints
-        lighter.MapGet("/markets", async (GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/markets", async (GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetOrderBooksAsync(ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -284,14 +281,14 @@ public partial class Program
         .WithSummary("Get all markets")
         .WithDescription("Gets order book metadata for all markets.");
 
-        lighter.MapGet("/markets/{marketId}/orderbook", async (int marketId, int? depth, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/markets/{marketId}/orderbook", async ([Microsoft.AspNetCore.Mvc.FromRoute] int marketId, [Microsoft.AspNetCore.Mvc.FromQuery] int? depth, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetOrderBookDetailsAsync(marketId, depth, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -311,14 +308,14 @@ public partial class Program
         .WithDescription("Gets detailed order book data for a specific market.");
 
         // Transaction Endpoints
-        lighter.MapGet("/transactions/{hashOrIndex}", async (string hashOrIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/transactions/{hashOrIndex}", async ([Microsoft.AspNetCore.Mvc.FromRoute] string hashOrIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetTransactionAsync(hashOrIndex, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -338,7 +335,7 @@ public partial class Program
         .WithDescription("Gets a transaction by its hash or sequence index.");
 
         // Leverage Management Endpoints
-        lighter.MapPut("/leverage", async (GridBot.Lighter.Models.UpdateLeverageRequest request, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapPut("/leverage", async (GridBot.Lighter.Models.UpdateLeverageRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
@@ -349,7 +346,7 @@ public partial class Program
                 var result = await client.UpdateLeverageAsync(request, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -369,14 +366,14 @@ public partial class Program
         .WithDescription("Updates the leverage for a position in a specific market.");
 
         // Nonce Management Endpoints
-        lighter.MapGet("/nonce", async (long accountIndex, int apiKeyIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapGet("/nonce", async ([Microsoft.AspNetCore.Mvc.FromQuery] long accountIndex, [Microsoft.AspNetCore.Mvc.FromQuery] int apiKeyIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.GetNextNonceAsync(accountIndex, apiKeyIndex, ct);
                 return Results.Ok(result);
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
@@ -395,14 +392,14 @@ public partial class Program
         .WithSummary("Get next nonce")
         .WithDescription("Gets the next nonce for an account from the server.");
 
-        lighter.MapPost("/nonce/sync", async (long accountIndex, int apiKeyIndex, GridBot.Lighter.ILighterClient client, CancellationToken ct) =>
+        lighter.MapPost("/nonce/sync", async ([Microsoft.AspNetCore.Mvc.FromQuery] long accountIndex, [Microsoft.AspNetCore.Mvc.FromQuery] int apiKeyIndex, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
                 var result = await client.SyncNonceAsync(accountIndex, apiKeyIndex, ct);
                 return Results.Ok(new { nonce = result });
             }
-            catch (GridBot.Lighter.Api.LighterApiException ex)
+            catch (GridBot.Lighter.LighterApiException ex)
             {
                 return Results.Problem(
                     detail: ex.Message,
