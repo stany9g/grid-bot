@@ -3,7 +3,9 @@
     "allow": [
       "WebFetch(domain:github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:apidocs.lighter.xyz)"
+      "WebFetch(domain:apidocs.lighter.xyz)",
+      "WebSearch",
+      "Bash(tree:*)"
     ],
     "deny": [],
     "ask": []

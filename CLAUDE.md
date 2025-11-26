@@ -4,217 +4,167 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-GridBot is a cryptocurrency trading bot built as a .NET Aspire distributed application using .NET 10.0 and containers. The application is designed to automate cryptocurrency trading operations while following best practices for distributed systems.
+Project Overview: Adaptive Liquidity & Trend Engine (ALTE)
+Internal Codename: Nexus
+1. The Vision
+We are building an autonomous trading system that bridges the gap between High-Frequency Market Making and Long-Term Trend Following.
+Our goal is to create a "Smart Agent" that operates continuously within the crypto markets. Unlike static grid bots that degrade in trending markets, the ALTE system is designed to adapt its behavior in real-time, aiming to capture the high yield of volatility (scalping) while preserving the upside potential of a bull run (holding).
+2. Core Capabilities
+We aim to have a system that possesses four distinct "intelligences" working in unison:
+A. Dynamic Grid Geometry (The Market Maker)
+The system will not use fixed price levels. Instead, it will function as an elastic market maker.
+Volatility Adaptation: The bot will constantly read the ATR (Average True Range). If the market is quiet, it tightens the grid to capture small profits (0.2% moves). If the market is volatile, it expands the grid to capture large swings (2.0% moves) and reduce fee drag.
+Order Book Awareness: The bot will analyze the order book depth to place limit orders at high-probability liquidity clusters (support/resistance zones) rather than arbitrary math-based intervals.
+B. Smart Inventory Management (The Trend Follower)
+This is the system's primary differentiator. It dynamically alters the ratio of Base Asset (Crypto) vs. Quote Asset (USDT/USD) held in the portfolio based on the macro trend.
+Bull Trend Behavior: When a strong uptrend is detected (via Moving Averages/MACD), the bot shifts to an 80/20 Skew. It slows down selling and "trails" the buy orders upward, ensuring we remain heavily invested to capture asset appreciation.
+Bear Trend Behavior: When a downtrend is confirmed, the bot shifts to a 20/80 Skew. It sells bounces aggressively to accumulate cash and widens buy orders significantly to avoid "catching a falling knife."
+C. The "Infinite Upside" Module
+To solve the problem of selling too early (Impermanent Loss), the system will feature a "Trailing Grid" mechanism.
+Logic: As the price breaches the top of our grid, the entire grid structure moves up. The bot is forbidden from selling the last 10-20% of the position, ensuring we always have a "Moon Bag" if the asset goes parabolic.
+D. Sentinel Risk Protection
+A hard-coded safety layer that overrides all other logic to protect capital.
+Flash Crash Pausing: If the price drops >X% in Y minutes, buying is suspended immediately to allow the market to find a bottom.
+Liquidity Check: The bot will assess volume. If volume dries up (signaling a potential trap or dead coin), the bot widens spreads to minimize risk.
+3. The Logic Engine (How it Thinks)
+We aim to build a decision loop that runs every few seconds:
+Analyze State: What is the current trend? What is the current volatility?
+Check Inventory: Do we have too much coin (risk) or too much cash (opportunity cost) based on the current Trend State?
+Optimize Orders:
+If Inventory is optimal: Adjust grid lines to match current volatility.
+If Inventory is wrong: Execute rebalancing trades (e.g., if the trend flips bearish, sell 30% of the stack immediately to reach the new safety target).
+Execute: Place/Cancel limit orders via API.
+4. Target Outcome (The "Definition of Done")
+We will know the project is successful when we have a functioning bot that:
+Outperforms "Buy & Hold" in sideways and bear markets by accumulating more units of the asset.
+Matches (or closely trails) "Buy & Hold" in bull markets by refusing to sell its entire stack early.
+Requires minimal human intervention, automatically adjusting its own parameters (grid width, inventory skew, risk tolerance) as the market cycles between calm, pump, and dump.
+5. Summary
+In short, we are not building a bot that just "buys low and sells high" within a box. We are building a smart asset manager that knows when to act like a Scalper (harvesting profit) and when to act like an Investor (holding for growth).
 
-The project follows the .NET Aspire architecture pattern with service defaults, orchestration, and multiple project components.
+## Technical stack
+- .NET 10
+- Aspire 13
+- ASP.NET Core
+- Blazor
+- Lighter DEX (decentralized exchange)
 
 ## Development Principles
 
 **KISS - Keep It Simple Stupid**
 
-This project emphasizes simplicity and clean code above all else:
+- Avoid complexity; use the simplest solution that works
+- Minimal abstractions; only create them when they provide clear value, but always use Interfaces for the Services
+- Direct solutions over clever ones
+- If something feels complex, simplify it
 
-- **Avoid Complexity**: If a simpler solution exists, use it. Don't over-engineer.
-- **Clean Code**: Code should be self-documenting and easy to understand.
-- **Minimal Abstractions**: Only create abstractions when they provide clear value.
-- **Direct Solutions**: Prefer straightforward implementations over clever ones.
-- **Question Complexity**: If something feels complex, it probably is. Simplify it.
+**Code Style**
 
-When adding features or making changes:
-- Choose the simplest approach that solves the problem
-- Favor readability over premature optimization
-- Avoid adding layers of indirection without clear benefit
-- Keep functions and classes focused on a single responsibility
-
-## Code Style Guidelines
-
-### C# Coding Standards
-
-**Region Directives**
-- Never use `#region` directives - they obscure code structure and violate the KISS principle
-- Use meaningful class/interface organization and file structure instead
-- If a class needs regions, it's too large - split it into multiple focused classes
+- Never use `#region` directives - they obscure code structure
+- If a class needs regions, it's too large - split it
 
 ## Architecture
 
 ### Project Structure
 
-The solution consists of four main projects:
+```
+GridBot/
+├── GridBot.AppHost/           # Aspire orchestration (entry point)
+├── GridBot.ApiService/        # Backend API - Lighter trading endpoints
+├── GridBot.Lighter/           # Lighter DEX client library (P/Invoke + REST)
+├── GridBot.Web/               # Blazor Server frontend
+└── GridBot.ServiceDefaults/   # Shared Aspire defaults (telemetry, health)
+```
 
-1. **GridBot.AppHost** - Aspire orchestration host that defines and manages the distributed application
-   - Configures service discovery, health checks, and dependencies
-   - Defines Redis cache resource
-   - Orchestrates startup order: Redis → ApiService → Web
-   - Entry point: `AppHost.cs`
+### Key Components
 
-2. **GridBot.ApiService** - Backend API service
-   - Minimal API with OpenAPI support
-   - Exposes `/weatherforecast` endpoint (sample)
-   - Uses service defaults for telemetry, health checks, and resilience
-   - Entry point: `Program.cs`
+**GridBot.Lighter** - Core trading library with two layers:
+- `SignerClient` - P/Invoke wrapper for native signing library (signer-amd64.dll/so)
+- `LighterQueryClient` / `LighterCommandClient` - REST API clients for Lighter DEX
+- `ILighterQueryClient` - Read operations (account, orders, markets)
+- `ILighterCommandClient` - Write operations (create/cancel/modify orders)
 
-3. **GridBot.Web** - Blazor Server frontend
-   - Interactive server-side Blazor components
-   - Consumes ApiService via `WeatherApiClient`
-   - Uses Redis for output caching
-   - Service discovery resolves `https+http://apiservice`
-   - Entry point: `Program.cs`
-   - Components located in `GridBot.Web/Components/`
+**GridBot.ApiService** - Exposes Lighter operations via REST:
+- `/api/lighter/orders` - Order management (create, modify, cancel)
+- `/api/lighter/account/{id}` - Account info and active orders
+- `/api/lighter/markets` - Market data and order books
+- `/api/lighter/leverage` - Position leverage management
+- `/api/lighter/nonce` - Nonce synchronization
 
-4. **GridBot.ServiceDefaults** - Shared library for cross-cutting concerns
-   - Configures OpenTelemetry (metrics, traces, logs)
-   - Provides service discovery and HTTP client defaults
-   - Defines health check endpoints (`/health`, `/alive`)
-   - Adds standard resilience handlers
-   - Key file: `Extensions.cs`
+### Service Registration
 
-### Service Communication
+Services are registered via dependency injection in Program.cs:
+```csharp
+builder.Services.AddLighterClient(builder.Configuration);
+```
 
-- Web → ApiService: Service discovery via `https+http://apiservice` scheme (prefers HTTPS, falls back to HTTP)
-- Web uses Redis for output caching
-- All services report health via `/health` endpoint
-- AppHost configures `.WaitFor()` dependencies to ensure proper startup sequence
+Configuration in appsettings.json under `"Lighter"` section (use user secrets for PrivateKey).
 
-### Key Patterns
+### Aspire Orchestration
 
-- All services call `builder.AddServiceDefaults()` to register Aspire defaults
-- OpenTelemetry instrumentation is automatic for ASP.NET Core, HTTP clients, and runtime metrics
-- Health checks use tags (`live`) to distinguish liveness from readiness
-- HTTP clients get resilience and service discovery by default
+AppHost startup order: Redis → ApiService → Web
+
+Service discovery uses `https+http://apiservice` scheme.
 
 ## Development Commands
 
-### Running the Application
-
-Run the entire distributed application via the AppHost:
+### Run Application
 ```bash
 dotnet run --project GridBot.AppHost
 ```
+Starts: Aspire Dashboard, Redis, ApiService, Web frontend
 
-This starts:
-- Aspire Dashboard (provides observability UI)
-- Redis container
-- ApiService
-- Web frontend
-
-Access points:
-- Aspire Dashboard: Check terminal output for dashboard URL
-- Web frontend: `https://gridbot.dev.localhost:17018` or `http://gridbot.dev.localhost:15225`
-
-### Building
-
-Build entire solution:
+### Build
 ```bash
 dotnet build GridBot.slnx
 ```
 
-Build specific project:
+### User Secrets (for Lighter private key)
 ```bash
-dotnet build GridBot.ApiService/GridBot.ApiService.csproj
+dotnet user-secrets set "Lighter:PrivateKey" "your-key" --project GridBot.AppHost
 ```
 
-### Running Individual Services
+## Native Library Requirements
 
-Run ApiService standalone:
-```bash
-dotnet run --project GridBot.ApiService
+GridBot.Lighter requires platform-specific native signing libraries:
+- Windows: `signer-amd64.dll`
+- Linux: `signer-amd64.so`
+
+Located in `GridBot.Lighter/Native/`, automatically copied to output during build.
+
+## Key Interfaces
+
+When implementing trading features, inject these interfaces:
+- `ILighterQueryClient` - For reading data (accounts, orders, markets)
+- `ILighterCommandClient` - For trading operations (requires signing)
+
+Both are registered as singletons via `AddLighterClient()`.
+
+## Important Constants
+
+```csharp
+ChainId.Mainnet = 304
+ChainId.Testnet = 300
+OrderConstants.UsdcTickerScale = 1_000_000
+OrderConstants.Default28DayOrderExpiry = -1
 ```
 
-Run Web frontend standalone:
-```bash
-dotnet run --project GridBot.Web
-```
+## Health Endpoints
 
-Note: Running services standalone bypasses Aspire orchestration. Service discovery won't work without AppHost.
+- `/health` - Readiness (all checks)
+- `/alive` - Liveness (tagged "live" checks)
 
-### Restore Dependencies
+Only exposed in Development environment.
 
-```bash
-dotnet restore
-```
+# Rules
+We want to leverage subagents as much as possible
+Workflow should be to
+1. Translate User requirements $ARGUMENT of prompt into the tasks and enriching it with the `"trading-risk-manager"`
+2. If we need something specific with the Ligther DEX we leverage `"lighter-api-specialist"`
+3. Create implementation plan
+4. Pass the plan to the `"dotnet-feature-builder"`
+5. Review the code with `"csharp-code-reviewer"` all the critical findings should be immediately worked on by the `"dotnet-feature-builder"` again and basically reiterate 4. and 5. until no critical findings
+6. Passing the changes as well overall code the `"trading-bot-auditor"` which should evaluate correctness of the code from the view of crypto trading and evalute system as a whole
+7. Phase done, update all .md doc files
 
-### Clean Build Artifacts
 
-```bash
-dotnet clean
-```
-
-## Testing
-
-Currently no test projects exist. When adding tests:
-- Run tests: `dotnet test`
-- Run specific test: `dotnet test --filter "FullyQualifiedName~TestName"`
-- Run tests with coverage: `dotnet test --collect:"XPlat Code Coverage"`
-
-## Configuration
-
-### Service Defaults Behavior
-
-`GridBot.ServiceDefaults` automatically configures:
-- OpenTelemetry exporters (OTLP if `OTEL_EXPORTER_OTLP_ENDPOINT` is set)
-- Service discovery for HTTP clients
-- Standard resilience patterns (retries, circuit breakers, timeouts)
-- Health check endpoints (only in Development environment)
-
-### Environment Variables
-
-Key Aspire environment variables (set by AppHost):
-- `ASPNETCORE_ENVIRONMENT` / `DOTNET_ENVIRONMENT`: Environment name
-- `ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL`: OpenTelemetry endpoint
-- `OTEL_EXPORTER_OTLP_ENDPOINT`: Enables OTLP exporter if set
-
-### User Secrets
-
-AppHost uses user secrets (ID: `c35c3631-20fe-4062-8c51-1664d9a47322`):
-```bash
-dotnet user-secrets set "key" "value" --project GridBot.AppHost
-```
-
-## Important Implementation Details
-
-### Service Discovery URLs
-
-When referencing services from Web or other clients, use the format:
-- `https+http://servicename` - Prefers HTTPS, falls back to HTTP
-- Service name matches the AppHost registration (e.g., `apiservice`)
-
-### Health Checks
-
-- `/health` - All health checks must pass (readiness)
-- `/alive` - Only checks tagged with "live" (liveness)
-- Health checks only exposed in Development environment
-
-### Adding New Services
-
-When adding a new project:
-1. Reference `GridBot.ServiceDefaults`
-2. Call `builder.AddServiceDefaults()`
-3. Call `app.MapDefaultEndpoints()` for health checks
-4. Register in `AppHost.cs` using `builder.AddProject<>()`
-5. Configure dependencies with `.WithReference()` and `.WaitFor()`
-
-### OpenTelemetry
-
-Telemetry is automatically collected for:
-- ASP.NET Core requests (excluding health endpoints)
-- HTTP client calls
-- Runtime metrics (GC, thread pool, etc.)
-
-View telemetry in the Aspire Dashboard when running via AppHost.
-
-## Technology Stack
-
-- .NET 10.0
-- .NET Aspire 13.0.0 (container orchestration and service management)
-- Blazor Server (Interactive)
-- Minimal APIs
-- Redis (via Aspire.Hosting.Redis)
-- Containers (managed via Aspire)
-- OpenTelemetry
-- Service Discovery & Resilience
-
-## Notes
-
-- The solution uses Visual Studio's XML-based solution format (`.slnx`)
-- Bootstrap 5 is included in `GridBot.Web/wwwroot/lib/bootstrap/`
-- Current implementation includes sample weather forecast functionality as temporary scaffolding - this will be replaced with cryptocurrency trading features
