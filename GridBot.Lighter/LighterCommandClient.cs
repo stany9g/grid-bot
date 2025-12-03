@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using GridBot.Lighter.Models;
@@ -58,6 +59,91 @@ public sealed class LighterCommandClient : ILighterCommandClient
             txInfo!,
             priceProtection,
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates and submits a market order with automatic slippage protection.
+    /// Fetches current market price from order book and calculates acceptable execution price.
+    /// </summary>
+    /// <param name="request">Market order request with slippage tolerance.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Response containing transaction hash and predicted execution time.</returns>
+    /// <exception cref="LighterApiException">Thrown when signing fails, order book is empty, or the API returns an error.</exception>
+    public async Task<RespSendTx> CreateMarketOrderAsync(
+        MarketOrderRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        // Fetch order book orders to get current market price (bids and asks)
+        var orderBook = await _queryClient.GetOrderBookOrdersAsync(request.MarketIndex, limit: 1, cancellationToken);
+
+        // For sell orders: use best bid price (what buyers will pay)
+        // For buy orders: use best ask price (what sellers want)
+        long idealPrice;
+        if (request.IsAsk)
+        {
+            if (orderBook.Bids == null || orderBook.Bids.Count == 0)
+                throw new LighterApiException("No bids available in order book for SELL order");
+
+            idealPrice = ParseScaledPrice(orderBook.Bids[0].Price);
+        }
+        else
+        {
+            if (orderBook.Asks == null || orderBook.Asks.Count == 0)
+                throw new LighterApiException("No asks available in order book for BUY order");
+
+            idealPrice = ParseScaledPrice(orderBook.Asks[0].Price);
+        }
+
+        // Calculate acceptable execution price with slippage
+        // For sell: idealPrice * (1 - slippage) = willing to accept less
+        // For buy: idealPrice * (1 + slippage) = willing to pay more
+        var slippageMultiplier = request.IsAsk ? (1 - request.MaxSlippage) : (1 + request.MaxSlippage);
+        var executionPrice = (long)Math.Round(idealPrice * slippageMultiplier);
+
+        // Create the order request with calculated price
+        // IOC/Market orders MUST use expiry=0 (DefaultIocExpiry)
+        // The signer rejects -1 for IOC orders since they execute immediately
+        var orderRequest = new CreateOrderRequest
+        {
+            MarketIndex = request.MarketIndex,
+            ClientOrderIndex = request.ClientOrderIndex,
+            BaseAmount = request.BaseAmount,
+            Price = executionPrice,
+            IsAsk = request.IsAsk,
+            OrderType = OrderType.Market,
+            TimeInForce = TimeInForce.ImmediateOrCancel,
+            ReduceOnly = request.ReduceOnly,
+            TriggerPrice = OrderConstants.NilTriggerPrice,
+            OrderExpiry = OrderConstants.DefaultIocExpiry
+        };
+
+        // Sign and submit the order
+        var (txInfo, error) = await _signer.CreateOrderAsync(orderRequest);
+        if (error != null)
+            throw new LighterApiException($"Failed to sign market order: {error}");
+
+        return await SendTransactionAsync(
+            TransactionTypes.CreateOrder,
+            txInfo!,
+            priceProtection: true, // Enable price protection for market orders
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Parses a price string (e.g., "97000.50") to a scaled long value.
+    /// Removes the decimal point to get the scaled integer representation.
+    /// </summary>
+    private static long ParseScaledPrice(string priceString)
+    {
+        if (string.IsNullOrWhiteSpace(priceString))
+            throw new ArgumentException("Price string cannot be null or empty", nameof(priceString));
+
+        // Remove decimal point to get scaled value (e.g., "97000.50" -> 9700050)
+        var cleanPrice = priceString.Replace(".", "");
+        if (!long.TryParse(cleanPrice, out var scaledPrice))
+            throw new LighterApiException($"Failed to parse price: {priceString}");
+
+        return scaledPrice;
     }
 
     /// <summary>
@@ -200,7 +286,11 @@ public sealed class LighterCommandClient : ILighterCommandClient
         CancellationToken cancellationToken = default)
     {
         var response = await _queryClient.GetNextNonceAsync(accountIndex, apiKeyIndex, cancellationToken);
-        _signer.SetNonce(response.Nonce);
+        // SetNonce sets _currentNonce, but GetNextNonce() increments BEFORE returning.
+        // So if server says "next nonce is 3", we set _currentNonce = 3 - 1 = 2,
+        // then when GetNextNonce() does ++_currentNonce, it returns 3 (the correct value).
+        Console.WriteLine($"[SyncNonce] Server returned NextNonce={response.Nonce}, setting internal nonce to {response.Nonce - 1}");
+        _signer.SetNonce(response.Nonce - 1);
         return response.Nonce;
     }
 
@@ -233,19 +323,25 @@ public sealed class LighterCommandClient : ILighterCommandClient
         if (string.IsNullOrWhiteSpace(txInfo))
             throw new ArgumentException("Transaction info cannot be null or empty.", nameof(txInfo));
 
-        var request = new
-        {
-            tx_type = txType,
-            tx_info = txInfo,
-            price_protection = priceProtection
-        };
+        // API expects multipart/form-data with tx_info as a string
+        using var formContent = new MultipartFormDataContent();
+        formContent.Add(new StringContent(txType.ToString()), "tx_type");
+        formContent.Add(new StringContent(txInfo), "tx_info");
+        if (priceProtection.HasValue)
+            formContent.Add(new StringContent(priceProtection.Value.ToString().ToLowerInvariant()), "price_protection");
 
-        var response = await PostAsync<RespSendTx>("sendTx", request, cancellationToken);
+        Console.WriteLine($"[LighterCommandClient] POST sendTx (form-data): tx_type={txType}, tx_info={txInfo}");
 
-        if (!response.IsSuccess)
-            throw new LighterApiException(response.Message ?? "Transaction submission failed", response.Code);
+        var response = await _writeHttpClient.PostAsync("sendTx", formContent, cancellationToken);
+        await EnsureSuccessStatusCodeAsync(response);
+        var content = await response.Content.ReadAsStringAsync();
+        var result = await response.Content.ReadFromJsonAsync<RespSendTx>(_jsonOptions, cancellationToken)
+            ?? throw new LighterApiException("Failed to deserialize response");
 
-        return response;
+        if (!result.IsSuccess)
+            throw new LighterApiException(result.Message ?? "Transaction submission failed", result.Code);
+
+        return result;
     }
 
     /// <summary>
@@ -270,10 +366,11 @@ public sealed class LighterCommandClient : ILighterCommandClient
         if (txTypes.Length != txInfos.Length)
             throw new ArgumentException("Transaction types and infos arrays must have the same length.");
 
+        // Use PascalCase - JsonNamingPolicy.SnakeCaseLower will convert to snake_case
         var request = new
         {
-            tx_types = string.Join(",", txTypes),
-            tx_infos = string.Join(",", txInfos)
+            TxTypes = string.Join(",", txTypes),
+            TxInfos = string.Join(",", txInfos)
         };
 
         var response = await PostAsync<RespSendTxBatch>("sendTxBatch", request, cancellationToken);
@@ -290,7 +387,13 @@ public sealed class LighterCommandClient : ILighterCommandClient
     {
         try
         {
-            var response = await _writeHttpClient.PostAsJsonAsync(endpoint, request, _jsonOptions, cancellationToken);
+            // Serialize manually for full control
+            var json = JsonSerializer.Serialize(request, _jsonOptions);
+            Console.WriteLine($"[LighterCommandClient] POST {endpoint}: {json}");
+
+            // Use StringContent instead of PostAsJsonAsync for explicit control
+            using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            var response = await _writeHttpClient.PostAsync(endpoint, content, cancellationToken);
             await EnsureSuccessStatusCodeAsync(response);
 
             return await response.Content.ReadFromJsonAsync<T>(_jsonOptions, cancellationToken)
@@ -324,6 +427,8 @@ public sealed class LighterCommandClient : ILighterCommandClient
             PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
             PropertyNameCaseInsensitive = true,
+            // Use relaxed escaping to avoid \u0022 for quotes (use \" instead)
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
             Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
         };
     }

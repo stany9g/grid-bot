@@ -1,6 +1,67 @@
 namespace GridBot.Lighter.Models;
 
 /// <summary>
+/// Request model for creating a market order with automatic slippage protection.
+/// </summary>
+public class MarketOrderRequest
+{
+    /// <summary>
+    /// Market identifier (e.g., 0 for BTC-USDC).
+    /// </summary>
+    public required int MarketIndex { get; init; }
+
+    /// <summary>
+    /// Client-side unique order identifier.
+    /// Must be unique across all active orders for this account.
+    /// </summary>
+    public required long ClientOrderIndex { get; init; }
+
+    /// <summary>
+    /// Order size in base asset units (scaled).
+    /// </summary>
+    public required long BaseAmount { get; init; }
+
+    /// <summary>
+    /// True for sell (ask), false for buy (bid).
+    /// </summary>
+    public required bool IsAsk { get; init; }
+
+    /// <summary>
+    /// Maximum slippage tolerance as a decimal (e.g., 0.01 = 1%).
+    /// For buys: willing to pay up to this % above current best ask.
+    /// For sells: willing to accept down to this % below current best bid.
+    /// Default is 0.5% (0.005).
+    /// </summary>
+    public decimal MaxSlippage { get; init; } = 0.005m;
+
+    /// <summary>
+    /// If true, order will only reduce position size (cannot increase).
+    /// </summary>
+    public bool ReduceOnly { get; init; } = false;
+
+    /// <summary>
+    /// Validates the market order request parameters.
+    /// </summary>
+    /// <returns>Null if valid, otherwise an error message.</returns>
+    public string? Validate()
+    {
+        if (MarketIndex < 0)
+            return "MarketIndex must be non-negative";
+
+        if (ClientOrderIndex <= 0)
+            return "ClientOrderIndex must be positive";
+
+        if (BaseAmount <= 0)
+            return "BaseAmount must be positive";
+
+        if (MaxSlippage < 0 || MaxSlippage > 0.5m)
+            return "MaxSlippage must be between 0 and 0.5 (50%)";
+
+        return null;
+    }
+}
+
+/// <summary>
 /// High-level request model for creating a single order with validation.
 /// </summary>
 public class CreateOrderRequest
@@ -80,7 +141,11 @@ public class CreateOrderRequest
         if (TriggerPrice < 0)
             return "TriggerPrice must be non-negative";
 
-        if (OrderExpiry != OrderConstants.Default28DayOrderExpiry && OrderExpiry < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+        // Allow special values: -1 (28-day default) and 0 (IOC/Market orders)
+        // Otherwise, expiry must be a future timestamp
+        if (OrderExpiry != OrderConstants.Default28DayOrderExpiry &&
+            OrderExpiry != OrderConstants.DefaultIocExpiry &&
+            OrderExpiry < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
             return "OrderExpiry must be in the future";
 
         return null;

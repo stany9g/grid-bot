@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using GridBot.Lighter.Models;
 using GridBot.Lighter.Models.Api;
+using Microsoft.Extensions.Logging;
 
 namespace GridBot.Lighter;
 
@@ -14,15 +15,18 @@ public sealed class LighterQueryClient : ILighterQueryClient
 {
     private readonly HttpClient _httpClient;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly ILogger<LighterQueryClient>? _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LighterQueryClient"/> class with a custom HttpClient.
     /// </summary>
     /// <param name="httpClient">The HTTP client to use for API requests.</param>
-    public LighterQueryClient(HttpClient httpClient)
+    /// <param name="logger">Optional logger for debugging API responses.</param>
+    public LighterQueryClient(HttpClient httpClient, ILogger<LighterQueryClient>? logger = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _jsonOptions = CreateJsonOptions();
+        _logger = logger;
     }
 
     /// <summary>
@@ -148,10 +152,111 @@ public sealed class LighterQueryClient : ILighterQueryClient
 
         var response = await GetAsync<OrderBookDetailResponse>($"orderBookDetails{queryParams}", cancellationToken);
 
+        _logger?.LogDebug(
+            "OrderBookDetails response - Code: {Code}, IsSuccess: {IsSuccess}, Message: {Message}, HasData: {HasData}, HasOrderBookDetails: {HasOrderBookDetails}",
+            response.Code, response.IsSuccess, response.Message, response.Data != null, response.OrderBookDetails?.Count ?? 0);
+
         if (!response.IsSuccess)
             throw new LighterApiException(response.Message ?? "Failed to get order book details", response.Code);
 
-        return response.Data ?? throw new LighterApiException("Order book data is null");
+        // Try to get data from either Data property (legacy) or OrderBookDetails array (actual API)
+        if (response.Data != null)
+            return response.Data;
+
+        var detail = response.OrderBookDetails?.FirstOrDefault(d => d.MarketId == marketId);
+        return detail ?? throw new LighterApiException($"Order book data for market {marketId} is null");
+    }
+
+    /// <summary>
+    /// Gets order book orders (bids and asks) for a specific market.
+    /// This returns the actual order book depth with individual orders.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="limit">Maximum number of orders per side to return (optional).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Order book orders with bids and asks.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    public async Task<OrderBookOrdersResponse> GetOrderBookOrdersAsync(
+        int marketId,
+        int? limit = null,
+        CancellationToken cancellationToken = default)
+    {
+        var queryParams = $"?market_id={marketId}";
+        if (limit.HasValue)
+            queryParams += $"&limit={limit.Value}";
+
+        var response = await GetAsync<OrderBookOrdersResponse>($"orderBookOrders{queryParams}", cancellationToken);
+
+        _logger?.LogDebug(
+            "OrderBookOrders response - Code: {Code}, IsSuccess: {IsSuccess}, TotalBids: {TotalBids}, TotalAsks: {TotalAsks}",
+            response.Code, response.IsSuccess, response.TotalBids, response.TotalAsks);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Failed to get order book orders", response.Code);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Gets candlestick (OHLCV) data for a market.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="resolution">Candle resolution (1m, 5m, 15m, 1h, 4h, 1d). Default is 1h.</param>
+    /// <param name="countBack">Number of candles to return. Default is 20.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of candlesticks ordered by timestamp ascending.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    public async Task<List<Candlestick>> GetCandlesticksAsync(
+        int marketId,
+        string resolution = "1h",
+        int countBack = 20,
+        CancellationToken cancellationToken = default)
+    {
+        var queryParams = $"?market_id={marketId}&resolution={resolution}&count_back={countBack}";
+        var response = await GetAsync<CandlesticksResponse>($"candlesticks{queryParams}", cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Failed to get candlesticks", response.Code);
+
+        return response.Data;
+    }
+
+    /// <summary>
+    /// Gets current funding rates across exchanges for all markets.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of funding rates.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    public async Task<List<FundingRate>> GetFundingRatesAsync(CancellationToken cancellationToken = default)
+    {
+        var response = await GetAsync<FundingRatesResponse>("funding-rates", cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Failed to get funding rates", response.Code);
+
+        return response.Data;
+    }
+
+    /// <summary>
+    /// Gets recent trades for a market.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="limit">Maximum number of trades to return. Default is 100.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of recent trades ordered by timestamp descending.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    public async Task<List<Trade>> GetRecentTradesAsync(
+        int marketId,
+        int limit = 100,
+        CancellationToken cancellationToken = default)
+    {
+        var queryParams = $"?market_id={marketId}&limit={limit}";
+        var response = await GetAsync<TradesResponse>($"recentTrades{queryParams}", cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Failed to get recent trades", response.Code);
+
+        return response.Data;
     }
 
     private async Task<T> GetAsync<T>(string endpoint, CancellationToken cancellationToken)
@@ -161,8 +266,11 @@ public sealed class LighterQueryClient : ILighterQueryClient
             var response = await _httpClient.GetAsync(endpoint, cancellationToken);
             await EnsureSuccessStatusCodeAsync(response);
 
-            return await response.Content.ReadFromJsonAsync<T>(_jsonOptions, cancellationToken)
-                ?? throw new LighterApiException("Failed to deserialize response");
+            var rawJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger?.LogDebug("API Response for {Endpoint}: {RawJson}", endpoint, rawJson);
+
+            var result = JsonSerializer.Deserialize<T>(rawJson, _jsonOptions);
+            return result ?? throw new LighterApiException("Failed to deserialize response");
         }
         catch (HttpRequestException ex)
         {
@@ -171,6 +279,11 @@ public sealed class LighterQueryClient : ILighterQueryClient
         catch (TaskCanceledException ex)
         {
             throw new LighterApiException("Request timed out", ex);
+        }
+        catch (JsonException ex)
+        {
+            _logger?.LogError(ex, "JSON deserialization failed for {Endpoint}", endpoint);
+            throw new LighterApiException($"Failed to deserialize response: {ex.Message}", ex);
         }
     }
 

@@ -1,8 +1,11 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
-var cache = builder.AddRedis("cache");
+var cache = builder.AddRedis("cache")
+    .WithRedisInsight();
 
 var apiService = builder.AddProject<Projects.GridBot_ApiService>("apiservice")
+    .WithReference(cache)
+    .WaitFor(cache)
     .WithHttpHealthCheck("/health");
 
 builder.AddProject<Projects.GridBot_Web>("webfrontend")

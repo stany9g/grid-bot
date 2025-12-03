@@ -78,6 +78,22 @@ public static class LighterServiceCollectionExtensions
             var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
             var writeClient = httpClientFactory.CreateClient("LighterWriteClient");
 
+            // Fetch the correct nonce from the server at startup
+            long initialNonce;
+            try
+            {
+                var nonceResponse = queryClient.GetNextNonceAsync(options.AccountIndex, options.ApiKeyIndex)
+                    .GetAwaiter().GetResult();
+                // Subtract 1 because GetNextNonce() does ++_currentNonce before returning
+                initialNonce = nonceResponse.Nonce - 1;
+                Console.WriteLine($"[LighterClient] Fetched nonce from server: {nonceResponse.Nonce}, setting initial nonce to {initialNonce}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[LighterClient] Failed to fetch nonce from server, using config value {options.InitialNonce}: {ex.Message}");
+                initialNonce = options.InitialNonce;
+            }
+
             var signer = new SignerClient();
             var error = signer.InitializeAsync(
                 options.ApiUrl,
@@ -85,7 +101,7 @@ public static class LighterServiceCollectionExtensions
                 options.ChainId,
                 options.ApiKeyIndex,
                 options.AccountIndex,
-                options.InitialNonce
+                initialNonce
             ).GetAwaiter().GetResult();
 
             if (error != null)

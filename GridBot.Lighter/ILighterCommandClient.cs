@@ -75,4 +75,13 @@ public interface ILighterCommandClient : IDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The synchronized nonce value.</returns>
     Task<long> SyncNonceAsync(long accountIndex, int apiKeyIndex, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Creates and submits a market order with automatic slippage protection.
+    /// Fetches current market price from order book and calculates acceptable execution price.
+    /// </summary>
+    /// <param name="request">Market order request with slippage tolerance.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Response containing transaction hash and predicted execution time.</returns>
+    Task<RespSendTx> CreateMarketOrderAsync(MarketOrderRequest request, CancellationToken cancellationToken = default);
 }

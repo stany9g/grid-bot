@@ -306,7 +306,9 @@ public class SignerClient : IDisposable
     {
         lock (_nonceLock)
         {
-            return ++_currentNonce;
+            var nextNonce = ++_currentNonce;
+            Console.WriteLine($"[SignerClient] GetNextNonce: incremented to {nextNonce}, will use this nonce for signing");
+            return nextNonce;
         }
     }
 
@@ -319,6 +321,7 @@ public class SignerClient : IDisposable
     {
         lock (_nonceLock)
         {
+            Console.WriteLine($"[SignerClient] SetNonce: setting _currentNonce from {_currentNonce} to {nonce}");
             _currentNonce = nonce;
         }
     }

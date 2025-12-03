@@ -1,7 +1,305 @@
-﻿@page "/"
+@page "/"
+@using GridBot.Web
+@inject TradingApiClient TradingApi
+@implements IDisposable
 
-<PageTitle>Home</PageTitle>
+<PageTitle>ALTE Dashboard</PageTitle>
 
-<h1>Hello, world!</h1>
+<div class="container-fluid">
+    <div class="row mb-3">
+        <div class="col-12">
+            <h1>ALTE Trading Dashboard</h1>
+            @if (_loading)
+            {
+                <span class="text-muted">Loading...</span>
+            }
+            else if (_error != null)
+            {
+                <div class="alert alert-danger">@_error</div>
+            }
+        </div>
+    </div>
 
-Welcome to your new app.
+    @if (_status != null)
+    {
+        <!-- Trading Status Panel -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Trading Status</h5>
+                        <span class="badge @GetStateBadgeClass(_status.State)">@_status.State</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <strong>Trend:</strong> <span class="badge @GetTrendBadgeClass(_status.TrendState)">@_status.TrendState</span>
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Recovery:</strong> @_status.RecoveryPhase
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Uptime:</strong> @FormatUptime(_status.Uptime)
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Timeouts:</strong> @_status.ConsecutiveTimeouts
+                            </div>
+                        </div>
+                        <div class="row mt-2">
+                            <div class="col-md-3">
+                                <strong>Position Mult:</strong> @_status.PositionMultiplier.ToString("P0")
+                            </div>
+                            <div class="col-md-3">
+                                <strong>Spread Mult:</strong> @_status.SpreadMultiplier.ToString("F2")x
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Position and Risk Row -->
+        <div class="row mb-4">
+            <!-- Position Summary -->
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">Moon Bag Status</h5>
+                    </div>
+                    <div class="card-body">
+                        @if (_position != null)
+                        {
+                            <table class="table table-sm">
+                                <tr><td>State</td><td><span class="badge bg-info">@_position.MoonBagState</span></td></tr>
+                                <tr><td>Locked Qty</td><td>@_position.LockedQuantity.ToString("F4")</td></tr>
+                                <tr><td>High Watermark</td><td>@_position.HighWatermarkPrice.ToString("C2")</td></tr>
+                                <tr><td>Trailing Stop</td><td>@_position.TrailingStopPrice.ToString("C2")</td></tr>
+                                <tr><td>Profit</td><td class="@(_position.CurrentProfitPercent >= 0 ? "text-success" : "text-danger")">@_position.CurrentProfitPercent.ToString("P2")</td></tr>
+                                <tr><td>Max Position</td><td>@_position.MaxPositionAchieved.ToString("F4")</td></tr>
+                                <tr><td>Stop Order Active</td><td>@(_position.HasActiveStopOrder ? "Yes" : "No")</td></tr>
+                            </table>
+                        }
+                        else
+                        {
+                            <p class="text-muted">No position data</p>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Risk Indicators -->
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Risk Indicators</h5>
+                        @if (_risk?.AnyLimitBreached == true)
+                        {
+                            <span class="badge bg-danger">LIMIT BREACHED</span>
+                        }
+                    </div>
+                    <div class="card-body">
+                        @if (_risk != null)
+                        {
+                            <table class="table table-sm">
+                                <tr><td>Daily P&L</td><td class="@(_risk.DailyPnlPercent >= 0 ? "text-success" : "text-danger")">@_risk.DailyPnlPercent.ToString("P2")</td></tr>
+                                <tr><td>Weekly P&L</td><td class="@(_risk.WeeklyPnlPercent >= 0 ? "text-success" : "text-danger")">@_risk.WeeklyPnlPercent.ToString("P2")</td></tr>
+                                <tr><td>Monthly P&L</td><td class="@(_risk.MonthlyPnlPercent >= 0 ? "text-success" : "text-danger")">@_risk.MonthlyPnlPercent.ToString("P2")</td></tr>
+                                <tr><td>Drawdown</td><td class="text-warning">@_risk.DrawdownPercent.ToString("P2")</td></tr>
+                                @if (_risk.HaltReason != null)
+                                {
+                                    <tr class="table-danger"><td>Halt Reason</td><td>@_risk.HaltReason</td></tr>
+                                }
+                                <tr><td colspan="2" class="pt-3"><strong>Flash Crash</strong></td></tr>
+                                <tr><td>Status</td><td>@(_risk.FlashCrashActive ? "ACTIVE" : "Normal")</td></tr>
+                                <tr><td>Severity</td><td>@_risk.FlashCrashSeverity</td></tr>
+                                <tr><td>Action</td><td>@_risk.FlashCrashAction</td></tr>
+                                <tr><td>Events (24h)</td><td>@_risk.CrashCount24h</td></tr>
+                            </table>
+                        }
+                        else
+                        {
+                            <p class="text-muted">No risk data</p>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Manual Controls -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Manual Controls</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="btn-group" role="group">
+                            <button class="btn btn-warning" @onclick="PauseAsync" disabled="@(_status.State == "Paused" || _controlLoading)">
+                                Pause
+                            </button>
+                            <button class="btn btn-success" @onclick="ResumeAsync" disabled="@(_status.State == "Active" || _controlLoading)">
+                                Resume
+                            </button>
+                            <button class="btn btn-danger" @onclick="HaltAsync" disabled="@(_status.State == "Halted" || _controlLoading)">
+                                Emergency Halt
+                            </button>
+                        </div>
+                        @if (_controlMessage != null)
+                        {
+                            <div class="alert @(_controlSuccess ? "alert-success" : "alert-danger") mt-3">
+                                @_controlMessage
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private TradingStatusResponse? _status;
+    private PositionSummaryResponse? _position;
+    private RiskIndicatorsResponse? _risk;
+    private bool _loading = true;
+    private string? _error;
+    private bool _controlLoading;
+    private string? _controlMessage;
+    private bool _controlSuccess;
+    private CancellationTokenSource? _cts;
+    private Timer? _refreshTimer;
+    // TODO: Support multiple markets - currently hardcoded to market 0
+    private const int MarketId = 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadDataAsync();
+        _cts = new CancellationTokenSource();
+        _refreshTimer = new Timer(async _ =>
+        {
+            if (_cts?.IsCancellationRequested ?? true) return;
+
+            try
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (_cts?.IsCancellationRequested ?? true) return;
+                    await LoadDataAsync();
+                    StateHasChanged();
+                });
+            }
+            catch (ObjectDisposedException)
+            {
+                // Component was disposed during callback - expected during navigation
+            }
+            catch (Exception ex)
+            {
+                // Log the error but don't crash the circuit
+                Console.WriteLine($"Dashboard refresh error: {ex.Message}");
+            }
+        }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    private async Task LoadDataAsync()
+    {
+        try
+        {
+            _loading = true;
+            _error = null;
+
+            var statusTask = TradingApi.GetStatusAsync();
+            var positionTask = TradingApi.GetPositionAsync(MarketId);
+            var riskTask = TradingApi.GetRiskAsync(MarketId);
+
+            await Task.WhenAll(statusTask, positionTask, riskTask);
+
+            _status = await statusTask;
+            _position = await positionTask;
+            _risk = await riskTask;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Failed to load data: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task PauseAsync()
+    {
+        await ExecuteControlAsync(() => TradingApi.PauseAsync());
+    }
+
+    private async Task ResumeAsync()
+    {
+        await ExecuteControlAsync(() => TradingApi.ResumeAsync());
+    }
+
+    private async Task HaltAsync()
+    {
+        await ExecuteControlAsync(() => TradingApi.HaltAsync());
+    }
+
+    private async Task ExecuteControlAsync(Func<Task<ControlResponse?>> action)
+    {
+        _controlLoading = true;
+        _controlMessage = null;
+        try
+        {
+            var result = await action();
+            _controlSuccess = result?.Success ?? false;
+            _controlMessage = result?.Message ?? "Unknown response";
+            if (_controlSuccess)
+            {
+                await LoadDataAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _controlSuccess = false;
+            _controlMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            _controlLoading = false;
+        }
+    }
+
+    private static string GetStateBadgeClass(string state) => state switch
+    {
+        "Active" => "bg-success",
+        "Paused" => "bg-warning text-dark",
+        "Halted" => "bg-danger",
+        "Recovering" => "bg-info",
+        _ => "bg-secondary"
+    };
+
+    private static string GetTrendBadgeClass(string trend) => trend switch
+    {
+        "StrongBull" => "bg-success",
+        "MildBull" => "bg-success bg-opacity-75",
+        "Neutral" => "bg-secondary",
+        "MildBear" => "bg-danger bg-opacity-75",
+        "StrongBear" => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private static string FormatUptime(TimeSpan uptime)
+    {
+        if (uptime.TotalDays >= 1)
+            return $"{(int)uptime.TotalDays}d {uptime.Hours}h {uptime.Minutes}m";
+        if (uptime.TotalHours >= 1)
+            return $"{uptime.Hours}h {uptime.Minutes}m";
+        return $"{uptime.Minutes}m {uptime.Seconds}s";
+    }
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _refreshTimer?.Dispose();
+        GC.SuppressFinalize(this);
+    }
+}

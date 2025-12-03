@@ -8,7 +8,7 @@ namespace GridBot.Lighter.Models.Api;
 public sealed class RespSendTx
 {
     /// <summary>
-    /// Response code. 0 indicates success.
+    /// Response code. 200 indicates success.
     /// </summary>
     [JsonPropertyName("code")]
     public int Code { get; set; }
@@ -29,11 +29,12 @@ public sealed class RespSendTx
     /// Predicted execution time in milliseconds.
     /// </summary>
     [JsonPropertyName("predicted_execution_time_ms")]
-    public int PredictedExecutionTimeMs { get; set; }
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public long PredictedExecutionTimeMs { get; set; }
 
     /// <summary>
-    /// Gets whether the operation was successful (code == 0).
+    /// Gets whether the operation was successful (code == 200 or 0).
     /// </summary>
     [JsonIgnore]
-    public bool IsSuccess => Code == 0;
+    public bool IsSuccess => Code == 200 || Code == 0;
 }
