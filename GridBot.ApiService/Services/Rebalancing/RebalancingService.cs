@@ -20,6 +20,7 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
     private readonly ILighterCommandClient _commandClient;
     private readonly ILighterQueryClient _queryClient;
     private readonly IMarketDataService _marketDataService;
+    private readonly IMarketScalingService _scalingService;
     private readonly IRiskConfiguration _riskConfig;
     private readonly ITradingStateService _tradingStateService;
     private readonly InventoryManager _inventoryManager;
@@ -57,6 +58,7 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
         ILighterCommandClient commandClient,
         ILighterQueryClient queryClient,
         IMarketDataService marketDataService,
+        IMarketScalingService scalingService,
         IRiskConfiguration riskConfig,
         ITradingStateService tradingStateService,
         InventoryManager inventoryManager,
@@ -66,6 +68,7 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
         _commandClient = commandClient ?? throw new ArgumentNullException(nameof(commandClient));
         _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
         _marketDataService = marketDataService ?? throw new ArgumentNullException(nameof(marketDataService));
+        _scalingService = scalingService ?? throw new ArgumentNullException(nameof(scalingService));
         _riskConfig = riskConfig ?? throw new ArgumentNullException(nameof(riskConfig));
         _tradingStateService = tradingStateService ?? throw new ArgumentNullException(nameof(tradingStateService));
         _inventoryManager = inventoryManager ?? throw new ArgumentNullException(nameof(inventoryManager));
@@ -153,13 +156,17 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
 
         try
         {
+            // Scale price and amount using market-specific decimals from metadata
+            var scaledPrice = await _scalingService.ScalePriceAsync(currentPrice, marketId, ct).ConfigureAwait(false);
+            var scaledAmount = await _scalingService.ScaleBaseAmountAsync(cryptoAmount, marketId, ct).ConfigureAwait(false);
+
             // Create market order for immediate execution
             var orderRequest = new CreateOrderRequest
             {
                 MarketIndex = marketId,
                 ClientOrderIndex = Interlocked.Increment(ref _clientOrderCounter),
-                BaseAmount = ConvertToScaledAmount(cryptoAmount, marketId),
-                Price = ConvertToScaledPrice(currentPrice, marketId),
+                BaseAmount = scaledAmount,
+                Price = scaledPrice,
                 IsAsk = isAsk,
                 OrderType = OrderType.Market,
                 TimeInForce = TimeInForce.ImmediateOrCancel,
@@ -261,26 +268,6 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
 
         // Notify inventory manager
         _inventoryManager.RecordRebalanceAmount(marketId, amountPercent);
-    }
-
-    /// <summary>
-    /// Converts a decimal crypto amount to the scaled value for the API.
-    /// </summary>
-    private static long ConvertToScaledAmount(decimal amount, int marketId)
-    {
-        // Standard 8 decimal places for BTC-like assets
-        // This should be market-specific in production
-        const decimal baseScale = 100_000_000m;
-        return (long)(amount * baseScale);
-    }
-
-    /// <summary>
-    /// Converts a decimal price to the scaled value for the API.
-    /// </summary>
-    private static long ConvertToScaledPrice(decimal price, int marketId)
-    {
-        // USDC scaling (6 decimal places)
-        return (long)(price * OrderConstants.UsdcTickerScale);
     }
 
     /// <summary>

@@ -22,6 +22,9 @@ public static class LighterServiceCollectionExtensions
         var options = new LighterOptions();
         configuration.GetSection(LighterOptions.SectionName).Bind(options);
 
+        services.AddOptions<LighterOptions>()
+            .Bind(configuration.GetSection(LighterOptions.SectionName));
+
         var validationError = options.Validate();
         if (validationError != null)
             throw new InvalidOperationException($"Lighter configuration is invalid: {validationError}");

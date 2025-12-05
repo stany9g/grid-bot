@@ -2,6 +2,7 @@ using GridBot.ApiService.Extensions;
 using GridBot.ApiService.Models.Dashboard;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.DecisionEngine;
+using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
@@ -52,13 +53,43 @@ public partial class Program
             .WithTags("Lighter Trading");
 
         // Order Management Endpoints
-        lighter.MapPost("/orders", async (GridBot.Lighter.Models.CreateOrderRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
+        lighter.MapPost("/orders", async (
+            GridBot.Lighter.Models.CreateOrderRequest request,
+            GridBot.Lighter.ILighterCommandClient client,
+            IMarketScalingService scalingService,
+            CancellationToken ct) =>
         {
             try
             {
                 var validationError = request.Validate();
                 if (validationError != null)
                     return Results.BadRequest(new { error = validationError });
+
+                // Validate lot size and minimum order size constraints
+                var metadata = await scalingService.GetMarketMetadataAsync(request.MarketIndex, ct);
+                var lotSize = metadata.LotSize;
+                if (lotSize > 1 && request.BaseAmount % lotSize != 0)
+                {
+                    var snappedValue = (request.BaseAmount / lotSize) * lotSize;
+                    var nextValid = snappedValue == 0 ? lotSize : snappedValue;
+                    return Results.BadRequest(new
+                    {
+                        error = $"BaseAmount ({request.BaseAmount}) must be a multiple of the lot size ({lotSize}). " +
+                                $"Valid values near your input: {nextValid}, {nextValid + lotSize}. " +
+                                $"Market {metadata.Symbol} has SupportedSizeDecimals={metadata.SupportedSizeDecimals}, SizeDecimals={metadata.SizeDecimals}."
+                    });
+                }
+
+                // Validate minimum order size
+                var minBaseAmountScaled = (long)Math.Round(metadata.MinBaseAmount * metadata.SizeMultiplier);
+                if (minBaseAmountScaled > 0 && request.BaseAmount < minBaseAmountScaled)
+                {
+                    return Results.BadRequest(new
+                    {
+                        error = $"BaseAmount ({request.BaseAmount}) is below minimum order size ({minBaseAmountScaled}). " +
+                                $"Market {metadata.Symbol} requires at least {metadata.MinBaseAmount} base units ({minBaseAmountScaled} scaled)."
+                    });
+                }
 
                 var result = await client.CreateOrderAsync(request, cancellationToken: ct);
                 return Results.Ok(result);
@@ -80,15 +111,45 @@ public partial class Program
         })
         .WithName("CreateOrder")
         .WithSummary("Create a new order")
-        .WithDescription("Creates and submits a limit, market, stop-loss, or take-profit order.");
+        .WithDescription("Creates and submits a limit, market, stop-loss, or take-profit order. BaseAmount must be a multiple of the market's lot size.");
 
-        lighter.MapPost("/orders/market", async (GridBot.Lighter.Models.MarketOrderRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
+        lighter.MapPost("/orders/market", async (
+            GridBot.Lighter.Models.MarketOrderRequest request,
+            GridBot.Lighter.ILighterCommandClient client,
+            IMarketScalingService scalingService,
+            CancellationToken ct) =>
         {
             try
             {
                 var validationError = request.Validate();
                 if (validationError != null)
                     return Results.BadRequest(new { error = validationError });
+
+                // Validate lot size and minimum order size constraints
+                var metadata = await scalingService.GetMarketMetadataAsync(request.MarketIndex, ct);
+                var lotSize = metadata.LotSize;
+                if (lotSize > 1 && request.BaseAmount % lotSize != 0)
+                {
+                    var snappedValue = (request.BaseAmount / lotSize) * lotSize;
+                    var nextValid = snappedValue == 0 ? lotSize : snappedValue;
+                    return Results.BadRequest(new
+                    {
+                        error = $"BaseAmount ({request.BaseAmount}) must be a multiple of the lot size ({lotSize}). " +
+                                $"Valid values near your input: {nextValid}, {nextValid + lotSize}. " +
+                                $"Market {metadata.Symbol} has SupportedSizeDecimals={metadata.SupportedSizeDecimals}, SizeDecimals={metadata.SizeDecimals}."
+                    });
+                }
+
+                // Validate minimum order size
+                var minBaseAmountScaled = (long)Math.Round(metadata.MinBaseAmount * metadata.SizeMultiplier);
+                if (minBaseAmountScaled > 0 && request.BaseAmount < minBaseAmountScaled)
+                {
+                    return Results.BadRequest(new
+                    {
+                        error = $"BaseAmount ({request.BaseAmount}) is below minimum order size ({minBaseAmountScaled}). " +
+                                $"Market {metadata.Symbol} requires at least {metadata.MinBaseAmount} base units ({minBaseAmountScaled} scaled)."
+                    });
+                }
 
                 var result = await client.CreateMarketOrderAsync(request, ct);
                 return Results.Ok(result);
@@ -110,15 +171,57 @@ public partial class Program
         })
         .WithName("CreateMarketOrder")
         .WithSummary("Create a market order with slippage protection")
-        .WithDescription("Creates and submits a market order. Automatically fetches current price from order book and applies slippage tolerance.");
+        .WithDescription("Creates and submits a market order. Automatically fetches current price from order book and applies slippage tolerance. BaseAmount must be a multiple of the market's lot size.");
 
-        lighter.MapPost("/orders/grouped", async (GridBot.Lighter.Models.CreateGroupedOrdersRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
+        lighter.MapPost("/orders/grouped", async (
+            GridBot.Lighter.Models.CreateGroupedOrdersRequest request,
+            GridBot.Lighter.ILighterCommandClient client,
+            IMarketScalingService scalingService,
+            CancellationToken ct) =>
         {
             try
             {
                 var validationError = request.Validate();
                 if (validationError != null)
                     return Results.BadRequest(new { error = validationError });
+
+                // Pre-fetch all unique markets to avoid sequential API calls
+                var uniqueMarketIds = request.Orders.Select(o => o.MarketIndex).Distinct();
+                var metadataLookup = new Dictionary<int, MarketMetadata>();
+                foreach (var marketId in uniqueMarketIds)
+                {
+                    metadataLookup[marketId] = await scalingService.GetMarketMetadataAsync(marketId, ct);
+                }
+
+                // Validate lot size and minimum order size for each order using cached metadata
+                for (int i = 0; i < request.Orders.Count; i++)
+                {
+                    var order = request.Orders[i];
+                    var metadata = metadataLookup[order.MarketIndex];
+                    var lotSize = metadata.LotSize;
+                    if (lotSize > 1 && order.BaseAmount % lotSize != 0)
+                    {
+                        var snappedValue = (order.BaseAmount / lotSize) * lotSize;
+                        var nextValid = snappedValue == 0 ? lotSize : snappedValue;
+                        return Results.BadRequest(new
+                        {
+                            error = $"Order {i}: BaseAmount ({order.BaseAmount}) must be a multiple of the lot size ({lotSize}). " +
+                                    $"Valid values near your input: {nextValid}, {nextValid + lotSize}. " +
+                                    $"Market {metadata.Symbol} has SupportedSizeDecimals={metadata.SupportedSizeDecimals}, SizeDecimals={metadata.SizeDecimals}."
+                        });
+                    }
+
+                    // Validate minimum order size
+                    var minBaseAmountScaled = (long)Math.Round(metadata.MinBaseAmount * metadata.SizeMultiplier);
+                    if (minBaseAmountScaled > 0 && order.BaseAmount < minBaseAmountScaled)
+                    {
+                        return Results.BadRequest(new
+                        {
+                            error = $"Order {i}: BaseAmount ({order.BaseAmount}) is below minimum order size ({minBaseAmountScaled}). " +
+                                    $"Market {metadata.Symbol} requires at least {metadata.MinBaseAmount} base units ({minBaseAmountScaled} scaled)."
+                        });
+                    }
+                }
 
                 var result = await client.CreateGroupedOrdersAsync(request, ct);
                 return Results.Ok(result);
@@ -140,7 +243,7 @@ public partial class Program
         })
         .WithName("CreateGroupedOrders")
         .WithSummary("Create grouped orders")
-        .WithDescription("Creates and submits grouped orders (OCO, OTO, OTOCO).");
+        .WithDescription("Creates and submits grouped orders (OCO, OTO, OTOCO). BaseAmount for each order must be a multiple of the market's lot size.");
 
         lighter.MapDelete("/orders/{marketId}/{orderId}", async ([Microsoft.AspNetCore.Mvc.FromRoute] int marketId, [Microsoft.AspNetCore.Mvc.FromRoute] long orderId, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
@@ -194,13 +297,43 @@ public partial class Program
         .WithSummary("Cancel all orders in a market")
         .WithDescription("Cancels all orders in a specific market.");
 
-        lighter.MapPut("/orders", async (GridBot.Lighter.Models.ModifyOrderRequest request, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
+        lighter.MapPut("/orders", async (
+            GridBot.Lighter.Models.ModifyOrderRequest request,
+            GridBot.Lighter.ILighterCommandClient client,
+            IMarketScalingService scalingService,
+            CancellationToken ct) =>
         {
             try
             {
                 var validationError = request.Validate();
                 if (validationError != null)
                     return Results.BadRequest(new { error = validationError });
+
+                // Validate lot size and minimum order size constraints for the new base amount
+                var metadata = await scalingService.GetMarketMetadataAsync(request.MarketIndex, ct);
+                var lotSize = metadata.LotSize;
+                if (lotSize > 1 && request.NewBaseAmount % lotSize != 0)
+                {
+                    var snappedValue = (request.NewBaseAmount / lotSize) * lotSize;
+                    var nextValid = snappedValue == 0 ? lotSize : snappedValue;
+                    return Results.BadRequest(new
+                    {
+                        error = $"NewBaseAmount ({request.NewBaseAmount}) must be a multiple of the lot size ({lotSize}). " +
+                                $"Valid values near your input: {nextValid}, {nextValid + lotSize}. " +
+                                $"Market {metadata.Symbol} has SupportedSizeDecimals={metadata.SupportedSizeDecimals}, SizeDecimals={metadata.SizeDecimals}."
+                    });
+                }
+
+                // Validate minimum order size
+                var minBaseAmountScaled = (long)Math.Round(metadata.MinBaseAmount * metadata.SizeMultiplier);
+                if (minBaseAmountScaled > 0 && request.NewBaseAmount < minBaseAmountScaled)
+                {
+                    return Results.BadRequest(new
+                    {
+                        error = $"NewBaseAmount ({request.NewBaseAmount}) is below minimum order size ({minBaseAmountScaled}). " +
+                                $"Market {metadata.Symbol} requires at least {metadata.MinBaseAmount} base units ({minBaseAmountScaled} scaled)."
+                    });
+                }
 
                 var result = await client.ModifyOrderAsync(request, ct);
                 return Results.Ok(result);
@@ -222,7 +355,7 @@ public partial class Program
         })
         .WithName("ModifyOrder")
         .WithSummary("Modify an existing order")
-        .WithDescription("Modifies an existing order's price, size, or other parameters.");
+        .WithDescription("Modifies an existing order's price, size, or other parameters. NewBaseAmount must be a multiple of the market's lot size.");
 
         // Account Management Endpoints
         lighter.MapGet("/account/{accountIndex}", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>

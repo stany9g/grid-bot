@@ -86,6 +86,19 @@ public sealed class OrderBook
     public int SupportedQuoteDecimals { get; set; }
 
     /// <summary>
+    /// Size decimals used for orders (actual precision, may differ from SupportedSizeDecimals).
+    /// Used to calculate lot size: LotSize = 10^(SupportedSizeDecimals - SizeDecimals).
+    /// </summary>
+    [JsonPropertyName("size_decimals")]
+    public int SizeDecimals { get; set; }
+
+    /// <summary>
+    /// Price decimals used for orders (actual precision).
+    /// </summary>
+    [JsonPropertyName("price_decimals")]
+    public int PriceDecimals { get; set; }
+
+    /// <summary>
     /// Base asset information.
     /// </summary>
     [JsonPropertyName("base_asset")]

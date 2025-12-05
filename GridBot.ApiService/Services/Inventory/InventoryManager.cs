@@ -145,8 +145,8 @@ public sealed class InventoryManager : IInventoryManager
         int marketId,
         decimal currentPrice)
     {
-        // Parse collateral (USDC balance) - this is scaled by UsdcTickerScale
-        var collateral = decimal.TryParse(account.Collateral, out var c) ? c / OrderConstants.UsdcTickerScale : 0;
+        // Parse collateral (USDC balance) - API returns human-readable values, no scaling needed
+        var collateral = decimal.TryParse(account.Collateral, out var c) ? c : 0;
 
         // Find position for this market
         var position = account.Positions?.FirstOrDefault(p => p.MarketId == marketId);
@@ -168,13 +168,8 @@ public sealed class InventoryManager : IInventoryManager
         // Total portfolio = collateral (which includes unrealized PnL in Lighter)
         var totalPortfolioUsd = collateral;
 
-        // If we have a position, add its unrealized value
-        if (position != null && decimal.TryParse(position.UnrealizedPnl, out var unrealizedPnl))
-        {
-            var scaledPnl = unrealizedPnl / OrderConstants.UsdcTickerScale;
-            // Collateral already includes unrealized PnL in Lighter
-            // So total portfolio is just the collateral
-        }
+        // If we have a position, its unrealized PnL is already included in collateral by Lighter
+        // API returns human-readable values, no scaling needed
 
         // Ensure we have a valid total
         if (totalPortfolioUsd <= 0)

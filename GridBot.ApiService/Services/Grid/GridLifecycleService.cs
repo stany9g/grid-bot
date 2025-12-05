@@ -109,7 +109,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             var levels = _gridCalculator.CalculateGridLevels(currentPrice, parameters, clusters);
 
             // Calculate order sizes for each level
-            await UpdateOrderSizesAsync(marketId, levels, ct).ConfigureAwait(false);
+            await UpdateOrderSizesAsync(marketId, levels, levels.Count, ct).ConfigureAwait(false);
 
             // Create grid state
             var gridState = new GridState
@@ -237,7 +237,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                 var newParams = _gridCalculator.CalculateGridParameters(currentPrice, atr, atrPercent);
                 var newLevels = _gridCalculator.CalculateGridLevels(currentPrice, newParams);
 
-                await UpdateOrderSizesAsync(marketId, newLevels, ct).ConfigureAwait(false);
+                await UpdateOrderSizesAsync(marketId, newLevels, newLevels.Count, ct).ConfigureAwait(false);
 
                 var result = await _orderManager.PlaceGridOrdersAsync(marketId, newLevels, ct)
                     .ConfigureAwait(false);
@@ -274,7 +274,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
                 if (filledLevels.Count > 0)
                 {
-                    await UpdateOrderSizesAsync(marketId, filledLevels, ct).ConfigureAwait(false);
+                    // Use total grid level count for capital allocation, not just the filled subset
+                    await UpdateOrderSizesAsync(marketId, filledLevels, gridState.Levels.Count, ct).ConfigureAwait(false);
                     var result = await _orderManager.PlaceGridOrdersAsync(marketId, filledLevels, ct)
                         .ConfigureAwait(false);
                     ordersAdded = result.OrdersPlaced;
@@ -458,7 +459,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
         if (pendingLevels.Count > 0)
         {
-            await UpdateOrderSizesAsync(gridState.MarketId, pendingLevels, ct).ConfigureAwait(false);
+            // Use total new grid level count for capital allocation, not just the pending subset
+            await UpdateOrderSizesAsync(gridState.MarketId, pendingLevels, newLevels.Count, ct).ConfigureAwait(false);
             await _orderManager.PlaceGridOrdersAsync(gridState.MarketId, pendingLevels, ct)
                 .ConfigureAwait(false);
         }
@@ -472,9 +474,14 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     /// <summary>
     /// Updates order sizes for grid levels based on capital allocation.
     /// </summary>
+    /// <param name="marketId">The market ID.</param>
+    /// <param name="levels">The levels to update sizes for.</param>
+    /// <param name="totalGridLevels">Total number of levels in the full grid (for capital allocation).</param>
+    /// <param name="ct">Cancellation token.</param>
     private async Task UpdateOrderSizesAsync(
         int marketId,
         IReadOnlyList<GridLevel> levels,
+        int totalGridLevels,
         CancellationToken ct)
     {
         if (levels.Count == 0)
@@ -482,10 +489,9 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             return;
         }
 
-        var totalLevels = levels.Count;
         var averagePrice = levels.Average(l => l.Price);
 
-        var baseSize = await _orderManager.CalculateOrderSizeAsync(marketId, averagePrice, totalLevels, ct)
+        var baseSize = await _orderManager.CalculateOrderSizeAsync(marketId, averagePrice, totalGridLevels, ct)
             .ConfigureAwait(false);
 
         foreach (var level in levels)

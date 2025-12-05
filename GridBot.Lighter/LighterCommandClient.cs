@@ -20,6 +20,16 @@ public sealed class LighterCommandClient : ILighterCommandClient
     private bool _disposed;
 
     /// <summary>
+    /// Lighter API error code for invalid nonce.
+    /// </summary>
+    private const int InvalidNonceErrorCode = 21104;
+
+    /// <summary>
+    /// Maximum number of retry attempts for nonce errors.
+    /// </summary>
+    private const int MaxNonceRetries = 2;
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="LighterCommandClient"/> class.
     /// </summary>
     /// <param name="queryClient">The query client for fetching nonce data.</param>
@@ -37,6 +47,7 @@ public sealed class LighterCommandClient : ILighterCommandClient
     /// <summary>
     /// Creates and submits a limit, market, stop-loss, or take-profit order in a single operation.
     /// Signs the order locally and submits it to the API.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="request">Order creation request.</param>
     /// <param name="priceProtection">Enable price protection (optional).</param>
@@ -48,22 +59,29 @@ public sealed class LighterCommandClient : ILighterCommandClient
         bool? priceProtection = null,
         CancellationToken cancellationToken = default)
     {
-        // Sign the order locally
-        var (txInfo, error) = await _signer.CreateOrderAsync(request);
-        if (error != null)
-            throw new LighterApiException($"Failed to sign order: {error}");
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                // Sign the order locally
+                var (txInfo, error) = await _signer.CreateOrderAsync(request);
+                if (error != null)
+                    throw new LighterApiException($"Failed to sign order: {error}");
 
-        // Submit to API
-        return await SendTransactionAsync(
-            TransactionTypes.CreateOrder,
-            txInfo!,
-            priceProtection,
+                // Submit to API
+                return await SendTransactionAsync(
+                    TransactionTypes.CreateOrder,
+                    txInfo!,
+                    priceProtection,
+                    cancellationToken);
+            },
+            "CreateOrder",
             cancellationToken);
     }
 
     /// <summary>
     /// Creates and submits a market order with automatic slippage protection.
     /// Fetches current market price from order book and calculates acceptable execution price.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="request">Market order request with slippage tolerance.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -117,15 +135,21 @@ public sealed class LighterCommandClient : ILighterCommandClient
             OrderExpiry = OrderConstants.DefaultIocExpiry
         };
 
-        // Sign and submit the order
-        var (txInfo, error) = await _signer.CreateOrderAsync(orderRequest);
-        if (error != null)
-            throw new LighterApiException($"Failed to sign market order: {error}");
+        // Sign and submit the order with retry on nonce error
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                var (txInfo, error) = await _signer.CreateOrderAsync(orderRequest);
+                if (error != null)
+                    throw new LighterApiException($"Failed to sign market order: {error}");
 
-        return await SendTransactionAsync(
-            TransactionTypes.CreateOrder,
-            txInfo!,
-            priceProtection: true, // Enable price protection for market orders
+                return await SendTransactionAsync(
+                    TransactionTypes.CreateOrder,
+                    txInfo!,
+                    priceProtection: true, // Enable price protection for market orders
+                    cancellationToken);
+            },
+            "CreateMarketOrder",
             cancellationToken);
     }
 
@@ -149,6 +173,7 @@ public sealed class LighterCommandClient : ILighterCommandClient
     /// <summary>
     /// Creates and submits grouped orders (OCO, OTO, OTOCO) in a single operation.
     /// Signs the orders locally and submits them to the API.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="request">Grouped orders creation request.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -158,21 +183,28 @@ public sealed class LighterCommandClient : ILighterCommandClient
         CreateGroupedOrdersRequest request,
         CancellationToken cancellationToken = default)
     {
-        // Sign the grouped orders locally
-        var (txInfo, error) = await _signer.CreateGroupedOrdersAsync(request);
-        if (error != null)
-            throw new LighterApiException($"Failed to sign grouped orders: {error}");
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                // Sign the grouped orders locally
+                var (txInfo, error) = await _signer.CreateGroupedOrdersAsync(request);
+                if (error != null)
+                    throw new LighterApiException($"Failed to sign grouped orders: {error}");
 
-        // Submit to API
-        return await SendTransactionAsync(
-            TransactionTypes.CreateGroupedOrders,
-            txInfo!,
-            cancellationToken: cancellationToken);
+                // Submit to API
+                return await SendTransactionAsync(
+                    TransactionTypes.CreateGroupedOrders,
+                    txInfo!,
+                    cancellationToken: cancellationToken);
+            },
+            "CreateGroupedOrders",
+            cancellationToken);
     }
 
     /// <summary>
     /// Cancels a specific order in a single operation.
     /// Signs the cancellation locally and submits it to the API.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="marketId">Market ID.</param>
     /// <param name="orderId">Order ID to cancel.</param>
@@ -184,21 +216,28 @@ public sealed class LighterCommandClient : ILighterCommandClient
         long orderId,
         CancellationToken cancellationToken = default)
     {
-        // Sign the cancellation locally
-        var result = await _signer.CancelOrderAsync(marketId, orderId);
-        if (result.error != null)
-            throw new LighterApiException($"Failed to sign order cancellation: {result.error}");
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                // Sign the cancellation locally
+                var result = await _signer.CancelOrderAsync(marketId, orderId);
+                if (result.error != null)
+                    throw new LighterApiException($"Failed to sign order cancellation: {result.error}");
 
-        // Submit to API
-        return await SendTransactionAsync(
-            TransactionTypes.CancelOrder,
-            result.txInfo!,
-            cancellationToken: cancellationToken);
+                // Submit to API
+                return await SendTransactionAsync(
+                    TransactionTypes.CancelOrder,
+                    result.txInfo!,
+                    cancellationToken: cancellationToken);
+            },
+            "CancelOrder",
+            cancellationToken);
     }
 
     /// <summary>
     /// Cancels all orders in a market in a single operation.
     /// Signs the cancellation locally and submits it to the API.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="marketId">Market ID.</param>
     /// <param name="timeInForce">Time in force for the cancellation (default: 0 = immediate).</param>
@@ -210,21 +249,28 @@ public sealed class LighterCommandClient : ILighterCommandClient
         long timeInForce = 0,
         CancellationToken cancellationToken = default)
     {
-        // Sign the cancellation locally
-        var result = await _signer.CancelAllOrdersAsync(marketId, timeInForce);
-        if (result.error != null)
-            throw new LighterApiException($"Failed to sign cancel all orders: {result.error}");
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                // Sign the cancellation locally
+                var result = await _signer.CancelAllOrdersAsync(marketId, timeInForce);
+                if (result.error != null)
+                    throw new LighterApiException($"Failed to sign cancel all orders: {result.error}");
 
-        // Submit to API
-        return await SendTransactionAsync(
-            TransactionTypes.CancelAllOrders,
-            result.txInfo!,
-            cancellationToken: cancellationToken);
+                // Submit to API
+                return await SendTransactionAsync(
+                    TransactionTypes.CancelAllOrders,
+                    result.txInfo!,
+                    cancellationToken: cancellationToken);
+            },
+            "CancelAllOrders",
+            cancellationToken);
     }
 
     /// <summary>
     /// Modifies an existing order in a single operation.
     /// Signs the modification locally and submits it to the API.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="request">Order modification request.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -234,21 +280,28 @@ public sealed class LighterCommandClient : ILighterCommandClient
         ModifyOrderRequest request,
         CancellationToken cancellationToken = default)
     {
-        // Sign the modification locally
-        var (txInfo, error) = await _signer.ModifyOrderAsync(request);
-        if (error != null)
-            throw new LighterApiException($"Failed to sign order modification: {error}");
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                // Sign the modification locally
+                var (txInfo, error) = await _signer.ModifyOrderAsync(request);
+                if (error != null)
+                    throw new LighterApiException($"Failed to sign order modification: {error}");
 
-        // Submit to API
-        return await SendTransactionAsync(
-            TransactionTypes.ModifyOrder,
-            txInfo!,
-            cancellationToken: cancellationToken);
+                // Submit to API
+                return await SendTransactionAsync(
+                    TransactionTypes.ModifyOrder,
+                    txInfo!,
+                    cancellationToken: cancellationToken);
+            },
+            "ModifyOrder",
+            cancellationToken);
     }
 
     /// <summary>
     /// Updates position leverage in a single operation.
     /// Signs the update locally and submits it to the API.
+    /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="request">Leverage update request.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -258,16 +311,22 @@ public sealed class LighterCommandClient : ILighterCommandClient
         UpdateLeverageRequest request,
         CancellationToken cancellationToken = default)
     {
-        // Sign the update locally
-        var (txInfo, error) = await _signer.UpdateLeverageAsync(request);
-        if (error != null)
-            throw new LighterApiException($"Failed to sign leverage update: {error}");
+        return await ExecuteWithNonceRetryAsync(
+            async () =>
+            {
+                // Sign the update locally
+                var (txInfo, error) = await _signer.UpdateLeverageAsync(request);
+                if (error != null)
+                    throw new LighterApiException($"Failed to sign leverage update: {error}");
 
         // Submit to API
         return await SendTransactionAsync(
             TransactionTypes.UpdateLeverage,
             txInfo!,
             cancellationToken: cancellationToken);
+    },
+            "UpdateLeverage",
+            cancellationToken);
     }
 
 
@@ -294,7 +353,40 @@ public sealed class LighterCommandClient : ILighterCommandClient
         return response.Nonce;
     }
 
+    /// <summary>
+    /// Executes an operation with automatic nonce resync on error 21104.
+    /// If the operation fails with "invalid nonce", resyncs from server and retries.
+    /// </summary>
+    /// <param name="operation">The async operation to execute.</param>
+    /// <param name="operationName">Name of the operation for logging.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The result of the operation.</returns>
+    private async Task<RespSendTx> ExecuteWithNonceRetryAsync(
+        Func<Task<RespSendTx>> operation,
+        string operationName,
+        CancellationToken cancellationToken)
+    {
+        int retryCount = 0;
 
+        while (true)
+        {
+            try
+            {
+                return await operation();
+            }
+            catch (LighterApiException ex) when (ex.Code == InvalidNonceErrorCode && retryCount < MaxNonceRetries)
+            {
+                retryCount++;
+                Console.WriteLine($"[LighterCommandClient] Nonce error on {operationName} (code {ex.Code}), " +
+                                  $"resyncing nonce (attempt {retryCount}/{MaxNonceRetries})");
+
+                // Resync nonce from server
+                await SyncNonceAsync(_signer.AccountIndex, _signer.ApiKeyIndex, cancellationToken);
+
+                Console.WriteLine($"[LighterCommandClient] Nonce resynced, retrying {operationName}");
+            }
+        }
+    }
 
     /// <summary>
     /// Generates a new API key pair for signing transactions.

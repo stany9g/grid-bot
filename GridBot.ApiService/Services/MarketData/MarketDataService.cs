@@ -75,11 +75,11 @@ public sealed class MarketDataService : IMarketDataService
             return candles.Select(c => new CandlestickData
             {
                 Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(c.Timestamp),
-                Open = ParseDecimal(c.Open),
-                High = ParseDecimal(c.High),
-                Low = ParseDecimal(c.Low),
-                Close = ParseDecimal(c.Close),
-                Volume = ParseDecimal(c.Volume)
+                Open = c.Open,
+                High = c.High,
+                Low = c.Low,
+                Close = c.Close,
+                Volume = c.Volume0
             }).ToList();
         }
         catch (Exception ex)

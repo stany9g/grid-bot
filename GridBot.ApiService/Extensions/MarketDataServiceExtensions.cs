@@ -20,6 +20,9 @@ public static class MarketDataServiceExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        // Register market scaling service (fetches and caches market metadata for price/size scaling)
+        services.AddSingleton<IMarketScalingService, MarketScalingService>();
+
         // Register market data service (depends on ILighterQueryClient)
         services.AddSingleton<IMarketDataService, MarketDataService>();
 

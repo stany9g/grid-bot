@@ -144,6 +144,19 @@ public static class OrderConstants
 
     /// <summary>
     /// USDC ticker scale (6 decimal places).
+    /// Used for balance/collateral values in some contexts.
     /// </summary>
     public const decimal UsdcTickerScale = 1_000_000m;
+
+    /// <summary>
+    /// Price scale for Lighter DEX (2 decimal places).
+    /// Prices are represented in cents (e.g., $2920.57 = 292057).
+    /// </summary>
+    public const decimal PriceScale = 100m;
+
+    /// <summary>
+    /// Base asset scale (8 decimal places).
+    /// Used for order sizes (e.g., 0.01 ETH = 1,000,000).
+    /// </summary>
+    public const decimal BaseAssetScale = 100_000_000m;
 }

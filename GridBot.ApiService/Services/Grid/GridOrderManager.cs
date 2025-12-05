@@ -1,9 +1,12 @@
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
 using GridBot.Lighter;
 using GridBot.Lighter.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using System.Text.Json;
 
 namespace GridBot.ApiService.Services.Grid;
 
@@ -16,6 +19,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
     private readonly ILighterCommandClient _commandClient;
     private readonly ILighterQueryClient _queryClient;
     private readonly IMoonBagManager _moonBagManager;
+    private readonly IMarketScalingService _scalingService;
     private readonly IRiskConfiguration _config;
     private readonly ILogger<GridOrderManager> _logger;
     private readonly SemaphoreSlim _orderLock = new(1, 1);
@@ -26,26 +30,32 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
     /// Account index for trading operations.
     /// In a production system, this would come from configuration.
     /// </summary>
-    private const long AccountIndex = 0;
+    private long AccountIndex = 0;
 
     public GridOrderManager(
         ILighterCommandClient commandClient,
         ILighterQueryClient queryClient,
         IMoonBagManager moonBagManager,
+        IMarketScalingService scalingService,
         IRiskConfiguration config,
-        ILogger<GridOrderManager> logger)
+        ILogger<GridOrderManager> logger,
+        IOptions<LighterOptions> lighterOptions)
     {
         ArgumentNullException.ThrowIfNull(commandClient);
         ArgumentNullException.ThrowIfNull(queryClient);
         ArgumentNullException.ThrowIfNull(moonBagManager);
+        ArgumentNullException.ThrowIfNull(scalingService);
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(lighterOptions);
 
         _commandClient = commandClient;
         _queryClient = queryClient;
         _moonBagManager = moonBagManager;
+        _scalingService = scalingService;
         _config = config;
         _logger = logger;
+        AccountIndex = lighterOptions.Value.AccountIndex;
     }
 
     /// <inheritdoc />
@@ -109,8 +119,10 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                     }
 
                     var clientOrderIndex = GenerateClientOrderIndex(level);
-                    var scaledPrice = ScalePrice(level.Price);
-                    var scaledSize = ScaleSize(level.Size);
+                    var scaledPrice = await _scalingService.ScalePriceAsync(level.Price, marketId, ct)
+                        .ConfigureAwait(false);
+                    var scaledSize = await _scalingService.ScaleBaseAmountAsync(level.Size, marketId, ct)
+                        .ConfigureAwait(false);
 
                     var request = new CreateOrderRequest
                     {
@@ -142,7 +154,6 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                         ordersFailed++;
                         continue;
                     }
-
                     var response = await _commandClient.CreateOrderAsync(request, priceProtection: false, ct)
                         .ConfigureAwait(false);
 
@@ -369,9 +380,9 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             var account = await _queryClient.GetAccountAsync(AccountIndex, ct)
                 .ConfigureAwait(false);
 
-            // Parse available balance (in USDC)
+            // Parse available balance (in USDC) - API returns human-readable values, no scaling needed
             var availableBalance = decimal.TryParse(account.AvailableBalance, out var balance)
-                ? balance / OrderConstants.UsdcTickerScale
+                ? balance
                 : 0m;
 
             if (availableBalance <= 0)
@@ -460,26 +471,6 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         var sideIndicator = level.IsBid ? 0 : 1;
         // Format: timestamp(ms) % 10B * 10000 + sequence(0-999) * 10 + side(0-1) * 5 + levelIndex
         return (timestamp % 10_000_000_000) * 10000 + sequence * 10 + sideIndicator * 5 + level.LevelIndex;
-    }
-
-    /// <summary>
-    /// Scales a decimal price to the Lighter API format.
-    /// </summary>
-    private static long ScalePrice(decimal price)
-    {
-        // Lighter uses 6 decimal places for USDC-based prices
-        return (long)(price * OrderConstants.UsdcTickerScale);
-    }
-
-    /// <summary>
-    /// Scales a decimal size to the Lighter API format.
-    /// </summary>
-    private static long ScaleSize(decimal size)
-    {
-        // Size scaling depends on the base asset decimals
-        // For most crypto assets, we use 8 decimal places
-        const decimal sizeScale = 100_000_000m;
-        return (long)(size * sizeScale);
     }
 
     /// <summary>

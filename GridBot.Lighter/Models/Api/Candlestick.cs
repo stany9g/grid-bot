@@ -14,34 +14,46 @@ public sealed class Candlestick
     public long Timestamp { get; set; }
 
     /// <summary>
-    /// Opening price as string (parse to decimal for calculations).
+    /// Opening price.
     /// </summary>
     [JsonPropertyName("open")]
-    public string Open { get; set; } = "0";
+    public decimal Open { get; set; }
 
     /// <summary>
-    /// Highest price as string (parse to decimal for calculations).
+    /// Highest price in the period.
     /// </summary>
     [JsonPropertyName("high")]
-    public string High { get; set; } = "0";
+    public decimal High { get; set; }
 
     /// <summary>
-    /// Lowest price as string (parse to decimal for calculations).
+    /// Lowest price in the period.
     /// </summary>
     [JsonPropertyName("low")]
-    public string Low { get; set; } = "0";
+    public decimal Low { get; set; }
 
     /// <summary>
-    /// Closing price as string (parse to decimal for calculations).
+    /// Closing price.
     /// </summary>
     [JsonPropertyName("close")]
-    public string Close { get; set; } = "0";
+    public decimal Close { get; set; }
 
     /// <summary>
-    /// Trading volume as string (parse to decimal for calculations).
+    /// Base asset trading volume.
     /// </summary>
-    [JsonPropertyName("volume")]
-    public string Volume { get; set; } = "0";
+    [JsonPropertyName("volume0")]
+    public decimal Volume0 { get; set; }
+
+    /// <summary>
+    /// Quote asset trading volume.
+    /// </summary>
+    [JsonPropertyName("volume1")]
+    public decimal Volume1 { get; set; }
+
+    /// <summary>
+    /// ID of the last trade in this candlestick period.
+    /// </summary>
+    [JsonPropertyName("last_trade_id")]
+    public long LastTradeId { get; set; }
 }
 
 /// <summary>
@@ -64,8 +76,14 @@ public sealed class CandlesticksResponse
     /// <summary>
     /// List of candlesticks.
     /// </summary>
-    [JsonPropertyName("data")]
-    public List<Candlestick> Data { get; set; } = new();
+    [JsonPropertyName("candlesticks")]
+    public List<Candlestick> Candlesticks { get; set; } = new();
+
+    /// <summary>
+    /// Resolution of the candlesticks (e.g., "1h", "1d").
+    /// </summary>
+    [JsonPropertyName("resolution")]
+    public string? Resolution { get; set; }
 
     /// <summary>
     /// Gets whether the operation was successful.

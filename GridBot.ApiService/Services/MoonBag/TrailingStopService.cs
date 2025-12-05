@@ -24,6 +24,7 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
 {
     private readonly IMoonBagManager _moonBagManager;
     private readonly IMarketDataService _marketDataService;
+    private readonly IMarketScalingService _scalingService;
     private readonly ILighterCommandClient _commandClient;
     private readonly ILighterQueryClient _queryClient;
     private readonly IRiskConfiguration _config;
@@ -43,6 +44,7 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
     public TrailingStopService(
         IMoonBagManager moonBagManager,
         IMarketDataService marketDataService,
+        IMarketScalingService scalingService,
         ILighterCommandClient commandClient,
         ILighterQueryClient queryClient,
         IRiskConfiguration config,
@@ -51,6 +53,7 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(moonBagManager);
         ArgumentNullException.ThrowIfNull(marketDataService);
+        ArgumentNullException.ThrowIfNull(scalingService);
         ArgumentNullException.ThrowIfNull(commandClient);
         ArgumentNullException.ThrowIfNull(queryClient);
         ArgumentNullException.ThrowIfNull(config);
@@ -59,6 +62,7 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
 
         _moonBagManager = moonBagManager;
         _marketDataService = marketDataService;
+        _scalingService = scalingService;
         _commandClient = commandClient;
         _queryClient = queryClient;
         _config = config;
@@ -302,15 +306,19 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
 
             // Create market sell order for non-moon-bag portion
             // Note: Using aggressive limit with 1% slippage tolerance
-            var slippagePrice = status.IsLongPosition
-                ? (long)(currentPrice * 0.99m * OrderConstants.UsdcTickerScale)
-                : (long)(currentPrice * 1.01m * OrderConstants.UsdcTickerScale);
+            var slippageAdjustedPrice = status.IsLongPosition
+                ? currentPrice * 0.99m  // 1% below for sells
+                : currentPrice * 1.01m; // 1% above for shorts
+
+            // Scale using market-specific decimals from metadata
+            var slippagePrice = await _scalingService.ScalePriceAsync(slippageAdjustedPrice, marketId, ct).ConfigureAwait(false);
+            var scaledSellQuantity = await _scalingService.ScaleBaseAmountAsync(sellQuantity, marketId, ct).ConfigureAwait(false);
 
             var sellOrder = new CreateOrderRequest
             {
                 MarketIndex = marketId,
                 ClientOrderIndex = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                BaseAmount = (long)(sellQuantity * OrderConstants.UsdcTickerScale),
+                BaseAmount = scaledSellQuantity,
                 Price = slippagePrice,
                 IsAsk = status.IsLongPosition, // Sell for long, buy for short
                 OrderType = OrderType.Limit,
@@ -443,9 +451,14 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
 
             // Create new stop-loss order
             // Using StopLossLimit with aggressive price for execution
-            var executionPrice = status.IsLongPosition
-                ? (long)(stopPrice * 0.99m * OrderConstants.UsdcTickerScale)  // 1% below stop for slippage
-                : (long)(stopPrice * 1.01m * OrderConstants.UsdcTickerScale); // 1% above for shorts
+            var executionAdjustedPrice = status.IsLongPosition
+                ? stopPrice * 0.99m   // 1% below stop for slippage
+                : stopPrice * 1.01m;  // 1% above for shorts
+
+            // Scale using market-specific decimals from metadata
+            var executionPrice = await _scalingService.ScalePriceAsync(executionAdjustedPrice, marketId, ct).ConfigureAwait(false);
+            var triggerPrice = await _scalingService.ScalePriceAsync(stopPrice, marketId, ct).ConfigureAwait(false);
+            var scaledSellQuantity = await _scalingService.ScaleBaseAmountAsync(sellQuantity, marketId, ct).ConfigureAwait(false);
 
             // Use timestamp as client order index - this will be our order identifier
             var clientOrderIndex = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -454,13 +467,13 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
             {
                 MarketIndex = marketId,
                 ClientOrderIndex = clientOrderIndex,
-                BaseAmount = (long)(sellQuantity * OrderConstants.UsdcTickerScale),
+                BaseAmount = scaledSellQuantity,
                 Price = executionPrice,
                 IsAsk = status.IsLongPosition,
                 OrderType = OrderType.StopLossLimit,
                 TimeInForce = TimeInForce.GoodTillTime,
                 ReduceOnly = true,
-                TriggerPrice = (int)(stopPrice * OrderConstants.UsdcTickerScale)
+                TriggerPrice = (int)triggerPrice
             };
 
             try

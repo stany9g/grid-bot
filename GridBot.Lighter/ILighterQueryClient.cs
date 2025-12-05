@@ -78,7 +78,27 @@ public interface ILighterQueryClient
     Task<NextNonce> GetNextNonceAsync(long accountIndex, int apiKeyIndex, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Gets candlestick (OHLCV) data for a market.
+    /// Gets candlestick (OHLCV) data for a market with explicit timestamp range.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="startTimestamp">Start timestamp in milliseconds (Unix epoch).</param>
+    /// <param name="endTimestamp">End timestamp in milliseconds (Unix epoch).</param>
+    /// <param name="resolution">Candle resolution (1m, 5m, 15m, 1h, 4h, 1d). Default is 1h.</param>
+    /// <param name="countBack">Number of candles to return. Default is 20.</param>
+    /// <param name="setTimestampToEnd">If true, sets timestamp to end of candle period. Default is false.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of candlesticks ordered by timestamp ascending.</returns>
+    Task<List<Candlestick>> GetCandlesticksAsync(
+        int marketId,
+        long startTimestamp,
+        long endTimestamp,
+        string resolution = "1h",
+        int countBack = 20,
+        bool setTimestampToEnd = false,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets candlestick (OHLCV) data for a market. Automatically calculates timestamps based on resolution and countBack.
     /// </summary>
     /// <param name="marketId">Market ID.</param>
     /// <param name="resolution">Candle resolution (1m, 5m, 15m, 1h, 4h, 1d). Default is 1h.</param>

@@ -198,7 +198,40 @@ public sealed class LighterQueryClient : ILighterQueryClient
     }
 
     /// <summary>
-    /// Gets candlestick (OHLCV) data for a market.
+    /// Gets candlestick (OHLCV) data for a market with explicit timestamp range.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="startTimestamp">Start timestamp in milliseconds (Unix epoch).</param>
+    /// <param name="endTimestamp">End timestamp in milliseconds (Unix epoch).</param>
+    /// <param name="resolution">Candle resolution (1m, 5m, 15m, 1h, 4h, 1d). Default is 1h.</param>
+    /// <param name="countBack">Number of candles to return. Default is 20.</param>
+    /// <param name="setTimestampToEnd">If true, sets timestamp to end of candle period. Default is false.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>List of candlesticks ordered by timestamp ascending.</returns>
+    /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
+    public async Task<List<Candlestick>> GetCandlesticksAsync(
+        int marketId,
+        long startTimestamp,
+        long endTimestamp,
+        string resolution = "1h",
+        int countBack = 20,
+        bool setTimestampToEnd = false,
+        CancellationToken cancellationToken = default)
+    {
+        var queryParams = $"?market_id={marketId}&resolution={resolution}&start_timestamp={startTimestamp}&end_timestamp={endTimestamp}&count_back={countBack}";
+        if (setTimestampToEnd)
+            queryParams += "&set_timestamp_to_end=true";
+
+        var response = await GetAsync<CandlesticksResponse>($"candlesticks{queryParams}", cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException(response.Message ?? "Failed to get candlesticks", response.Code);
+
+        return response.Candlesticks;
+    }
+
+    /// <summary>
+    /// Gets candlestick (OHLCV) data for a market. Automatically calculates timestamps based on resolution and countBack.
     /// </summary>
     /// <param name="marketId">Market ID.</param>
     /// <param name="resolution">Candle resolution (1m, 5m, 15m, 1h, 4h, 1d). Default is 1h.</param>
@@ -212,13 +245,23 @@ public sealed class LighterQueryClient : ILighterQueryClient
         int countBack = 20,
         CancellationToken cancellationToken = default)
     {
-        var queryParams = $"?market_id={marketId}&resolution={resolution}&count_back={countBack}";
-        var response = await GetAsync<CandlesticksResponse>($"candlesticks{queryParams}", cancellationToken);
+        var endTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        if (!response.IsSuccess)
-            throw new LighterApiException(response.Message ?? "Failed to get candlesticks", response.Code);
+        // Calculate start timestamp based on resolution
+        var periodMs = resolution switch
+        {
+            "1m" => 60_000L,
+            "5m" => 300_000L,
+            "15m" => 900_000L,
+            "1h" => 3_600_000L,
+            "4h" => 14_400_000L,
+            "1d" => 86_400_000L,
+            _ => 3_600_000L
+        };
 
-        return response.Data;
+        var startTimestamp = endTimestamp - (periodMs * countBack);
+
+        return await GetCandlesticksAsync(marketId, startTimestamp, endTimestamp, resolution, countBack, false, cancellationToken);
     }
 
     /// <summary>
@@ -264,10 +307,11 @@ public sealed class LighterQueryClient : ILighterQueryClient
         try
         {
             var response = await _httpClient.GetAsync(endpoint, cancellationToken);
-            await EnsureSuccessStatusCodeAsync(response);
 
             var rawJson = await response.Content.ReadAsStringAsync(cancellationToken);
-            _logger?.LogDebug("API Response for {Endpoint}: {RawJson}", endpoint, rawJson);
+            _logger?.LogInformation("API Response for {Endpoint}: {RawJson}", endpoint, rawJson);
+            await EnsureSuccessStatusCodeAsync(response);
+    
 
             var result = JsonSerializer.Deserialize<T>(rawJson, _jsonOptions);
             return result ?? throw new LighterApiException("Failed to deserialize response");
