@@ -80,7 +80,15 @@ public sealed class LighterQueryClient : ILighterQueryClient
         long accountIndex,
         CancellationToken cancellationToken = default)
     {
-        return await GetAsync<Account>($"account?by=index&value={accountIndex}", cancellationToken);
+        var response = await GetAsync<AccountResponse>($"account?by=index&value={accountIndex}", cancellationToken);
+
+        if (!response.IsSuccess)
+            throw new LighterApiException($"Failed to get account: code {response.Code}", response.Code);
+
+        if (response.Accounts.Count == 0)
+            throw new LighterApiException($"Account with index {accountIndex} not found");
+
+        return response.Accounts[0];
     }
 
     /// <summary>

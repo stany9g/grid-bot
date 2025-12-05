@@ -9,6 +9,7 @@ namespace GridBot.ApiService.Services.Trend;
 /// <summary>
 /// Orchestrator for trend intelligence processing cycle.
 /// Coordinates trend detection, inventory analysis, and rebalancing.
+/// NEVER HALT: This service always continues processing, adjusting state as needed.
 /// </summary>
 public sealed class TrendIntelligenceService : ITrendIntelligenceService
 {
@@ -69,26 +70,20 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
             inventoryAnalysis = await _inventoryManager.AnalyzeInventoryAsync(marketId, ct);
 
             _logger.LogDebug(
-                "Inventory analysis for market {MarketId}: Current={CurrentSkew:F1}%, Target={TargetSkew:F1}%, RebalanceNeeded={RebalanceNeeded}",
-                marketId, inventoryAnalysis.CurrentSkew, inventoryAnalysis.TargetSkew, inventoryAnalysis.RebalanceNeeded);
+                "Inventory analysis for market {MarketId}: Current={CurrentSkew:F1}%, Target={TargetSkew:F1}%, RebalanceNeeded={RebalanceNeeded}, Bootstrap={Bootstrap}, SkewCorrection={SkewCorrection}",
+                marketId, inventoryAnalysis.CurrentSkew, inventoryAnalysis.TargetSkew,
+                inventoryAnalysis.RebalanceNeeded, inventoryAnalysis.IsBootstrapMode, inventoryAnalysis.SkewCorrectionMode);
 
-            // Step 4: Handle halt condition if needed
-            if (inventoryAnalysis.HaltRequired)
-            {
-                _logger.LogWarning(
-                    "Inventory skew exceeded max limit on market {MarketId}. Current={CurrentSkew:F1}%. Requesting halt.",
-                    marketId, inventoryAnalysis.CurrentSkew);
+            // Step 4: Handle operational state transitions based on inventory analysis
+            // NEVER HALT - just transition to appropriate degraded state
+            await HandleStateTransitionsAsync(marketId, inventoryAnalysis);
 
-                await _tradingStateService.TransitionToAsync(TradingState.Paused, "Max inventory skew exceeded");
+            // Step 5: Execute rebalance if needed
+            // Rebalancing is allowed in all states except Degraded_ProtectiveMode
+            var currentState = _tradingStateService.CurrentState;
+            var canRebalance = currentState != TradingState.Degraded_ProtectiveMode;
 
-                return TrendIntelligenceResult.Failed(
-                    "Trading halted due to max inventory skew",
-                    trendAnalysis,
-                    inventoryAnalysis);
-            }
-
-            // Step 5: Execute rebalance if needed and trading is active
-            if (inventoryAnalysis.RebalanceNeeded && _tradingStateService.CurrentState == TradingState.Active)
+            if (inventoryAnalysis.RebalanceNeeded && canRebalance)
             {
                 if (_rebalancingService.CanRebalanceNow(marketId))
                 {
@@ -114,7 +109,7 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
                 else
                 {
                     _logger.LogDebug(
-                        "Rebalance skipped on market {MarketId}: Cannot rebalance now (rate limit or state)",
+                        "Rebalance skipped on market {MarketId}: Cannot rebalance now (rate limit)",
                         marketId);
                 }
             }
@@ -125,6 +120,7 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
                 await UpdateInventoryStateAsync(inventoryAnalysis, rebalanceResult);
             }
 
+            // Always return success - the cycle completed
             return TrendIntelligenceResult.Succeeded(
                 trendAnalysis,
                 inventoryAnalysis,
@@ -141,10 +137,70 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
         {
             _logger.LogError(ex, "Error during trend intelligence cycle for market {MarketId}", marketId);
 
+            // Even on error, return a result - don't halt
             return TrendIntelligenceResult.Failed(
                 $"Error: {ex.Message}",
                 trendAnalysis,
                 inventoryAnalysis);
+        }
+    }
+
+    /// <summary>
+    /// Handles state transitions based on inventory analysis.
+    /// NEVER HALT - transitions to appropriate degraded states instead.
+    /// </summary>
+    private async Task HandleStateTransitionsAsync(int marketId, InventoryAnalysis inventoryAnalysis)
+    {
+        var currentState = _tradingStateService.CurrentState;
+
+        // Handle bootstrap mode (no position)
+        if (inventoryAnalysis.IsBootstrapMode)
+        {
+            if (currentState != TradingState.Degraded_Bootstrap)
+            {
+                _logger.LogInformation(
+                    "Bootstrap mode detected on market {MarketId}. Position=0%, enabling buy-only grid.",
+                    marketId);
+
+                await _tradingStateService.TransitionToAsync(
+                    TradingState.Degraded_Bootstrap,
+                    "Building initial position");
+            }
+            return;
+        }
+
+        // Handle skew correction mode
+        if (inventoryAnalysis.SkewCorrectionMode)
+        {
+            var direction = inventoryAnalysis.CorrectionDirection == SkewCorrectionDirection.NeedMoreCrypto
+                ? "buying" : "selling";
+
+            if (currentState != TradingState.Degraded_SkewCorrection)
+            {
+                _logger.LogInformation(
+                    "Skew correction mode on market {MarketId}. Current={CurrentSkew:F1}%, Target range [{Min:F1}%-{Max:F1}%] requires more {Direction}.",
+                    marketId, inventoryAnalysis.CurrentSkew,
+                    inventoryAnalysis.AcceptableSkewMin, inventoryAnalysis.AcceptableSkewMax, direction);
+
+                await _tradingStateService.TransitionToAsync(
+                    TradingState.Degraded_SkewCorrection,
+                    $"Correcting skew via {direction}");
+            }
+            return;
+        }
+
+        // Return to Active if correction no longer needed
+        if (currentState == TradingState.Degraded_SkewCorrection ||
+            currentState == TradingState.Degraded_Bootstrap)
+        {
+            _logger.LogInformation(
+                "Returning to Active state on market {MarketId}. Skew={CurrentSkew:F1}% within acceptable range [{Min:F1}%-{Max:F1}%].",
+                marketId, inventoryAnalysis.CurrentSkew,
+                inventoryAnalysis.AcceptableSkewMin, inventoryAnalysis.AcceptableSkewMax);
+
+            await _tradingStateService.TransitionToAsync(
+                TradingState.Active,
+                "Skew within acceptable range");
         }
     }
 

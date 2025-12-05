@@ -65,26 +65,39 @@ public sealed class TradingBotHealthCheck : IHealthCheck
         }
 
         // Report health based on trading state
+        // NEVER HALT: All states are healthy or degraded, never unhealthy due to state alone
         return state switch
         {
             TradingState.Active => Task.FromResult(HealthCheckResult.Healthy(
-                "Trading bot active and running",
+                "Trading bot active at full capacity",
                 data)),
 
-            TradingState.Paused => Task.FromResult(HealthCheckResult.Degraded(
-                "Trading bot paused",
+            TradingState.Degraded_Bootstrap => Task.FromResult(HealthCheckResult.Degraded(
+                "Trading bot in bootstrap mode - building initial position",
                 data: data)),
 
-            TradingState.Halted => Task.FromResult(HealthCheckResult.Unhealthy(
-                "Trading bot halted due to risk trigger",
+            TradingState.Degraded_SkewCorrection => Task.FromResult(HealthCheckResult.Degraded(
+                "Trading bot correcting inventory skew",
+                data: data)),
+
+            TradingState.Degraded_HighVolatility => Task.FromResult(HealthCheckResult.Degraded(
+                "Trading bot in high volatility mode - reduced capacity",
+                data: data)),
+
+            TradingState.Degraded_LowLiquidity => Task.FromResult(HealthCheckResult.Degraded(
+                "Trading bot in low liquidity mode - wider spreads",
+                data: data)),
+
+            TradingState.Degraded_ProtectiveMode => Task.FromResult(HealthCheckResult.Degraded(
+                "Trading bot in protective mode - minimal capacity",
                 data: data)),
 
             TradingState.Recovering => Task.FromResult(HealthCheckResult.Degraded(
-                "Trading bot recovering from halt",
+                "Trading bot recovering - gradually increasing capacity",
                 data: data)),
 
-            _ => Task.FromResult(HealthCheckResult.Unhealthy(
-                $"Unknown trading state: {state}",
+            _ => Task.FromResult(HealthCheckResult.Degraded(
+                $"Trading bot in state: {state}",
                 data: data))
         };
     }

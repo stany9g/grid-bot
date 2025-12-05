@@ -264,10 +264,11 @@ public sealed class LossMonitor : ILossMonitor, IDisposable
                 limits.DailyLossPercent);
 
             await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
-            await _tradingState.TransitionToAsync(TradingState.Halted, "Daily loss limit breached").ConfigureAwait(false);
+            // NEVER HALT: Use Degraded_ProtectiveMode instead - bot continues at minimum capacity
+            await _tradingState.TransitionToAsync(TradingState.Degraded_ProtectiveMode, "Daily loss limit breached").ConfigureAwait(false);
 
             _logger.LogCritical(
-                "DAILY LOSS LIMIT BREACHED for market {MarketId}: {Loss}% <= {Limit}%. Trading halted for 24 hours.",
+                "DAILY LOSS LIMIT BREACHED for market {MarketId}: {Loss}% <= {Limit}%. Entering protective mode for 24 hours.",
                 marketId, state.DailyPnl, limits.DailyLossPercent);
         }
 
@@ -286,10 +287,11 @@ public sealed class LossMonitor : ILossMonitor, IDisposable
                 limits.WeeklyLossPercent);
 
             await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
-            await _tradingState.TransitionToAsync(TradingState.Halted, "Weekly loss limit breached").ConfigureAwait(false);
+            // NEVER HALT: Use Degraded_ProtectiveMode instead - bot continues at minimum capacity
+            await _tradingState.TransitionToAsync(TradingState.Degraded_ProtectiveMode, "Weekly loss limit breached").ConfigureAwait(false);
 
             _logger.LogCritical(
-                "WEEKLY LOSS LIMIT BREACHED for market {MarketId}: {Loss}% <= {Limit}%. Trading halted for 7 days.",
+                "WEEKLY LOSS LIMIT BREACHED for market {MarketId}: {Loss}% <= {Limit}%. Entering protective mode for 7 days.",
                 marketId, state.WeeklyPnl, limits.WeeklyLossPercent);
         }
 
@@ -308,10 +310,12 @@ public sealed class LossMonitor : ILossMonitor, IDisposable
                 limits.MonthlyLossPercent);
 
             await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
-            await _tradingState.TransitionToAsync(TradingState.Halted, "Monthly loss limit breached - manual restart required").ConfigureAwait(false);
+            // NEVER HALT: Use Degraded_ProtectiveMode instead - bot continues at minimum capacity
+            // Manual intervention still required to exit protective mode
+            await _tradingState.TransitionToAsync(TradingState.Degraded_ProtectiveMode, "Monthly loss limit breached - manual restart required").ConfigureAwait(false);
 
             _logger.LogCritical(
-                "MONTHLY LOSS LIMIT BREACHED for market {MarketId}: {Loss}% <= {Limit}%. Trading halted - MANUAL RESTART REQUIRED.",
+                "MONTHLY LOSS LIMIT BREACHED for market {MarketId}: {Loss}% <= {Limit}%. Entering protective mode - MANUAL RESTART REQUIRED.",
                 marketId, state.MonthlyPnl, limits.MonthlyLossPercent);
         }
 

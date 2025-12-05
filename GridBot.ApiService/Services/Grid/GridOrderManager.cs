@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.Json;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.MarketData;
@@ -6,7 +8,6 @@ using GridBot.Lighter;
 using GridBot.Lighter.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System.Text.Json;
 
 namespace GridBot.ApiService.Services.Grid;
 
@@ -381,7 +382,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                 .ConfigureAwait(false);
 
             // Parse available balance (in USDC) - API returns human-readable values, no scaling needed
-            var availableBalance = decimal.TryParse(account.AvailableBalance, out var balance)
+            var availableBalance = decimal.TryParse(account.AvailableBalance, NumberStyles.Number, CultureInfo.InvariantCulture, out var balance)
                 ? balance
                 : 0m;
 
@@ -441,11 +442,11 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             }
 
             // Parse position size - returns absolute value since sign indicates direction
-            if (!decimal.TryParse(position.Size, out var size))
+            if (!decimal.TryParse(position.Positionn, NumberStyles.Number, CultureInfo.InvariantCulture, out var size))
             {
                 _logger.LogWarning(
                     "Failed to parse position size '{Size}' for market {MarketId}",
-                    position.Size, marketId);
+                    position.Positionn, marketId);
                 return 0m;
             }
 

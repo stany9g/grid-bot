@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Capacity;
 using GridBot.ApiService.Services.Indicators;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.OrderBook;
@@ -12,6 +13,7 @@ namespace GridBot.ApiService.Services.Grid;
 /// <summary>
 /// Manages the complete lifecycle of trading grids.
 /// Thread-safe for concurrent access.
+/// NEVER HALT: Grid always runs, capacity controls behavior.
 /// </summary>
 public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 {
@@ -22,6 +24,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     private readonly IOrderBookAnalyzer _orderBookAnalyzer;
     private readonly IRiskConfiguration _config;
     private readonly ITradingStateService _stateService;
+    private readonly IOperationalCapacityService _capacityService;
     private readonly ILogger<GridLifecycleService> _logger;
 
     private readonly ConcurrentDictionary<int, GridState> _gridStates = new();
@@ -46,6 +49,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         IOrderBookAnalyzer orderBookAnalyzer,
         IRiskConfiguration config,
         ITradingStateService stateService,
+        IOperationalCapacityService capacityService,
         ILogger<GridLifecycleService> logger)
     {
         ArgumentNullException.ThrowIfNull(gridCalculator);
@@ -55,6 +59,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         ArgumentNullException.ThrowIfNull(orderBookAnalyzer);
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(stateService);
+        ArgumentNullException.ThrowIfNull(capacityService);
         ArgumentNullException.ThrowIfNull(logger);
 
         _gridCalculator = gridCalculator;
@@ -64,6 +69,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         _orderBookAnalyzer = orderBookAnalyzer;
         _config = config;
         _stateService = stateService;
+        _capacityService = capacityService;
         _logger = logger;
     }
 
@@ -77,11 +83,16 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         {
             _logger.LogInformation("Initializing grid for market {MarketId}", marketId);
 
-            // Verify trading state allows initialization
-            if (_stateService.CurrentState != TradingState.Active)
+            // Verify trading state - NEVER HALT
+            // In protective mode, allow reduce-only grid initialization
+            var state = _stateService.CurrentState;
+            var reduceOnlyMode = state == TradingState.Degraded_ProtectiveMode;
+
+            if (reduceOnlyMode)
             {
-                throw new InvalidOperationException(
-                    $"Cannot initialize grid: trading state is {_stateService.CurrentState}");
+                _logger.LogInformation(
+                    "Protective mode: Initializing reduce-only grid for market {MarketId}",
+                    marketId);
             }
 
             // Get market data
@@ -107,6 +118,15 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
             // Calculate grid levels
             var levels = _gridCalculator.CalculateGridLevels(currentPrice, parameters, clusters);
+
+            // In reduce-only mode (protective mode), filter to only sell orders
+            if (reduceOnlyMode)
+            {
+                levels = levels.Where(l => !l.IsBid).ToList(); // Keep only asks (sells)
+                _logger.LogInformation(
+                    "Reduce-only mode: Filtered to {Count} sell orders for market {MarketId}",
+                    levels.Count, marketId);
+            }
 
             // Calculate order sizes for each level
             await UpdateOrderSizesAsync(marketId, levels, levels.Count, ct).ConfigureAwait(false);
@@ -167,9 +187,14 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             return new GridUpdateResult { Message = "Grid is paused" };
         }
 
-        if (_stateService.CurrentState != TradingState.Active)
+        // NEVER HALT: Allow updates in all states, including protective mode
+        // In protective mode, we still need to monitor fills and manage position
+        var currentState = _stateService.CurrentState;
+        var reduceOnlyMode = currentState == TradingState.Degraded_ProtectiveMode;
+
+        if (reduceOnlyMode)
         {
-            return new GridUpdateResult { Message = $"Trading state is {_stateService.CurrentState}" };
+            _logger.LogDebug("Protective mode: Updating grid in reduce-only mode for market {MarketId}", marketId);
         }
 
         var gridLock = GetGridLock(marketId);
@@ -192,6 +217,22 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                 l.Status == GridLevelStatus.Filled &&
                 !previouslyFilled.Contains(l.ClientOrderIndex));
             gridState.TotalFills += fillsDetected;
+
+            // EC-002: Check if all orders were cancelled externally while position exists
+            var activeOrderCount = gridState.Levels.Count(l =>
+                l.Status == GridLevelStatus.Active && l.OrderId.HasValue);
+            var inventory = _stateService.CurrentInventory;
+            var hasPosition = inventory.CurrentSkew > 5; // More than 5% crypto = has position
+
+            if (activeOrderCount == 0 && hasPosition && gridState.Levels.Count > 0)
+            {
+                _logger.LogWarning(
+                    "EC-002: All orders cancelled externally for market {MarketId}. Position exists (skew={Skew:F1}%). Rebuilding grid.",
+                    marketId, inventory.CurrentSkew);
+
+                // Reinitialize the grid to protect the position
+                gridState.Status = GridStatus.Rebuilding;
+            }
 
             // Get current market data
             var currentPrice = await _marketDataService.GetCurrentPriceAsync(marketId, ct)
@@ -224,12 +265,15 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                                gridState.Parameters.GridSpacing;
             var shouldRebuild = spacingChange > AtrChangeThreshold;
 
-            if (shouldRebuild)
+            // EC-002 triggered rebuild or ATR-based rebuild
+            if (gridState.Status == GridStatus.Rebuilding || shouldRebuild)
             {
                 // Full rebuild needed
-                _logger.LogInformation(
-                    "ATR changed significantly ({Change:P0}), rebuilding grid",
-                    spacingChange);
+                var rebuildReason = gridState.Status == GridStatus.Rebuilding
+                    ? "EC-002 external cancellation detected"
+                    : $"ATR changed significantly ({spacingChange:P0})";
+
+                _logger.LogInformation("Rebuilding grid for market {MarketId}: {Reason}", marketId, rebuildReason);
 
                 gridState.Status = GridStatus.Rebuilding;
                 await _orderManager.CancelAllGridOrdersAsync(marketId, ct).ConfigureAwait(false);
@@ -264,6 +308,12 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             {
                 // Just replace filled orders
                 var filledLevels = gridState.Levels.Where(l => l.Status == GridLevelStatus.Filled).ToList();
+
+                // In reduce-only mode (protective mode), only replace sell orders
+                if (reduceOnlyMode)
+                {
+                    filledLevels = filledLevels.Where(l => !l.IsBid).ToList();
+                }
 
                 foreach (var level in filledLevels)
                 {
@@ -473,6 +523,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
     /// <summary>
     /// Updates order sizes for grid levels based on capital allocation.
+    /// Applies skew correction if in SkewCorrection state.
     /// </summary>
     /// <param name="marketId">The market ID.</param>
     /// <param name="levels">The levels to update sizes for.</param>
@@ -494,15 +545,65 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         var baseSize = await _orderManager.CalculateOrderSizeAsync(marketId, averagePrice, totalGridLevels, ct)
             .ConfigureAwait(false);
 
+        // Get skew correction multipliers based on current state
+        var (buyMultiplier, sellMultiplier) = GetSkewCorrectionMultipliers();
+
         foreach (var level in levels)
         {
-            // Update order size based on capital allocation
-            level.Size = baseSize;
+            // Apply skew correction multipliers
+            var multiplier = level.IsBid ? buyMultiplier : sellMultiplier;
+            level.Size = baseSize * multiplier;
+        }
+
+        if (buyMultiplier != 1.0m || sellMultiplier != 1.0m)
+        {
+            _logger.LogInformation(
+                "Applied skew correction to grid for market {MarketId}: buy={BuyMult:F2}x, sell={SellMult:F2}x",
+                marketId, buyMultiplier, sellMultiplier);
         }
 
         _logger.LogDebug(
-            "Updated order sizes for {Count} levels: {Size} per level",
-            levels.Count, baseSize);
+            "Updated order sizes for {Count} levels: base={BaseSize}, buyMult={BuyMult:F2}, sellMult={SellMult:F2}",
+            levels.Count, baseSize, buyMultiplier, sellMultiplier);
+    }
+
+    /// <summary>
+    /// Gets skew correction multipliers based on current trading state.
+    /// When in skew correction mode, biases grid toward the correction direction.
+    /// </summary>
+    /// <returns>Tuple of (buyMultiplier, sellMultiplier).</returns>
+    private (decimal BuyMultiplier, decimal SellMultiplier) GetSkewCorrectionMultipliers()
+    {
+        var currentState = _stateService.CurrentState;
+        var inventory = _stateService.CurrentInventory;
+
+        // Default: no correction
+        if (currentState != TradingState.Degraded_SkewCorrection)
+        {
+            return (1.0m, 1.0m);
+        }
+
+        // Determine correction direction based on current vs target skew
+        var skewDelta = inventory.CurrentSkew - inventory.TargetSkew;
+
+        if (skewDelta > 5) // Too much crypto - need to sell more
+        {
+            // Per framework spec: buy orders = reduce by 75%, sell orders = increase by 50%
+            _logger.LogDebug(
+                "Skew correction: Need less crypto. Skew={Current:F1}%, Target={Target:F1}%",
+                inventory.CurrentSkew, inventory.TargetSkew);
+            return (0.25m, 1.5m);
+        }
+        else if (skewDelta < -5) // Too little crypto - need to buy more
+        {
+            // Per framework spec: buy orders = increase by 50%, sell orders = reduce by 75%
+            _logger.LogDebug(
+                "Skew correction: Need more crypto. Skew={Current:F1}%, Target={Target:F1}%",
+                inventory.CurrentSkew, inventory.TargetSkew);
+            return (1.5m, 0.25m);
+        }
+
+        return (1.0m, 1.0m);
     }
 
     /// <summary>

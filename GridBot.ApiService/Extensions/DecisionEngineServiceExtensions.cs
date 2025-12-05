@@ -1,3 +1,4 @@
+using GridBot.ApiService.Services.Capacity;
 using GridBot.ApiService.Services.DecisionEngine;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -16,6 +17,9 @@ public static class DecisionEngineServiceExtensions
     public static IServiceCollection AddDecisionEngine(this IServiceCollection services)
     {
         ArgumentNullException.ThrowIfNull(services);
+
+        // Register Operational Capacity Service (singleton for consistent capacity calculations)
+        services.AddSingleton<IOperationalCapacityService, OperationalCapacityService>();
 
         // Register Recovery Manager (singleton for state persistence)
         services.AddSingleton<IRecoveryManager, RecoveryManager>();

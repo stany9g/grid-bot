@@ -83,7 +83,8 @@ public sealed class TradingBotHostedService : BackgroundService
         await LoadPersistedStateAsync(cancellationToken).ConfigureAwait(false);
 
         // Auto-start trading if configured (typically enabled in Development)
-        if (_riskConfig.Options.AutoStartTrading && _stateService.CurrentState == TradingState.Paused)
+        // NEVER HALT: The bot always runs, just check if we should go to full Active mode
+        if (_riskConfig.Options.AutoStartTrading && _stateService.CurrentState != TradingState.Active)
         {
             _logger.LogInformation("AutoStartTrading is enabled - transitioning to Active state");
             await _stateService.TransitionToAsync(TradingState.Active, "Auto-start on startup")
@@ -222,10 +223,11 @@ public sealed class TradingBotHostedService : BackgroundService
         await _decisionEngine.ShutdownAsync(_riskConfig.MarketId, cancellationToken)
             .ConfigureAwait(false);
 
-        // Transition to Paused state for graceful shutdown
+        // Transition to Recovering state for graceful shutdown
+        // NEVER HALT: Even on shutdown, we use a valid degraded state
         if (_stateService.CurrentState == TradingState.Active)
         {
-            await _stateService.TransitionToAsync(TradingState.Paused, "Service shutdown")
+            await _stateService.TransitionToAsync(TradingState.Recovering, "Service shutdown")
                 .ConfigureAwait(false);
         }
 

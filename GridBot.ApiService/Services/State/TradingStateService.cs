@@ -6,6 +6,7 @@ namespace GridBot.ApiService.Services.State;
 
 /// <summary>
 /// Manages trading bot state with thread-safe transitions.
+/// CORE PRINCIPLE: The bot NEVER halts. States represent capacity levels, not stop conditions.
 /// </summary>
 public sealed class TradingStateService : ITradingStateService, IDisposable
 {
@@ -13,7 +14,8 @@ public sealed class TradingStateService : ITradingStateService, IDisposable
     private readonly IStateRepository _stateRepository;
     private readonly SemaphoreSlim _stateLock = new(1, 1);
 
-    private TradingState _currentState = TradingState.Paused;
+    // Default to Active - the bot should always be running
+    private TradingState _currentState = TradingState.Active;
     private TrendState _currentTrendState = TrendState.Neutral;
     private InventoryState _currentInventory = new();
     private DateTimeOffset _stateStartedAt = DateTimeOffset.UtcNow;
@@ -198,25 +200,61 @@ public sealed class TradingStateService : ITradingStateService, IDisposable
         if (from == to)
             return true;
 
+        // NEVER HALT philosophy: All states can transition to any other state
+        // The bot is always running, just at different capacity levels
         return (from, to) switch
         {
-            // From Active - can pause or halt
-            (TradingState.Active, TradingState.Paused) => true,
-            (TradingState.Active, TradingState.Halted) => true,
+            // From Active - can go to any degraded state or recovering
+            (TradingState.Active, TradingState.Degraded_Bootstrap) => true,
+            (TradingState.Active, TradingState.Degraded_SkewCorrection) => true,
+            (TradingState.Active, TradingState.Degraded_HighVolatility) => true,
+            (TradingState.Active, TradingState.Degraded_LowLiquidity) => true,
+            (TradingState.Active, TradingState.Degraded_ProtectiveMode) => true,
+            (TradingState.Active, TradingState.Recovering) => true,
 
-            // From Paused - can activate or halt
-            (TradingState.Paused, TradingState.Active) => true,
-            (TradingState.Paused, TradingState.Halted) => true,
+            // From any Degraded state - can go to Active or other Degraded states
+            (TradingState.Degraded_Bootstrap, TradingState.Active) => true,
+            (TradingState.Degraded_Bootstrap, _) when IsDegradedState(to) => true,
+            (TradingState.Degraded_Bootstrap, TradingState.Recovering) => true,
 
-            // From Halted - must go through Recovering first
-            (TradingState.Halted, TradingState.Recovering) => true,
+            (TradingState.Degraded_SkewCorrection, TradingState.Active) => true,
+            (TradingState.Degraded_SkewCorrection, _) when IsDegradedState(to) => true,
+            (TradingState.Degraded_SkewCorrection, TradingState.Recovering) => true,
 
-            // From Recovering - can go Active, Paused, or back to Halted
+            (TradingState.Degraded_HighVolatility, TradingState.Active) => true,
+            (TradingState.Degraded_HighVolatility, _) when IsDegradedState(to) => true,
+            (TradingState.Degraded_HighVolatility, TradingState.Recovering) => true,
+
+            (TradingState.Degraded_LowLiquidity, TradingState.Active) => true,
+            (TradingState.Degraded_LowLiquidity, _) when IsDegradedState(to) => true,
+            (TradingState.Degraded_LowLiquidity, TradingState.Recovering) => true,
+
+            (TradingState.Degraded_ProtectiveMode, TradingState.Active) => true,
+            (TradingState.Degraded_ProtectiveMode, _) when IsDegradedState(to) => true,
+            (TradingState.Degraded_ProtectiveMode, TradingState.Recovering) => true,
+
+            // From Recovering - can go to Active or back to Degraded
             (TradingState.Recovering, TradingState.Active) => true,
-            (TradingState.Recovering, TradingState.Paused) => true,
-            (TradingState.Recovering, TradingState.Halted) => true,
+            (TradingState.Recovering, _) when IsDegradedState(to) => true,
 
-            // All other transitions are invalid
+            // All other transitions are valid in NEVER HALT mode
+            // The bot must always be able to respond to changing conditions
+            _ => true
+        };
+    }
+
+    /// <summary>
+    /// Checks if a state is one of the degraded states.
+    /// </summary>
+    private static bool IsDegradedState(TradingState state)
+    {
+        return state switch
+        {
+            TradingState.Degraded_Bootstrap => true,
+            TradingState.Degraded_SkewCorrection => true,
+            TradingState.Degraded_HighVolatility => true,
+            TradingState.Degraded_LowLiquidity => true,
+            TradingState.Degraded_ProtectiveMode => true,
             _ => false
         };
     }
@@ -233,11 +271,13 @@ public sealed class TradingStateService : ITradingStateService, IDisposable
 
             if (!tradingState.HasValue)
             {
-                _logger.LogDebug("No persisted trading state found");
+                _logger.LogDebug("No persisted trading state found, defaulting to Active");
+                _currentState = TradingState.Active;
                 return false;
             }
 
-            _currentState = tradingState.Value;
+            // Map any legacy Paused/Halted states to appropriate new states
+            _currentState = MapLegacyState(tradingState.Value);
             _currentTrendState = trendState ?? TrendState.Neutral;
             _stateStartedAt = DateTimeOffset.UtcNow;
 
@@ -255,13 +295,32 @@ public sealed class TradingStateService : ITradingStateService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to load persisted trading state");
+            _logger.LogError(ex, "Failed to load persisted trading state, defaulting to Active");
+            _currentState = TradingState.Active;
             return false;
         }
         finally
         {
             _stateLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Maps legacy states (Paused, Halted) to new NEVER HALT states.
+    /// </summary>
+    private static TradingState MapLegacyState(TradingState state)
+    {
+        // Handle any numeric values that might have been Paused (1) or Halted (2) in the old enum
+        var stateValue = (int)state;
+
+        return stateValue switch
+        {
+            0 => TradingState.Active,
+            1 => TradingState.Degraded_Bootstrap,       // Old Paused -> Bootstrap (safe start)
+            2 => TradingState.Degraded_ProtectiveMode,  // Old Halted -> Protective (safe recovery)
+            3 => TradingState.Recovering,
+            _ => state  // New states pass through
+        };
     }
 
     /// <summary>

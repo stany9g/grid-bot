@@ -49,22 +49,23 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
     {
         var state = GetOrCreateState(marketId);
 
+        // Atomically get current protection state
+        var (protectionUntil, severity, action) = state.GetProtection();
+
         // Check if still in protection period
-        if (state.ProtectionUntil.HasValue && DateTimeOffset.UtcNow < state.ProtectionUntil.Value)
+        if (protectionUntil.HasValue && DateTimeOffset.UtcNow < protectionUntil.Value)
         {
             return FlashCrashStatus.InProtection(
-                state.CurrentSeverity,
-                state.CurrentAction,
-                state.ProtectionUntil.Value,
-                $"In protection until {state.ProtectionUntil.Value:HH:mm:ss} UTC");
+                severity,
+                action,
+                protectionUntil.Value,
+                $"In protection until {protectionUntil.Value:HH:mm:ss} UTC");
         }
 
-        // Clear expired protection
-        if (state.ProtectionUntil.HasValue)
+        // Clear expired protection atomically
+        if (protectionUntil.HasValue)
         {
-            state.ProtectionUntil = null;
-            state.CurrentSeverity = FlashCrashSeverity.None;
-            state.CurrentAction = FlashCrashAction.None;
+            state.SetProtection(null, FlashCrashSeverity.None, FlashCrashAction.None);
             _logger.LogInformation("Flash crash protection expired for market {MarketId}", marketId);
         }
 
@@ -213,9 +214,7 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
     {
         if (_marketStates.TryGetValue(marketId, out var state))
         {
-            state.ProtectionUntil = null;
-            state.CurrentSeverity = FlashCrashSeverity.None;
-            state.CurrentAction = FlashCrashAction.None;
+            state.SetProtection(null, FlashCrashSeverity.None, FlashCrashAction.None);
             _logger.LogWarning("Manually cleared flash crash protection for market {MarketId}", marketId);
         }
     }
@@ -303,9 +302,8 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
                 marketId, crashCount);
         }
 
-        state.ProtectionUntil = now.Add(protectionDuration);
-        state.CurrentSeverity = severity;
-        state.CurrentAction = action;
+        // Atomically set all protection state properties
+        state.SetProtection(now.Add(protectionDuration), severity, action);
 
         // Log risk event
         var ruleId = severity switch
@@ -343,17 +341,17 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
 
         await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
 
-        // Transition trading state for severe crashes
+        // Transition trading state for crashes - NEVER HALT, use Degraded states
         if (severity >= FlashCrashSeverity.Severe)
         {
             await _tradingState.TransitionToAsync(
-                TradingState.Halted,
+                TradingState.Degraded_ProtectiveMode,
                 $"Flash crash: {dropPercent:F2}% drop in {dropTimeframe.TotalMinutes} minutes").ConfigureAwait(false);
         }
         else if (severity >= FlashCrashSeverity.Moderate)
         {
             await _tradingState.TransitionToAsync(
-                TradingState.Paused,
+                TradingState.Degraded_HighVolatility,
                 $"Flash crash protection: {dropPercent:F2}% drop").ConfigureAwait(false);
         }
 
@@ -380,14 +378,59 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
 
     /// <summary>
     /// Internal state tracking for a single market.
+    /// Thread-safe for protection state modifications.
     /// </summary>
     private sealed class MarketCrashState
     {
+        private readonly object _protectionLock = new();
+        private DateTimeOffset? _protectionUntil;
+        private FlashCrashSeverity _currentSeverity = FlashCrashSeverity.None;
+        private FlashCrashAction _currentAction = FlashCrashAction.None;
+
         public List<PricePoint> PriceHistory { get; } = [];
         public List<DateTimeOffset> CrashEvents { get; } = [];
-        public DateTimeOffset? ProtectionUntil { get; set; }
-        public FlashCrashSeverity CurrentSeverity { get; set; } = FlashCrashSeverity.None;
-        public FlashCrashAction CurrentAction { get; set; } = FlashCrashAction.None;
+
+        public DateTimeOffset? ProtectionUntil
+        {
+            get { lock (_protectionLock) { return _protectionUntil; } }
+            set { lock (_protectionLock) { _protectionUntil = value; } }
+        }
+
+        public FlashCrashSeverity CurrentSeverity
+        {
+            get { lock (_protectionLock) { return _currentSeverity; } }
+            set { lock (_protectionLock) { _currentSeverity = value; } }
+        }
+
+        public FlashCrashAction CurrentAction
+        {
+            get { lock (_protectionLock) { return _currentAction; } }
+            set { lock (_protectionLock) { _currentAction = value; } }
+        }
+
+        /// <summary>
+        /// Atomically sets all protection state properties.
+        /// </summary>
+        public void SetProtection(DateTimeOffset? until, FlashCrashSeverity severity, FlashCrashAction action)
+        {
+            lock (_protectionLock)
+            {
+                _protectionUntil = until;
+                _currentSeverity = severity;
+                _currentAction = action;
+            }
+        }
+
+        /// <summary>
+        /// Atomically gets all protection state properties.
+        /// </summary>
+        public (DateTimeOffset? Until, FlashCrashSeverity Severity, FlashCrashAction Action) GetProtection()
+        {
+            lock (_protectionLock)
+            {
+                return (_protectionUntil, _currentSeverity, _currentAction);
+            }
+        }
     }
 
     /// <summary>

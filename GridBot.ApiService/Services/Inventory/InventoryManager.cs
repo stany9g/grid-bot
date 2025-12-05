@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.MarketData;
@@ -58,7 +59,7 @@ public sealed class InventoryManager : IInventoryManager
         var currentPrice = await _marketDataService.GetCurrentPriceAsync(marketId, ct);
 
         // Calculate inventory values
-        var (cryptoValueUsd, usdtBalance, totalPortfolioUsd) = CalculatePortfolioValues(account, marketId, currentPrice);
+        var (cryptoValueUsd, usdtBalance, totalPortfolioUsd, positionSize) = CalculatePortfolioValues(account, marketId, currentPrice);
 
         // Calculate allocations
         var cryptoAllocation = totalPortfolioUsd > 0 ? (cryptoValueUsd / totalPortfolioUsd) * 100 : 0;
@@ -75,8 +76,29 @@ public sealed class InventoryManager : IInventoryManager
         var rebalanceNeeded = ShouldRebalance(currentSkew, targetSkew, trendOptions.RebalanceTolerancePercent);
         var isEmergency = IsEmergencyRebalance(currentSkew, targetSkew);
 
-        // Check max skew limit - halt if exceeded
-        var haltRequired = currentSkew > trendOptions.MaxSkewPercent || usdtAllocation > trendOptions.MaxSkewPercent;
+        // Detect bootstrap mode (no position)
+        var isBootstrapMode = positionSize == 0;
+
+        // Get acceptable range for current trend
+        var (minSkew, maxSkew) = GetAcceptableSkewRange(currentTrendState);
+
+        // Calculate skew deviation from target (absolute value for capacity calculation)
+        var skewDeviation = Math.Abs(currentSkew - targetSkew);
+
+        // Determine if skew correction is needed
+        var skewCorrectionMode = false;
+        var correctionDirection = SkewCorrectionDirection.None;
+
+        if (currentSkew > maxSkew)
+        {
+            skewCorrectionMode = true;
+            correctionDirection = SkewCorrectionDirection.NeedLessCrypto;
+        }
+        else if (currentSkew < minSkew && !isBootstrapMode)
+        {
+            skewCorrectionMode = true;
+            correctionDirection = SkewCorrectionDirection.NeedMoreCrypto;
+        }
 
         // Determine rebalance direction
         var direction = rebalanceDelta > 0 ? RebalanceDirection.BuyCrypto :
@@ -88,11 +110,12 @@ public sealed class InventoryManager : IInventoryManager
 
         // Build reason string
         var reason = BuildAnalysisReason(
-            currentSkew, targetSkew, rebalanceDelta, rebalanceNeeded, isEmergency, haltRequired, currentTrendState);
+            currentSkew, targetSkew, rebalanceDelta, rebalanceNeeded, isEmergency,
+            isBootstrapMode, skewCorrectionMode, correctionDirection, currentTrendState);
 
         _logger.LogDebug(
-            "Inventory analysis for market {MarketId}: Crypto={CryptoAlloc:F1}%, USDT={UsdtAlloc:F1}%, Target={Target:F1}%, Delta={Delta:F1}%",
-            marketId, cryptoAllocation, usdtAllocation, targetSkew, rebalanceDelta);
+            "Inventory analysis for market {MarketId}: Crypto={CryptoAlloc:F1}%, USDT={UsdtAlloc:F1}%, Target={Target:F1}%, Delta={Delta:F1}%, Bootstrap={Bootstrap}, SkewCorrection={SkewCorrection}, SkewDeviation={SkewDev:F1}%",
+            marketId, cryptoAllocation, usdtAllocation, targetSkew, rebalanceDelta, isBootstrapMode, skewCorrectionMode, skewDeviation);
 
         return new InventoryAnalysis
         {
@@ -109,7 +132,12 @@ public sealed class InventoryManager : IInventoryManager
             TotalPortfolioValueUsd = totalPortfolioUsd,
             CryptoValueUsd = cryptoValueUsd,
             UsdtBalance = usdtBalance,
-            HaltRequired = haltRequired
+            SkewCorrectionMode = skewCorrectionMode,
+            CorrectionDirection = correctionDirection,
+            IsBootstrapMode = isBootstrapMode,
+            AcceptableSkewMin = minSkew,
+            AcceptableSkewMax = maxSkew,
+            SkewDeviation = skewDeviation
         };
     }
 
@@ -140,19 +168,38 @@ public sealed class InventoryManager : IInventoryManager
         return delta > trendOptions.EmergencyRebalanceThresholdPercent;
     }
 
-    private (decimal CryptoValueUsd, decimal UsdtBalance, decimal TotalPortfolioUsd) CalculatePortfolioValues(
+    /// <summary>
+    /// Gets the acceptable skew range for a given trend state.
+    /// These ranges define when skew correction mode is triggered.
+    /// </summary>
+    /// <param name="trend">Current trend state.</param>
+    /// <returns>Tuple of (min, max) acceptable skew percentages.</returns>
+    private static (decimal Min, decimal Max) GetAcceptableSkewRange(TrendState trend)
+    {
+        return trend switch
+        {
+            TrendState.StrongBull => (60m, 95m),
+            TrendState.MildBull => (50m, 85m),
+            TrendState.Neutral => (35m, 65m),
+            TrendState.MildBear => (15m, 50m),
+            TrendState.StrongBear => (5m, 40m),
+            _ => (30m, 70m)  // Default neutral range
+        };
+    }
+
+    private (decimal CryptoValueUsd, decimal UsdtBalance, decimal TotalPortfolioUsd, decimal PositionSize) CalculatePortfolioValues(
         Lighter.Models.Api.Account account,
         int marketId,
         decimal currentPrice)
     {
         // Parse collateral (USDC balance) - API returns human-readable values, no scaling needed
-        var collateral = decimal.TryParse(account.Collateral, out var c) ? c : 0;
+        var collateral = decimal.TryParse(account.Collateral, NumberStyles.Number, CultureInfo.InvariantCulture, out var c) ? c : 0;
 
         // Find position for this market
         var position = account.Positions?.FirstOrDefault(p => p.MarketId == marketId);
         var positionSize = 0m;
 
-        if (position != null && decimal.TryParse(position.Size, out var size))
+        if (position != null && decimal.TryParse(position.Positionn, NumberStyles.Number, CultureInfo.InvariantCulture, out var size))
         {
             // Position size is typically in base asset units
             positionSize = size;
@@ -177,7 +224,7 @@ public sealed class InventoryManager : IInventoryManager
             totalPortfolioUsd = cryptoValueUsd + usdtBalance;
         }
 
-        return (cryptoValueUsd, usdtBalance, totalPortfolioUsd);
+        return (cryptoValueUsd, usdtBalance, totalPortfolioUsd, positionSize);
     }
 
     private decimal CalculateMaxRebalanceAmount(int marketId, decimal maxRatePercent)
@@ -227,12 +274,20 @@ public sealed class InventoryManager : IInventoryManager
         decimal delta,
         bool rebalanceNeeded,
         bool isEmergency,
-        bool haltRequired,
+        bool isBootstrapMode,
+        bool skewCorrectionMode,
+        SkewCorrectionDirection correctionDirection,
         TrendState trendState)
     {
-        if (haltRequired)
+        if (isBootstrapMode)
         {
-            return $"HALT: Inventory skew {currentSkew:F1}% exceeds max 90%. Trading should be paused.";
+            return $"BOOTSTRAP: No position (0% crypto). Buy-only mode to build initial position. Target={targetSkew:F1}% (Trend: {trendState}).";
+        }
+
+        if (skewCorrectionMode)
+        {
+            var action = correctionDirection == SkewCorrectionDirection.NeedMoreCrypto ? "buy more" : "sell more";
+            return $"SKEW CORRECTION: Current={currentSkew:F1}% outside acceptable range. Grid biased to {action}. Target={targetSkew:F1}% (Trend: {trendState}).";
         }
 
         if (!rebalanceNeeded)
@@ -245,7 +300,7 @@ public sealed class InventoryManager : IInventoryManager
             return $"EMERGENCY: Delta {delta:F1}% exceeds 30%. Force rebalance from {currentSkew:F1}% to {targetSkew:F1}% (Trend: {trendState}).";
         }
 
-        var action = delta > 0 ? "BUY crypto" : "SELL crypto";
-        return $"Rebalance needed: {action} to move from {currentSkew:F1}% to {targetSkew:F1}% (Trend: {trendState}). Delta={delta:F1}%.";
+        var rebalanceAction = delta > 0 ? "BUY crypto" : "SELL crypto";
+        return $"Rebalance needed: {rebalanceAction} to move from {currentSkew:F1}% to {targetSkew:F1}% (Trend: {trendState}). Delta={delta:F1}%.";
     }
 }

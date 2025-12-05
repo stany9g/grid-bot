@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Capacity;
 using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
@@ -17,7 +19,8 @@ namespace GridBot.ApiService.Services.DecisionEngine;
 
 /// <summary>
 /// Central orchestrator for all trading decisions.
-/// Implements the 7-step decision loop with fail-fast, safety-first philosophy.
+/// CORE PRINCIPLE: THE BOT NEVER HALTS. The decision loop ALWAYS runs.
+/// State affects WHAT the bot does, not WHETHER it runs.
 /// </summary>
 public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 {
@@ -33,6 +36,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     private readonly IMarketDataService _marketDataService;
     private readonly IRecoveryManager _recoveryManager;
     private readonly ILighterQueryClient _lighterClient;
+    private readonly IOperationalCapacityService _capacityService;
 
     // Per-market state tracking
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _marketLocks = new();
@@ -42,6 +46,10 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     private readonly ConcurrentDictionary<int, bool> _sellsBlocked = new();
     private readonly ConcurrentDictionary<int, decimal> _lastRiskPositionMultiplier = new();
     private readonly ConcurrentDictionary<int, decimal> _lastRiskSpreadMultiplier = new();
+    private readonly ConcurrentDictionary<int, int> _currentCapacity = new();
+    private readonly ConcurrentDictionary<int, decimal> _previousPositionSize = new();
+    private readonly ConcurrentDictionary<int, bool> _wasInBootstrapMode = new();
+    private readonly ConcurrentDictionary<int, decimal> _cachedSkewDeviation = new();
 
     // Cached data for fallback
     private readonly ConcurrentDictionary<int, (decimal Price, DateTimeOffset Timestamp)> _priceCache = new();
@@ -63,7 +71,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         IGridLifecycleService gridLifecycle,
         IMarketDataService marketDataService,
         IRecoveryManager recoveryManager,
-        ILighterQueryClient lighterClient)
+        ILighterQueryClient lighterClient,
+        IOperationalCapacityService capacityService)
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(options);
@@ -77,6 +86,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         ArgumentNullException.ThrowIfNull(marketDataService);
         ArgumentNullException.ThrowIfNull(recoveryManager);
         ArgumentNullException.ThrowIfNull(lighterClient);
+        ArgumentNullException.ThrowIfNull(capacityService);
 
         _logger = logger;
         _options = options.Value;
@@ -90,6 +100,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         _marketDataService = marketDataService;
         _recoveryManager = recoveryManager;
         _lighterClient = lighterClient;
+        _capacityService = capacityService;
     }
 
     /// <inheritdoc />
@@ -119,19 +130,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             // Record decision cycle start
             TradingMetrics.DecisionCyclesTotal.Add(1, TradingMetrics.MarketTag(marketId));
 
-            // Skip if Paused state
-            if (previousState == TradingState.Paused)
-            {
-                TradingMetrics.DecisionCyclesSkipped.Add(1,
-                    new KeyValuePair<string, object?>(TradingMetrics.Tags.MarketId, marketId));
-
-                sw.Stop();
-                return DecisionResult.Skipped(
-                    marketId,
-                    previousState,
-                    "Trading is paused",
-                    sw.Elapsed);
-            }
+            // NEVER SKIP - the loop ALWAYS runs, regardless of state
+            // State affects behavior, not whether we run
 
             // STEP 1: DATA COLLECTION (Parallel with timeout)
             var context = await CollectDataAsync(marketId, ct).ConfigureAwait(false);
@@ -141,7 +141,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                 context.DataCollectionDuration.TotalMilliseconds,
                 TradingMetrics.MarketTag(marketId));
 
-            // Handle consecutive timeouts
+            // Handle consecutive timeouts - reduce capacity, don't halt
             if (context.DataCollectionTimedOut)
             {
                 var timeoutCount = _consecutiveTimeouts.AddOrUpdate(marketId, 1, (_, c) => c + 1);
@@ -155,19 +155,40 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                 TradingMetrics.SetConsecutiveTimeouts(marketId, 0);
             }
 
-            // Check if we have sufficient data to proceed
-            if (!context.HasSufficientData && previousState != TradingState.Halted)
-            {
-                TradingMetrics.DecisionCyclesSkipped.Add(1,
-                    new KeyValuePair<string, object?>(TradingMetrics.Tags.MarketId, marketId));
+            // Calculate operational capacity
+            var capacity = CalculateCurrentCapacity(marketId, context);
+            _currentCapacity[marketId] = capacity;
 
-                sw.Stop();
-                warnings.Add("Insufficient data for decision cycle");
-                return DecisionResult.Skipped(
-                    marketId,
-                    previousState,
-                    "Insufficient data collected",
-                    sw.Elapsed);
+            // Check if we have sufficient data to proceed with trading
+            // Even without data, we continue monitoring
+            if (!context.HasSufficientData)
+            {
+                warnings.Add("Insufficient data - operating in monitoring-only mode");
+            }
+
+            // LIQUIDATION DETECTION (EC-001): Track position changes
+            if (context.Position.HasValue)
+            {
+                var currentSize = Math.Abs(context.Position.Value);
+                var previousSize = _previousPositionSize.GetValueOrDefault(marketId, 0m);
+
+                // Detect unexpected position close (possible liquidation)
+                if (previousSize > 0 && currentSize == 0)
+                {
+                    _logger.LogWarning(
+                        "EC-001: Position closed unexpectedly on market {MarketId}. Previous={Previous:F4}, Current=0. Possible liquidation.",
+                        marketId, previousSize);
+
+                    // Enter protective mode
+                    await _stateService.TransitionToAsync(
+                        TradingState.Degraded_ProtectiveMode,
+                        "Unexpected position close - possible liquidation")
+                        .ConfigureAwait(false);
+
+                    warnings.Add("Position closed unexpectedly - possible liquidation detected");
+                }
+
+                _previousPositionSize[marketId] = currentSize;
             }
 
             RiskAssessment? riskAssessment = null;
@@ -177,55 +198,31 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             var ordersPlaced = 0;
             var ordersCancelled = 0;
 
-            // STEP 2: RISK SENTINEL CHECK (CRITICAL)
-            if (previousState != TradingState.Halted)
+            // STEP 2: RISK SENTINEL CHECK
+            riskAssessment = await _riskSentinel.AssessRiskAsync(marketId, ct).ConfigureAwait(false);
+            context = context with { RiskAssessment = riskAssessment };
+
+            // Update cached multipliers
+            _lastRiskPositionMultiplier[marketId] = riskAssessment.RecommendedPositionMultiplier;
+            _lastRiskSpreadMultiplier[marketId] = riskAssessment.RecommendedSpreadMultiplier;
+
+            // Update block states
+            _buysBlocked[marketId] = riskAssessment.BuysBlocked;
+            _sellsBlocked[marketId] = riskAssessment.SellsBlocked;
+
+            if (riskAssessment.RequiresImmediateAction)
             {
-                riskAssessment = await _riskSentinel.AssessRiskAsync(marketId, ct).ConfigureAwait(false);
-                context = context with { RiskAssessment = riskAssessment };
-
-                // Update cached multipliers
-                _lastRiskPositionMultiplier[marketId] = riskAssessment.RecommendedPositionMultiplier;
-                _lastRiskSpreadMultiplier[marketId] = riskAssessment.RecommendedSpreadMultiplier;
-
-                // Update block states
-                _buysBlocked[marketId] = riskAssessment.BuysBlocked;
-                _sellsBlocked[marketId] = riskAssessment.SellsBlocked;
-
-                if (riskAssessment.RequiresImmediateAction)
-                {
-                    await HandleEmergencyResponseAsync(marketId, riskAssessment, context, actionsBlocked, ct)
-                        .ConfigureAwait(false);
-                }
-
-                if (!riskAssessment.TradingAllowed)
-                {
-                    actionsBlocked.Add($"Trading blocked: {string.Join(", ", riskAssessment.ActiveWarnings)}");
-                }
-
-                // Add warnings from risk assessment
-                warnings.AddRange(riskAssessment.ActiveWarnings);
+                await HandleEmergencyResponseAsync(marketId, riskAssessment, context, actionsBlocked, ct)
+                    .ConfigureAwait(false);
             }
 
-            // Handle Halted state - only monitoring
-            if (_stateService.CurrentState == TradingState.Halted)
+            if (!riskAssessment.TradingAllowed)
             {
-                sw.Stop();
-                return DecisionResult.Succeeded(
-                    marketId,
-                    previousState,
-                    _stateService.CurrentState,
-                    riskAssessment,
-                    moonBagStatus,
-                    trendResult,
-                    gridResult,
-                    GetEffectivePositionMultiplier(marketId),
-                    GetEffectiveSpreadMultiplier(marketId),
-                    RecoveryPhase.None,
-                    null,
-                    warnings,
-                    actionsBlocked,
-                    sw.Elapsed);
+                actionsBlocked.Add($"Trading blocked: {string.Join(", ", riskAssessment.ActiveWarnings)}");
             }
+
+            // Add warnings from risk assessment
+            warnings.AddRange(riskAssessment.ActiveWarnings);
 
             // STEP 3: MOON BAG STATUS CHECK (HIGH)
             moonBagStatus = await _moonBagManager.GetMoonBagStatusAsync(marketId, ct).ConfigureAwait(false);
@@ -269,15 +266,35 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                 actionsBlocked.Add("All sells blocked: Moon bag in hold mode");
             }
 
-            // STEP 4: TREND INTELLIGENCE CYCLE (MEDIUM)
-            var currentState = _stateService.CurrentState;
-            if (currentState == TradingState.Active || currentState == TradingState.Recovering)
-            {
-                trendResult = await _trendIntelligence.ProcessTrendCycleAsync(marketId, ct).ConfigureAwait(false);
+            // STEP 4: TREND INTELLIGENCE CYCLE
+            // Always run trend intelligence - state affects behavior, not whether we run
+            trendResult = await _trendIntelligence.ProcessTrendCycleAsync(marketId, ct).ConfigureAwait(false);
 
-                if (!trendResult.Success)
+            if (!trendResult.Success)
+            {
+                warnings.Add($"Trend intelligence failed: {trendResult.ErrorMessage}");
+            }
+
+            // Cache skew deviation for next cycle's capacity calculation
+            if (trendResult.InventoryAnalysis is not null)
+            {
+                _cachedSkewDeviation[marketId] = trendResult.InventoryAnalysis.SkewDeviation;
+
+                // Track bootstrap mode transitions
+                var inventoryAnalysis = trendResult.InventoryAnalysis;
+                var wasBootstrap = _wasInBootstrapMode.GetValueOrDefault(marketId, false);
+
+                if (inventoryAnalysis.IsBootstrapMode)
                 {
-                    warnings.Add($"Trend intelligence failed: {trendResult.ErrorMessage}");
+                    _wasInBootstrapMode[marketId] = true;
+                    _logger.LogDebug("Bootstrap mode active for market {MarketId}", marketId);
+                }
+                else if (wasBootstrap)
+                {
+                    _logger.LogInformation(
+                        "Exiting bootstrap mode for market {MarketId}. Position built: {CryptoAlloc:F1}%",
+                        marketId, inventoryAnalysis.CryptoAllocation);
+                    _wasInBootstrapMode[marketId] = false;
                 }
             }
 
@@ -314,10 +331,11 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                 }
             }
 
-            // STEP 6: GRID OPERATIONS (if trading allowed)
-            if (CanTrade(marketId, riskAssessment))
+            // STEP 6: GRID OPERATIONS (capacity-adjusted)
+            // Trading is allowed based on capacity and risk assessment
+            if (CanTrade(marketId, riskAssessment, capacity))
             {
-                // Initialize grid if not already done (handles transition from Paused to Active)
+                // Initialize grid if not already done
                 var existingGrid = await _gridLifecycle.GetCurrentGridStateAsync(marketId, ct).ConfigureAwait(false);
                 if (existingGrid is null)
                 {
@@ -345,6 +363,10 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             }
             else
             {
+                if (capacity < 25)
+                {
+                    actionsBlocked.Add($"Grid operations limited: Capacity at {capacity}%");
+                }
                 if (riskAssessment is not null && !riskAssessment.TradingAllowed)
                 {
                     actionsBlocked.Add("Grid operations blocked: Risk assessment prohibits trading");
@@ -390,7 +412,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             }
 
             // Log decision summary
-            LogDecisionSummary(marketId, previousState, _stateService.CurrentState,
+            LogDecisionSummary(marketId, previousState, _stateService.CurrentState, capacity,
                 GetEffectivePositionMultiplier(marketId), GetEffectiveSpreadMultiplier(marketId),
                 ordersPlaced, ordersCancelled, sw.Elapsed);
 
@@ -436,6 +458,22 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         }
     }
 
+    /// <summary>
+    /// Calculates current operational capacity based on state and conditions.
+    /// </summary>
+    private int CalculateCurrentCapacity(int marketId, DecisionContext context)
+    {
+        var state = _stateService.CurrentState;
+        // Use cached skew deviation from previous cycle (updated after trend intelligence runs)
+        var skewDeviation = _cachedSkewDeviation.GetValueOrDefault(marketId, 0m);
+        var hasApiErrors = context.FailedDataSources > 0;
+        var highVolatility = context.RiskAssessment?.RecommendedSpreadMultiplier > 1.5m;
+        var lowLiquidity = context.RiskAssessment?.LiquidityStatus.Level == LiquidityLevel.Low ||
+                          context.RiskAssessment?.LiquidityStatus.Level == LiquidityLevel.Critical;
+
+        return _capacityService.CalculateCapacity(state, skewDeviation, hasApiErrors, highVolatility, lowLiquidity);
+    }
+
     /// <inheritdoc />
     public async Task<bool> InitializeAsync(int marketId, CancellationToken ct = default)
     {
@@ -443,22 +481,20 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         {
             _logger.LogInformation("Initializing decision engine for market {MarketId}", marketId);
 
-            // Only initialize grid if trading state is Active
-            // Grid initialization requires Active state; when Paused, grid will be initialized
-            // when the bot transitions to Active via the decision cycle
-            if (_stateService.CurrentState == TradingState.Active)
+            // Initialize grid for any active state
+            // Grid initialization is allowed in all states - capacity controls behavior
+            var currentState = _stateService.CurrentState;
+            var gridState = await _gridLifecycle.GetCurrentGridStateAsync(marketId, ct).ConfigureAwait(false);
+
+            if (gridState is null && !_capacityService.IsDegradedState(currentState))
             {
-                var gridState = await _gridLifecycle.GetCurrentGridStateAsync(marketId, ct).ConfigureAwait(false);
-                if (gridState is null)
-                {
-                    await _gridLifecycle.InitializeGridAsync(marketId, ct).ConfigureAwait(false);
-                }
+                await _gridLifecycle.InitializeGridAsync(marketId, ct).ConfigureAwait(false);
             }
-            else
+            else if (_capacityService.IsDegradedState(currentState))
             {
                 _logger.LogInformation(
-                    "Skipping grid initialization - trading state is {State}. Grid will initialize when activated.",
-                    _stateService.CurrentState);
+                    "Grid initialization deferred - state is {State}. Grid will initialize when conditions improve.",
+                    currentState);
             }
 
             // Initialize counters
@@ -467,6 +503,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             _sellsBlocked[marketId] = false;
             _lastRiskPositionMultiplier[marketId] = 1.0m;
             _lastRiskSpreadMultiplier[marketId] = 1.0m;
+            _currentCapacity[marketId] = 100;
 
             _logger.LogInformation("Decision engine initialized for market {MarketId}", marketId);
             return true;
@@ -499,6 +536,10 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             _sellsBlocked.TryRemove(marketId, out _);
             _lastRiskPositionMultiplier.TryRemove(marketId, out _);
             _lastRiskSpreadMultiplier.TryRemove(marketId, out _);
+            _currentCapacity.TryRemove(marketId, out _);
+            _previousPositionSize.TryRemove(marketId, out _);
+            _wasInBootstrapMode.TryRemove(marketId, out _);
+            _cachedSkewDeviation.TryRemove(marketId, out _);
             _priceCache.TryRemove(marketId, out _);
             _positionCache.TryRemove(marketId, out _);
             _orderBookCache.TryRemove(marketId, out _);
@@ -522,9 +563,13 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     public decimal GetEffectivePositionMultiplier(int marketId)
     {
         var options = _options.DecisionEngine;
+        var capacity = _currentCapacity.GetValueOrDefault(marketId, 100);
 
-        // Start with risk multiplier
-        var multiplier = _lastRiskPositionMultiplier.GetValueOrDefault(marketId, 1.0m);
+        // Start with capacity-based multiplier
+        var multiplier = _capacityService.GetOrderSizeMultiplier(capacity);
+
+        // Apply risk multiplier (multiplicative)
+        multiplier *= _lastRiskPositionMultiplier.GetValueOrDefault(marketId, 1.0m);
 
         // Apply recovery phase multiplier (multiplicative stacking per spec CBR-005)
         var recoveryPhase = GetCurrentRecoveryPhase(marketId);
@@ -549,17 +594,24 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     public decimal GetEffectiveSpreadMultiplier(int marketId)
     {
         var options = _options.DecisionEngine;
+        var capacity = _currentCapacity.GetValueOrDefault(marketId, 100);
 
-        // Start with risk multiplier
-        var multiplier = _lastRiskSpreadMultiplier.GetValueOrDefault(marketId, 1.0m);
+        // Start with capacity-based spread multiplier
+        var multiplier = _capacityService.GetSpreadMultiplier(capacity);
+
+        // Apply risk multiplier (additive)
+        var riskSpread = _lastRiskSpreadMultiplier.GetValueOrDefault(marketId, 1.0m);
+        if (riskSpread > 1.0m)
+        {
+            multiplier += riskSpread - 1.0m;
+        }
 
         // Add recovery phase spread
         var recoveryPhase = GetCurrentRecoveryPhase(marketId);
         if (recoveryPhase != RecoveryPhase.None)
         {
             var (_, phaseSpread, _) = _recoveryManager.GetPhaseMultipliers(recoveryPhase);
-            // Additive stacking per spec
-            multiplier = multiplier + phaseSpread - 1.0m;
+            multiplier += phaseSpread - 1.0m;
         }
 
         // Add timeout penalty
@@ -576,9 +628,10 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     /// <inheritdoc />
     public bool CanPlaceOrder(int marketId, bool isBuy)
     {
-        // Check trading state
-        var state = _stateService.CurrentState;
-        if (state == TradingState.Paused || state == TradingState.Halted)
+        var capacity = _currentCapacity.GetValueOrDefault(marketId, 100);
+
+        // At very low capacity, limit order placement
+        if (capacity < 10)
             return false;
 
         // Check block states
@@ -595,6 +648,14 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     public int GetConsecutiveTimeoutCount(int marketId)
     {
         return _consecutiveTimeouts.GetValueOrDefault(marketId, 0);
+    }
+
+    /// <summary>
+    /// Gets the current operational capacity for a market.
+    /// </summary>
+    public int GetCurrentCapacity(int marketId)
+    {
+        return _currentCapacity.GetValueOrDefault(marketId, 100);
     }
 
     private async Task<DecisionContext> CollectDataAsync(int marketId, CancellationToken ct)
@@ -666,14 +727,14 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                     .ConfigureAwait(false);
 
                 // Extract equity from account collateral (string to decimal)
-                if (decimal.TryParse(account.Collateral, out var collateralValue))
+                if (decimal.TryParse(account.Collateral, NumberStyles.Number, CultureInfo.InvariantCulture, out var collateralValue))
                 {
                     equity = collateralValue;
                 }
 
                 // Extract position size from the specific market position
                 var marketPosition = account.Positions?.FirstOrDefault(p => p.MarketId == marketId);
-                if (marketPosition is not null && decimal.TryParse(marketPosition.Size, out var positionSize))
+                if (marketPosition is not null && decimal.TryParse(marketPosition.Positionn, NumberStyles.Number, CultureInfo.InvariantCulture, out var positionSize))
                 {
                     position = positionSize;
                 }
@@ -794,37 +855,38 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     {
         var options = _options.DecisionEngine;
 
+        // NEVER HALT - reduce capacity instead
         if (timeoutCount >= options.CriticalTimeoutThreshold)
         {
-            // Critical - transition to Halted
+            // Critical - enter protective mode but don't halt
             _logger.LogCritical(
-                "Critical timeout threshold reached for market {MarketId}. Count: {Count}. Halting.",
+                "Critical timeout threshold reached for market {MarketId}. Count: {Count}. Entering protective mode.",
                 marketId, timeoutCount);
 
             await _stateService.TransitionToAsync(
-                TradingState.Halted,
+                TradingState.Degraded_ProtectiveMode,
                 $"Critical API timeout threshold reached ({timeoutCount} consecutive)")
                 .ConfigureAwait(false);
 
-            actionsBlocked.Add("All trading halted: Critical API timeout threshold");
+            actionsBlocked.Add("Operating in protective mode: Critical API timeout threshold");
         }
         else if (timeoutCount >= options.MaxConsecutiveTimeouts)
         {
-            // Severe - pause new orders
+            // Severe - reduce to low liquidity mode
             _logger.LogError(
-                "Timeout threshold reached for market {MarketId}. Count: {Count}. Pausing new orders.",
+                "Timeout threshold reached for market {MarketId}. Count: {Count}. Reducing capacity.",
                 marketId, timeoutCount);
 
             await _gridLifecycle.PauseGridAsync(marketId, ct).ConfigureAwait(false);
-            actionsBlocked.Add("New orders paused: API timeout threshold");
+            actionsBlocked.Add("Grid paused: API timeout threshold - will resume when connection stabilizes");
         }
         else if (timeoutCount >= 3)
         {
-            // Warning - widen spreads and reduce position
-            warnings.Add($"API timeouts: {timeoutCount} consecutive. Spreads widened, positions reduced.");
+            // Warning - widen spreads and reduce position through capacity
+            warnings.Add($"API timeouts: {timeoutCount} consecutive. Capacity reduced, spreads widened.");
 
             _logger.LogWarning(
-                "Multiple consecutive timeouts for market {MarketId}. Count: {Count}. Applying penalties.",
+                "Multiple consecutive timeouts for market {MarketId}. Count: {Count}. Reducing capacity.",
                 marketId, timeoutCount);
         }
     }
@@ -836,7 +898,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         List<string> actionsBlocked,
         CancellationToken ct)
     {
-        // Flash crash handling
+        // Flash crash handling - enter protective mode, don't halt
+        // CRITICAL: Do NOT teardown grid - position must remain protected with sell orders
         if (assessment.FlashCrashStatus.CrashDetected)
         {
             var severity = assessment.FlashCrashStatus.Severity;
@@ -847,45 +910,42 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 
             if (severity == FlashCrashSeverity.Severe || severity == FlashCrashSeverity.Extreme)
             {
-                // Cancel all pending orders FIRST per spec Section 4.1:
-                // "Cancel ALL pending grid orders" THEN transition to Halted
+                // DO NOT teardown grid - keep sell orders alive for position protection
+                // Only cancel buy orders to prevent adding to position
                 _logger.LogWarning(
-                    "Flash crash {Severity} detected for market {MarketId}. Cancelling all orders before halt.",
+                    "Flash crash {Severity} detected for market {MarketId}. Entering protective mode (reduce-only).",
                     severity, marketId);
 
-                await _gridLifecycle.TeardownGridAsync(marketId, ct).ConfigureAwait(false);
-
-                // Transition to Halted
+                // Enter protective mode - grid will switch to reduce-only mode
                 await _stateService.TransitionToAsync(
-                    TradingState.Halted,
+                    TradingState.Degraded_ProtectiveMode,
                     $"Flash crash: {assessment.FlashCrashStatus.DropPercent:P2} drop")
                     .ConfigureAwait(false);
 
-                actionsBlocked.Add($"Trading halted: Flash crash severity {severity}");
+                actionsBlocked.Add($"Protective mode: Flash crash severity {severity}");
             }
         }
 
-        // Loss limit handling
+        // Loss limit handling - enter protective mode, don't halt
+        // CRITICAL: Do NOT teardown grid - position must remain protected with sell orders
         if (assessment.LossStatus.AnyLimitBreached)
         {
             _logger.LogWarning(
                 "Loss limit breached for market {MarketId}. Daily: {Daily}, Weekly: {Weekly}",
                 marketId, assessment.LossStatus.DailyLimitBreached, assessment.LossStatus.WeeklyLimitBreached);
 
-            // Cancel all pending orders before transitioning to Halted
-            await _gridLifecycle.TeardownGridAsync(marketId, ct).ConfigureAwait(false);
-
-            // Transition to Halted
+            // DO NOT teardown grid - keep sell orders alive for position protection
+            // Enter protective mode - grid will switch to reduce-only mode
             await _stateService.TransitionToAsync(
-                TradingState.Halted,
-                "Loss limit breached")
+                TradingState.Degraded_ProtectiveMode,
+                "Loss limit breached - protective mode")
                 .ConfigureAwait(false);
 
-            actionsBlocked.Add("Trading halted: Loss limit breached");
+            actionsBlocked.Add("Protective mode: Loss limit breached");
         }
 
-        // If transitioning from Active to Halted, need to start recovery process
-        if (_stateService.CurrentState == TradingState.Halted)
+        // Handle recovery tracking for protective mode
+        if (_stateService.CurrentState == TradingState.Degraded_ProtectiveMode)
         {
             var triggerType = GetTriggerType(assessment);
 
@@ -897,7 +957,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 
             if (existingRecovery is not null)
             {
-                // Reset to Phase 1 per spec RCB-001: circuit breaker during recovery resets progress
+                // Reset recovery tracking
                 await _recoveryManager.ResetRecoveryAsync(
                     marketId,
                     triggerType,
@@ -906,8 +966,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                     ct).ConfigureAwait(false);
 
                 _logger.LogWarning(
-                    "Circuit breaker triggered during recovery for market {MarketId}. " +
-                    "Resetting to Phase 1 per spec RCB-001. Trigger: {TriggerType}",
+                    "Protective mode triggered during recovery for market {MarketId}. " +
+                    "Resetting recovery tracking. Trigger: {TriggerType}",
                     marketId, triggerType);
             }
             else
@@ -940,13 +1000,19 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         return "Unknown";
     }
 
-    private bool CanTrade(int marketId, RiskAssessment? assessment)
+    private bool CanTrade(int marketId, RiskAssessment? assessment, int capacity)
     {
-        var state = _stateService.CurrentState;
-
-        // Must be Active or Recovering
-        if (state != TradingState.Active && state != TradingState.Recovering)
+        // At very low capacity (protective mode), only allow monitoring
+        if (capacity < 10)
             return false;
+
+        // In protective mode, only allow position reduction
+        var state = _stateService.CurrentState;
+        if (state == TradingState.Degraded_ProtectiveMode)
+        {
+            // Allow trailing stops and position reduction, but not new grid orders
+            return false;
+        }
 
         // Risk assessment must allow trading
         if (assessment is not null && !assessment.TradingAllowed)
@@ -984,6 +1050,9 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 
         // Update recovery phase gauge
         TradingMetrics.SetRecoveryPhase(marketId, (int)GetCurrentRecoveryPhase(marketId));
+
+        // Update capacity gauge
+        TradingMetrics.SetOperationalCapacity(marketId, _currentCapacity.GetValueOrDefault(marketId, 100));
     }
 
     private async Task CheckRecoveryAdvancementAsync(int marketId, DecisionContext context, CancellationToken ct)
@@ -1017,6 +1086,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         int marketId,
         TradingState previousState,
         TradingState currentState,
+        int capacity,
         decimal positionMultiplier,
         decimal spreadMultiplier,
         int ordersPlaced,
@@ -1024,11 +1094,12 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         TimeSpan duration)
     {
         _logger.LogInformation(
-            "Decision cycle complete for market {MarketId}. State: {State}, " +
+            "Decision cycle complete for market {MarketId}. State: {State}, Capacity: {Capacity}%, " +
             "PosMultiplier: {PosMult:F2}, SpreadMultiplier: {SpreadMult:F2}, " +
             "Orders +{Placed}/-{Cancelled}, Duration: {Duration}ms",
             marketId,
             currentState,
+            capacity,
             positionMultiplier,
             spreadMultiplier,
             ordersPlaced,

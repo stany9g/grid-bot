@@ -2,29 +2,48 @@ namespace GridBot.ApiService.Models.Trading;
 
 /// <summary>
 /// Represents the current operational state of the trading bot.
+/// CORE PRINCIPLE: THE BOT NEVER HALTS. These states represent operational capacity levels.
 /// </summary>
 public enum TradingState
 {
     /// <summary>
-    /// Normal trading operations - all systems functioning.
+    /// Full operation - 100% capacity, all systems functioning normally.
     /// </summary>
     Active,
 
     /// <summary>
-    /// Temporarily stopped - manual pause or non-critical trigger.
-    /// Can transition directly back to Active.
+    /// Starting fresh with no position - buy-only grid to build initial position.
+    /// Operates at reduced capacity (50%) with conservative sizes.
     /// </summary>
-    Paused,
+    Degraded_Bootstrap,
 
     /// <summary>
-    /// Stopped due to risk trigger (loss limit, flash crash, etc.).
-    /// Requires recovery procedure before resuming.
+    /// Inventory skew outside acceptable range - asymmetric grid favoring correction.
+    /// Operates at 75% capacity, biases orders toward correction direction.
     /// </summary>
-    Halted,
+    Degraded_SkewCorrection,
 
     /// <summary>
-    /// Gradual re-entry after halt condition.
-    /// System operates at reduced capacity while validating stability.
+    /// Volatility spike detected - wider spreads, smaller orders.
+    /// Operates at reduced capacity based on volatility level.
+    /// </summary>
+    Degraded_HighVolatility,
+
+    /// <summary>
+    /// Order book thin - wider spreads, fewer grid levels.
+    /// Operates at reduced capacity to minimize slippage risk.
+    /// </summary>
+    Degraded_LowLiquidity,
+
+    /// <summary>
+    /// Loss approaching limits - protective mode with position reduction.
+    /// Minimum 10% capacity, close-only mode, aggressive trailing stops.
+    /// </summary>
+    Degraded_ProtectiveMode,
+
+    /// <summary>
+    /// Returning to normal after a degraded state.
+    /// Gradual capacity increase while validating stability.
     /// </summary>
     Recovering
 }

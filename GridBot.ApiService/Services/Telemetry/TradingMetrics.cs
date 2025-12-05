@@ -25,6 +25,7 @@ public static class TradingMetrics
     private static readonly ConcurrentDictionary<int, double> _currentPriceByMarket = new();
     private static readonly ConcurrentDictionary<int, double> _currentEquityByMarket = new();
     private static readonly ConcurrentDictionary<int, int> _consecutiveTimeoutsByMarket = new();
+    private static readonly ConcurrentDictionary<int, int> _operationalCapacityByMarket = new();
 
     // Histograms - for measuring distributions of values
 
@@ -177,6 +178,16 @@ public static class TradingMetrics
             new Measurement<int>(kvp.Value, new KeyValuePair<string, object?>(Tags.MarketId, kvp.Key))),
         description: "Consecutive API timeout count per market");
 
+    /// <summary>
+    /// Operational capacity per market (10-100%).
+    /// </summary>
+    public static readonly ObservableGauge<int> OperationalCapacity = Meter.CreateObservableGauge(
+        "alte.capacity.operational",
+        () => _operationalCapacityByMarket.Select(kvp =>
+            new Measurement<int>(kvp.Value, new KeyValuePair<string, object?>(Tags.MarketId, kvp.Key))),
+        unit: "%",
+        description: "Operational capacity per market (10-100%)");
+
     // Thread-safe per-market setters (use double storage to avoid torn reads for decimal)
 
     /// <summary>
@@ -220,6 +231,13 @@ public static class TradingMetrics
     /// </summary>
     public static void SetConsecutiveTimeouts(int marketId, int count) =>
         _consecutiveTimeoutsByMarket[marketId] = count;
+
+    /// <summary>
+    /// Sets the operational capacity gauge value for a specific market.
+    /// Thread-safe: ConcurrentDictionary ensures atomic updates.
+    /// </summary>
+    public static void SetOperationalCapacity(int marketId, int capacity) =>
+        _operationalCapacityByMarket[marketId] = capacity;
 
     // Helper methods for common tag combinations to reduce allocations on hot paths
 

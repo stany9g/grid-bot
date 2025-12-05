@@ -721,25 +721,26 @@ public partial class Program
         .WithSummary("Get risk indicators")
         .WithDescription("Gets the risk indicators including P&L, loss limits, and flash crash status.");
 
-        trading.MapPost("/control/pause", async (
+        trading.MapPost("/control/reduce-capacity", async (
             ITradingStateService stateService,
             CancellationToken ct) =>
         {
             try
             {
-                var success = await stateService.TransitionToAsync(TradingState.Paused, "Manual pause from dashboard");
+                // Enter protective mode - bot continues but at minimum capacity
+                var success = await stateService.TransitionToAsync(TradingState.Degraded_ProtectiveMode, "Manual capacity reduction from dashboard");
                 return success
-                    ? Results.Ok(new ControlResponse(Success: true, Message: "Trading paused successfully"))
-                    : Results.BadRequest(new ControlResponse(Success: false, Message: "Failed to pause trading - invalid state transition"));
+                    ? Results.Ok(new ControlResponse(Success: true, Message: "Entered protective mode - trading at minimum capacity"))
+                    : Results.BadRequest(new ControlResponse(Success: false, Message: "Failed to enter protective mode - invalid state transition"));
             }
             catch (Exception ex)
             {
                 return Results.Problem(detail: ex.Message, statusCode: 500, title: "Control operation failed");
             }
         })
-        .WithName("PauseTrading")
-        .WithSummary("Pause trading")
-        .WithDescription("Pauses trading operations. Can be resumed later.");
+        .WithName("ReduceCapacity")
+        .WithSummary("Enter protective mode")
+        .WithDescription("Reduces trading to minimum capacity. Bot continues monitoring and managing trailing stops but does not place new grid orders.");
 
         trading.MapPost("/control/resume", async (
             ITradingStateService stateService,
@@ -747,10 +748,11 @@ public partial class Program
         {
             try
             {
-                var success = await stateService.TransitionToAsync(TradingState.Active, "Manual resume from dashboard");
+                // Enter recovery mode first, then will transition to Active automatically
+                var success = await stateService.TransitionToAsync(TradingState.Recovering, "Manual recovery initiated from dashboard");
                 return success
-                    ? Results.Ok(new ControlResponse(Success: true, Message: "Trading resumed successfully"))
-                    : Results.BadRequest(new ControlResponse(Success: false, Message: "Failed to resume trading - invalid state transition"));
+                    ? Results.Ok(new ControlResponse(Success: true, Message: "Recovery initiated - trading will gradually return to full capacity"))
+                    : Results.BadRequest(new ControlResponse(Success: false, Message: "Failed to initiate recovery - invalid state transition"));
             }
             catch (Exception ex)
             {
@@ -758,28 +760,28 @@ public partial class Program
             }
         })
         .WithName("ResumeTrading")
-        .WithSummary("Resume trading")
-        .WithDescription("Resumes trading operations from a paused state.");
+        .WithSummary("Initiate recovery")
+        .WithDescription("Initiates recovery process to gradually return to full trading capacity.");
 
-        trading.MapPost("/control/halt", async (
+        trading.MapPost("/control/force-active", async (
             ITradingStateService stateService,
             CancellationToken ct) =>
         {
             try
             {
-                var success = await stateService.TransitionToAsync(TradingState.Halted, "Emergency halt from dashboard");
+                var success = await stateService.TransitionToAsync(TradingState.Active, "Force active from dashboard");
                 return success
-                    ? Results.Ok(new ControlResponse(Success: true, Message: "Trading halted successfully"))
-                    : Results.BadRequest(new ControlResponse(Success: false, Message: "Failed to halt trading - invalid state transition"));
+                    ? Results.Ok(new ControlResponse(Success: true, Message: "Trading at full capacity"))
+                    : Results.BadRequest(new ControlResponse(Success: false, Message: "Failed to force active - invalid state transition"));
             }
             catch (Exception ex)
             {
                 return Results.Problem(detail: ex.Message, statusCode: 500, title: "Control operation failed");
             }
         })
-        .WithName("HaltTrading")
-        .WithSummary("Emergency halt")
-        .WithDescription("Emergency halts trading. Requires recovery procedure to resume.");
+        .WithName("ForceActive")
+        .WithSummary("Force active state")
+        .WithDescription("Forces immediate return to full active trading. Use with caution - bypasses recovery procedure.");
 
         app.MapDefaultEndpoints();
 

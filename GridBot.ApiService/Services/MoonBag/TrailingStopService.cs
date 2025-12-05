@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.MarketData;
@@ -481,13 +482,32 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
                 var response = await _commandClient.CreateOrderAsync(stopOrder, false, ct)
                     .ConfigureAwait(false);
 
-                // Store the client order index as our order identifier for later cancellation
-                state.StopOrderId = clientOrderIndex;
+                // Query for the actual exchange order ID using the client order index
+                // The exchange assigns its own order ID, which we need for cancellation
+                long? actualOrderId = null;
+                try
+                {
+                    var orders = await _queryClient.GetActiveOrdersAsync(AccountIndex, ct).ConfigureAwait(false);
+                    var placedOrder = orders.FirstOrDefault(o => o.ClientOrderIndex == clientOrderIndex);
+                    if (placedOrder != null && long.TryParse(placedOrder.OrderId, out var oid))
+                    {
+                        actualOrderId = oid;
+                    }
+                }
+                catch (Exception queryEx)
+                {
+                    _logger.LogWarning(queryEx,
+                        "Failed to query for actual order ID for market {MarketId}, using client order index as fallback",
+                        marketId);
+                }
+
+                // Store the actual order ID (or fall back to client order index)
+                state.StopOrderId = actualOrderId ?? clientOrderIndex;
                 state.LastStopOrderUpdate = DateTimeOffset.UtcNow;
 
                 _logger.LogInformation(
-                    "Trailing stop order updated for market {MarketId}: stop={Stop:F4}, quantity={Quantity:F4}, orderId={OrderId}",
-                    marketId, stopPrice, sellQuantity, clientOrderIndex);
+                    "Trailing stop order updated for market {MarketId}: stop={Stop:F4}, quantity={Quantity:F4}, orderId={OrderId}, clientIdx={ClientIdx}",
+                    marketId, stopPrice, sellQuantity, state.StopOrderId, clientOrderIndex);
 
                 return true;
             }
@@ -583,11 +603,11 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
             }
 
             // Parse position size - returns absolute value since sign indicates direction
-            if (!decimal.TryParse(position.Size, out var size))
+            if (!decimal.TryParse(position.PositionSize, NumberStyles.Number, CultureInfo.InvariantCulture, out var size))
             {
                 _logger.LogWarning(
                     "Failed to parse position size '{Size}' for market {MarketId}",
-                    position.Size, marketId);
+                    position.PositionSize, marketId);
                 return 0m;
             }
 

@@ -224,19 +224,19 @@ public sealed class RiskSentinel : IRiskSentinel
         // Log the event
         await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
 
-        // Take action based on severity
+        // Take action based on severity - NEVER HALT, use Degraded states instead
         if (riskEvent.Severity == AlertSeverity.Critical)
         {
             _logger.LogCritical(
                 "CRITICAL RISK EVENT [{RuleId}]: {Description}. Action: {Action}",
                 riskEvent.RuleId, riskEvent.Description, riskEvent.ActionTaken);
 
-            // Transition to halted state
+            // Transition to protective mode - bot continues at minimum capacity
             await _tradingState.TransitionToAsync(
-                TradingState.Halted,
+                TradingState.Degraded_ProtectiveMode,
                 $"Critical risk event: {riskEvent.RuleId}").ConfigureAwait(false);
 
-            // Pause grid operations
+            // Pause grid operations (but keep monitoring)
             await _gridLifecycle.PauseGridAsync(_riskConfig.MarketId, ct).ConfigureAwait(false);
         }
         else if (riskEvent.Severity == AlertSeverity.High)
@@ -245,9 +245,9 @@ public sealed class RiskSentinel : IRiskSentinel
                 "HIGH SEVERITY RISK EVENT [{RuleId}]: {Description}. Action: {Action}",
                 riskEvent.RuleId, riskEvent.Description, riskEvent.ActionTaken);
 
-            // Transition to paused state
+            // Transition to high volatility mode - reduced capacity
             await _tradingState.TransitionToAsync(
-                TradingState.Paused,
+                TradingState.Degraded_HighVolatility,
                 $"High severity risk event: {riskEvent.RuleId}").ConfigureAwait(false);
         }
     }

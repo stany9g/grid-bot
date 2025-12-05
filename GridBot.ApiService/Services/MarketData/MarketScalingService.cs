@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using GridBot.Lighter;
 using Microsoft.Extensions.Logging;
 
@@ -168,8 +169,8 @@ public sealed class MarketScalingService : IMarketScalingService
                 SupportedPriceDecimals = details.SupportedPriceDecimals,
                 SupportedSizeDecimals = details.SupportedSizeDecimals,
                 SizeDecimals = details.SizeDecimals,
-                MinBaseAmount = decimal.TryParse(details.MinBaseAmount, out var minBase) ? minBase : 0,
-                MinQuoteAmount = decimal.TryParse(details.MinQuoteAmount, out var minQuote) ? minQuote : 0
+                MinBaseAmount = decimal.TryParse(details.MinBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minBase) ? minBase : 0,
+                MinQuoteAmount = decimal.TryParse(details.MinQuoteAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minQuote) ? minQuote : 0
             };
 
             _marketCache[marketId] = metadata;
@@ -206,8 +207,8 @@ public sealed class MarketScalingService : IMarketScalingService
                     SupportedPriceDecimals = book.SupportedPriceDecimals,
                     SupportedSizeDecimals = book.SupportedSizeDecimals,
                     SizeDecimals = book.SizeDecimals,
-                    MinBaseAmount = decimal.TryParse(book.MinBaseAmount, out var minBase) ? minBase : 0,
-                    MinQuoteAmount = decimal.TryParse(book.MinQuoteAmount, out var minQuote) ? minQuote : 0
+                    MinBaseAmount = decimal.TryParse(book.MinBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minBase) ? minBase : 0,
+                    MinQuoteAmount = decimal.TryParse(book.MinQuoteAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minQuote) ? minQuote : 0
                 };
 
                 _marketCache[book.MarketId] = metadata;
