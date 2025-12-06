@@ -72,4 +72,12 @@ public interface ITradingDecisionEngine
     /// <param name="marketId">Lighter DEX market ID.</param>
     /// <returns>Number of consecutive timeouts.</returns>
     int GetConsecutiveTimeoutCount(int marketId);
+
+    /// <summary>
+    /// Gets the last decision result for a market.
+    /// Used for dashboard display and monitoring.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <returns>Last decision result, or null if no decision has been made.</returns>
+    DecisionResult? GetLastDecisionResult(int marketId);
 }

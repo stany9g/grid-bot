@@ -1,0 +1,163 @@
+@using GridBot.Web.Client.Models
+@using MudBlazor
+
+<MudCard Elevation="2" Class="h-100">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.TrendingUp" Class="mr-2" />
+                Trend Intelligence
+            </MudText>
+        </CardHeaderContent>
+    </MudCardHeader>
+    <MudCardContent>
+        <div class="d-flex flex-column gap-3">
+            @* Current Trend State *@
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Trend</MudText>
+                <div class="d-flex align-center gap-1">
+                    <MudIcon Icon="@GetTrendIcon()" Color="@GetTrendColor()" />
+                    <MudChip T="string" Color="@GetTrendColor()" Size="Size.Small" Variant="Variant.Filled">
+                        @GetTrendDisplayName()
+                    </MudChip>
+                </div>
+            </div>
+
+            @* EMA Relationship *@
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">EMAs</MudText>
+                <MudText Typo="Typo.caption">
+                    EMA20: @FormatEma(TrendInfo?.Ema20 ?? 0) | EMA50: @FormatEma(TrendInfo?.Ema50 ?? 0)
+                </MudText>
+            </div>
+
+            @* ADX Strength *@
+            <div>
+                <div class="d-flex justify-space-between mb-1">
+                    <MudText Typo="Typo.subtitle2">ADX Strength</MudText>
+                    <MudText Typo="Typo.caption">@((TrendInfo?.Adx ?? 0).ToString("F1")) (@GetAdxStrength())</MudText>
+                </div>
+                <MudProgressLinear Value="@Math.Min((double)(TrendInfo?.Adx ?? 0), 100)"
+                                   Color="@GetAdxColor()"
+                                   Size="Size.Small"
+                                   Rounded="true" />
+            </div>
+
+            <MudDivider />
+
+            @* Inventory Skew *@
+            <div>
+                <div class="d-flex justify-space-between mb-1">
+                    <MudText Typo="Typo.subtitle2">Inventory Skew</MudText>
+                    <MudText Typo="Typo.caption">
+                        Current: @((TrendInfo?.CurrentSkew ?? 50).ToString("F0"))% |
+                        Target: @((TrendInfo?.TargetSkew ?? 50).ToString("F0"))%
+                    </MudText>
+                </div>
+                <div class="skew-gauge">
+                    <div class="skew-bar" style="width: @((TrendInfo?.CurrentSkew ?? 50).ToString("F0"))%"></div>
+                    <div class="skew-target" style="left: @((TrendInfo?.TargetSkew ?? 50).ToString("F0"))%"></div>
+                </div>
+                <div class="d-flex justify-space-between">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">0% Cash</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">100% Crypto</MudText>
+                </div>
+            </div>
+
+            @* Rebalance Status *@
+            @if (TrendInfo?.RebalanceNeeded == true)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true">
+                    Rebalance needed: @TrendInfo.CorrectionDirection (@((TrendInfo.RebalanceDelta).ToString("F1"))%)
+                </MudAlert>
+            }
+
+            @* Cooldown Status *@
+            @if (TrendInfo?.InCooldown == true)
+            {
+                <MudChip T="string" Color="Color.Warning" Size="Size.Small" Variant="Variant.Outlined">
+                    <MudIcon Icon="@Icons.Material.Filled.Timer" Size="Size.Small" Class="mr-1" />
+                    In Cooldown
+                </MudChip>
+            }
+        </div>
+    </MudCardContent>
+</MudCard>
+
+<style>
+    .skew-gauge {
+        position: relative;
+        height: 8px;
+        background: linear-gradient(90deg, #2196F3 0%, #4CAF50 50%, #F44336 100%);
+        border-radius: 4px;
+        margin: 4px 0;
+    }
+
+    .skew-bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        background-color: rgba(255, 255, 255, 0.5);
+        border-radius: 4px 0 0 4px;
+    }
+
+    .skew-target {
+        position: absolute;
+        top: -4px;
+        width: 4px;
+        height: 16px;
+        background-color: #fff;
+        border: 2px solid #333;
+        border-radius: 2px;
+        transform: translateX(-50%);
+    }
+</style>
+
+@code {
+    [Parameter]
+    public TrendInfo? TrendInfo { get; set; }
+
+    private string GetTrendIcon() => TrendInfo?.CurrentState switch
+    {
+        "StrongBull" or "MildBull" => Icons.Material.Filled.TrendingUp,
+        "StrongBear" or "MildBear" => Icons.Material.Filled.TrendingDown,
+        _ => Icons.Material.Filled.TrendingFlat
+    };
+
+    private Color GetTrendColor() => TrendInfo?.CurrentState switch
+    {
+        "StrongBull" => Color.Success,
+        "MildBull" => Color.Success,
+        "StrongBear" => Color.Error,
+        "MildBear" => Color.Error,
+        _ => Color.Default
+    };
+
+    private string GetTrendDisplayName() => TrendInfo?.CurrentState switch
+    {
+        "StrongBull" => "Strong Bull",
+        "MildBull" => "Mild Bull",
+        "StrongBear" => "Strong Bear",
+        "MildBear" => "Mild Bear",
+        "Neutral" => "Neutral",
+        _ => TrendInfo?.CurrentState ?? "Unknown"
+    };
+
+    private string GetAdxStrength() => (TrendInfo?.Adx ?? 0) switch
+    {
+        >= 40 => "Very Strong",
+        >= 25 => "Strong",
+        >= 20 => "Moderate",
+        _ => "Weak"
+    };
+
+    private Color GetAdxColor() => (TrendInfo?.Adx ?? 0) switch
+    {
+        >= 25 => Color.Success,
+        >= 20 => Color.Warning,
+        _ => Color.Default
+    };
+
+    private static string FormatEma(decimal ema) => ema > 0 ? $"${ema:N0}" : "-";
+}

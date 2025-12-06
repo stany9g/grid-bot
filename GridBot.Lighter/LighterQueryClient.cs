@@ -106,18 +106,27 @@ public sealed class LighterQueryClient : ILighterQueryClient
     }
 
     /// <summary>
-    /// Gets active orders for an account.
-    /// This endpoint requires authentication via SDK-generated signatures.
+    /// Gets active orders for an account on a specific market.
+    /// This endpoint requires authentication via auth token from SignerClient.CreateAuthTokenAsync().
     /// </summary>
     /// <param name="accountIndex">Account index.</param>
+    /// <param name="marketId">Market ID (required by Lighter API).</param>
+    /// <param name="authToken">Authentication token from SignerClient.CreateAuthTokenAsync().</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>List of active orders for the account.</returns>
+    /// <returns>List of active orders for the specified market.</returns>
     /// <exception cref="LighterApiException">Thrown when the API returns an error.</exception>
     public async Task<List<Order>> GetActiveOrdersAsync(
         long accountIndex,
+        int marketId,
+        string authToken,
         CancellationToken cancellationToken = default)
     {
-        var response = await GetAsync<ActiveOrdersResponse>($"accountActiveOrders?account_index={accountIndex}", cancellationToken);
+        if (string.IsNullOrWhiteSpace(authToken))
+            throw new ArgumentException("Auth token is required for this endpoint", nameof(authToken));
+
+        var response = await GetAsync<ActiveOrdersResponse>(
+            $"accountActiveOrders?account_index={accountIndex}&market_id={marketId}&auth={Uri.EscapeDataString(authToken)}",
+            cancellationToken);
 
         if (!response.IsSuccess)
             throw new LighterApiException(response.Message ?? "Failed to get active orders", response.Code);

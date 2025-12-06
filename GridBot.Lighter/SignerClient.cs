@@ -300,6 +300,25 @@ public class SignerClient : IDisposable
     }
 
     /// <summary>
+    /// Creates an authentication token for accessing private API endpoints.
+    /// The token is signed using the account's API private key.
+    /// </summary>
+    /// <param name="validitySeconds">How long the token should be valid (default 600 = 10 minutes).</param>
+    /// <returns>Tuple containing (authToken, error). If error is not null, token creation failed.</returns>
+    public async Task<(string? authToken, string? error)> CreateAuthTokenAsync(int validitySeconds = 600)
+    {
+        if (!_isInitialized)
+            return (null, "Client not initialized. Call InitializeAsync first.");
+
+        return await Task.Run(() =>
+        {
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + validitySeconds;
+            var result = NativeMethods.CreateAuthToken(deadline, ApiKeyIndex, AccountIndex);
+            return ProcessStrOrErr(result);
+        });
+    }
+
+    /// <summary>
     /// Gets the next nonce value in a thread-safe manner.
     /// </summary>
     private long GetNextNonce()

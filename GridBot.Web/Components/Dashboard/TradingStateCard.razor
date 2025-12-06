@@ -1,0 +1,106 @@
+@using GridBot.Web.Models
+@using MudBlazor
+
+<MudCard Elevation="2" Class="h-100">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.ShowChart" Class="mr-2" />
+                Trading State
+            </MudText>
+        </CardHeaderContent>
+        <CardHeaderActions>
+            <MudIconButton Icon="@Icons.Material.Filled.Refresh" Size="Size.Small" OnClick="OnRefresh" />
+        </CardHeaderActions>
+    </MudCardHeader>
+    <MudCardContent>
+        <div class="d-flex flex-column gap-3">
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Current State</MudText>
+                <MudChip T="string" Color="@GetStateColor()" Size="Size.Small" Variant="Variant.Filled">
+                    @GetStateDisplayName()
+                </MudChip>
+            </div>
+
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Duration</MudText>
+                <MudText Typo="Typo.body2">@GetStateDuration()</MudText>
+            </div>
+
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Market</MudText>
+                <MudText Typo="Typo.body2">Market @State?.MarketId</MudText>
+            </div>
+
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Uptime</MudText>
+                <MudText Typo="Typo.body2">@FormatUptime()</MudText>
+            </div>
+
+            @if (State?.RecoveryPhase is not null and not "None")
+            {
+                <MudDivider />
+                <div class="d-flex align-center justify-space-between">
+                    <MudText Typo="Typo.subtitle2">Recovery</MudText>
+                    <MudChip T="string" Color="Color.Info" Size="Size.Small" Variant="Variant.Outlined">
+                        @State.RecoveryPhase
+                    </MudChip>
+                </div>
+            }
+        </div>
+    </MudCardContent>
+</MudCard>
+
+@code {
+    [Parameter]
+    public DashboardState? State { get; set; }
+
+    [Parameter]
+    public EventCallback OnRefresh { get; set; }
+
+    private Color GetStateColor() => State?.TradingState switch
+    {
+        "Active" => Color.Success,
+        "Recovering" => Color.Info,
+        "Degraded_Bootstrap" => Color.Warning,
+        "Degraded_SkewCorrection" => Color.Warning,
+        "Degraded_HighVolatility" => Color.Warning,
+        "Degraded_LowLiquidity" => Color.Warning,
+        "Degraded_ProtectiveMode" => Color.Error,
+        _ => Color.Default
+    };
+
+    private string GetStateDisplayName() => State?.TradingState switch
+    {
+        "Active" => "Active",
+        "Recovering" => "Recovering",
+        "Degraded_Bootstrap" => "Bootstrap",
+        "Degraded_SkewCorrection" => "Skew Correction",
+        "Degraded_HighVolatility" => "High Volatility",
+        "Degraded_LowLiquidity" => "Low Liquidity",
+        "Degraded_ProtectiveMode" => "Protective Mode",
+        _ => State?.TradingState ?? "Unknown"
+    };
+
+    private string GetStateDuration()
+    {
+        if (State is null) return "-";
+        var duration = DateTimeOffset.UtcNow - State.StateStartedAt;
+        return duration.TotalHours >= 1
+            ? $"{duration.Hours}h {duration.Minutes}m"
+            : duration.TotalMinutes >= 1
+                ? $"{duration.Minutes}m {duration.Seconds}s"
+                : $"{duration.Seconds}s";
+    }
+
+    private string FormatUptime()
+    {
+        if (State is null) return "-";
+        var uptime = State.Uptime;
+        if (uptime.TotalDays >= 1)
+            return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
+        if (uptime.TotalHours >= 1)
+            return $"{uptime.Hours}h {uptime.Minutes}m";
+        return $"{uptime.Minutes}m {uptime.Seconds}s";
+    }
+}

@@ -199,4 +199,17 @@ internal static partial class NativeMethods
         int leverage,
         long nonce);
 
+    /// <summary>
+    /// Creates an authentication token for accessing private API endpoints.
+    /// </summary>
+    /// <param name="deadline">Unix timestamp when the token expires (now + validity_seconds).</param>
+    /// <param name="apiKeyIndex">Index of the API key (0-254).</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>StrOrErr containing the auth token or error.</returns>
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern StrOrErr CreateAuthToken(
+        long deadline,
+        int apiKeyIndex,
+        long accountIndex);
+
 }

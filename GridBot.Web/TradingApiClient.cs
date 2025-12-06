@@ -1,9 +1,18 @@
 using System.Net.Http.Json;
+using GridBot.Web.Models;
 
 namespace GridBot.Web;
 
 public sealed class TradingApiClient(HttpClient httpClient)
 {
+    /// <summary>
+    /// Gets comprehensive dashboard data in a single call.
+    /// </summary>
+    public async Task<DashboardApiResponse?> GetDashboardAsync(CancellationToken ct = default)
+    {
+        return await httpClient.GetFromJsonAsync<DashboardApiResponse>("/api/trading/dashboard", ct);
+    }
+
     public async Task<TradingStatusResponse?> GetStatusAsync(CancellationToken ct = default)
     {
         return await httpClient.GetFromJsonAsync<TradingStatusResponse>("/api/trading/status", ct);

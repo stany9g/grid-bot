@@ -4,4 +4,5 @@
   <Project Path="GridBot.Lighter/GridBot.Lighter.csproj" />
   <Project Path="GridBot.ServiceDefaults/GridBot.ServiceDefaults.csproj" />
   <Project Path="GridBot.Web/GridBot.Web.csproj" />
+  <Project Path="GridBot.Web.Client/GridBot.Web.Client.csproj" />
 </Solution>

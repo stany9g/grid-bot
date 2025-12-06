@@ -1,0 +1,119 @@
+@using GridBot.Web.Client.Models
+@using MudBlazor
+
+<MudCard Elevation="2">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.Loop" Class="mr-2" />
+                Decision Cycle Metrics
+            </MudText>
+        </CardHeaderContent>
+        <CardHeaderActions>
+            <MudText Typo="Typo.caption" Color="Color.Secondary">
+                Last: @GetLastCycleTime()
+            </MudText>
+        </CardHeaderActions>
+    </MudCardHeader>
+    <MudCardContent>
+        <MudGrid>
+            <MudItem xs="12" sm="6" md="3">
+                <div class="metric-box">
+                    <MudText Typo="Typo.h4" Class="mb-1">@(CycleInfo?.CycleTimeMs ?? 0)ms</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Cycle Time</MudText>
+                </div>
+            </MudItem>
+
+            <MudItem xs="12" sm="6" md="3">
+                <div class="metric-box">
+                    <MudText Typo="Typo.h4" Class="mb-1">@(CycleInfo?.CyclesPerMinute ?? 0)</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Cycles/Min</MudText>
+                </div>
+            </MudItem>
+
+            <MudItem xs="12" sm="6" md="3">
+                <div class="metric-box">
+                    <div class="d-flex align-center gap-2 mb-1">
+                        <MudText Typo="Typo.h4">@(CycleInfo?.TimeoutCount ?? 0)</MudText>
+                        @if ((CycleInfo?.TimeoutCount ?? 0) > 0)
+                        {
+                            <MudIcon Icon="@Icons.Material.Filled.Warning" Color="Color.Warning" />
+                        }
+                    </div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Timeouts</MudText>
+                </div>
+            </MudItem>
+
+            <MudItem xs="12" sm="6" md="3">
+                <div class="metric-box">
+                    <div class="d-flex align-center gap-2 mb-1">
+                        <MudText Typo="Typo.h4">@(CycleInfo?.ErrorCount ?? 0)</MudText>
+                        @if ((CycleInfo?.ErrorCount ?? 0) > 0)
+                        {
+                            <MudIcon Icon="@Icons.Material.Filled.Error" Color="Color.Error" />
+                        }
+                    </div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Errors</MudText>
+                </div>
+            </MudItem>
+        </MudGrid>
+
+        <MudDivider Class="my-3" />
+
+        <div class="d-flex flex-wrap gap-4">
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@Icons.Material.Filled.Storage" Size="Size.Small" Color="Color.Secondary" />
+                <MudText Typo="Typo.body2">Data: @(CycleInfo?.DataCollectionTimeMs ?? 0)ms</MudText>
+            </div>
+
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@Icons.Material.Filled.Add" Size="Size.Small" Color="Color.Success" />
+                <MudText Typo="Typo.body2">Placed: @(CycleInfo?.OrdersPlaced ?? 0)</MudText>
+            </div>
+
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@Icons.Material.Filled.Close" Size="Size.Small" Color="Color.Error" />
+                <MudText Typo="Typo.body2">Cancelled: @(CycleInfo?.OrdersCancelled ?? 0)</MudText>
+            </div>
+
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@Icons.Material.Filled.SkipNext" Size="Size.Small" Color="Color.Warning" />
+                <MudText Typo="Typo.body2">Skipped: @(CycleInfo?.SkippedCycles ?? 0)</MudText>
+            </div>
+
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@Icons.Material.Filled.Tune" Size="Size.Small" Color="Color.Info" />
+                <MudText Typo="Typo.body2">
+                    Pos: @((State?.PositionMultiplier ?? 1).ToString("F2"))x |
+                    Spread: @((State?.SpreadMultiplier ?? 1).ToString("F2"))x
+                </MudText>
+            </div>
+        </div>
+    </MudCardContent>
+</MudCard>
+
+<style>
+    .metric-box {
+        text-align: center;
+        padding: 12px;
+        border-radius: 8px;
+        background-color: rgba(0, 0, 0, 0.02);
+    }
+</style>
+
+@code {
+    [Parameter]
+    public DecisionCycleInfo? CycleInfo { get; set; }
+
+    [Parameter]
+    public DashboardState? State { get; set; }
+
+    private string GetLastCycleTime()
+    {
+        if (CycleInfo is null) return "-";
+        var elapsed = DateTimeOffset.UtcNow - CycleInfo.LastCycleTime;
+        return elapsed.TotalSeconds < 60
+            ? $"{elapsed.TotalSeconds:F0}s ago"
+            : $"{elapsed.TotalMinutes:F0}m ago";
+    }
+}

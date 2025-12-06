@@ -1,0 +1,191 @@
+@using GridBot.Web.Client.Models
+@using MudBlazor
+
+<MudCard Elevation="2">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.GridOn" Class="mr-2" />
+                Grid Visualization
+            </MudText>
+        </CardHeaderContent>
+        <CardHeaderActions>
+            @if (GridState is not null)
+            {
+                <MudChip T="string" Color="@GetStatusColor()" Size="Size.Small" Variant="Variant.Outlined">
+                    @GridState.Status
+                </MudChip>
+            }
+        </CardHeaderActions>
+    </MudCardHeader>
+    <MudCardContent>
+        @if (GridState is null || GridState.Levels.Count == 0)
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary">No grid data available</MudText>
+        }
+        else
+        {
+            <div class="grid-visualization">
+                @* Upper bound *@
+                <div class="grid-level grid-bound">
+                    <MudText Typo="Typo.caption" Class="price">@FormatPrice(GridState.UpperBound)</MudText>
+                    <div class="level-bar bound-bar"></div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Upper Bound</MudText>
+                </div>
+
+                @* Ask levels (sells) *@
+                @foreach (var level in GridState.Levels.Where(l => !l.IsBid).OrderByDescending(l => l.Price))
+                {
+                    <div class="grid-level ask-level @(level.Status == "Filled" ? "filled" : "")">
+                        <MudText Typo="Typo.caption" Class="price">@FormatPrice(level.Price)</MudText>
+                        <MudProgressLinear Value="@GetLevelFill(level)"
+                                           Color="@GetLevelColor(level)"
+                                           Size="Size.Small"
+                                           Class="level-bar" />
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">
+                            Ask @level.LevelIndex (@level.Size.ToString("F4"))
+                        </MudText>
+                    </div>
+                }
+
+                @* Current price indicator *@
+                <div class="grid-level current-price-level">
+                    <MudText Typo="Typo.body2" Class="price font-weight-bold">
+                        @FormatPrice(CurrentPrice)
+                    </MudText>
+                    <div class="current-price-bar">
+                        <MudIcon Icon="@Icons.Material.Filled.ArrowRight" Size="Size.Small" Color="Color.Primary" />
+                    </div>
+                    <MudChip T="string" Color="Color.Primary" Size="Size.Small">CURRENT PRICE</MudChip>
+                </div>
+
+                @* Bid levels (buys) *@
+                @foreach (var level in GridState.Levels.Where(l => l.IsBid).OrderByDescending(l => l.Price))
+                {
+                    <div class="grid-level bid-level @(level.Status == "Filled" ? "filled" : "")">
+                        <MudText Typo="Typo.caption" Class="price">@FormatPrice(level.Price)</MudText>
+                        <MudProgressLinear Value="@GetLevelFill(level)"
+                                           Color="@GetLevelColor(level)"
+                                           Size="Size.Small"
+                                           Class="level-bar" />
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">
+                            Bid @level.LevelIndex (@level.Size.ToString("F4"))
+                        </MudText>
+                    </div>
+                }
+
+                @* Lower bound *@
+                <div class="grid-level grid-bound">
+                    <MudText Typo="Typo.caption" Class="price">@FormatPrice(GridState.LowerBound)</MudText>
+                    <div class="level-bar bound-bar"></div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">Lower Bound</MudText>
+                </div>
+            </div>
+
+            <MudDivider Class="my-3" />
+
+            <div class="d-flex flex-wrap gap-3">
+                <MudText Typo="Typo.caption">
+                    <strong>Spacing:</strong> @GridState.GridSpacing.ToString("F2")%
+                </MudText>
+                <MudText Typo="Typo.caption">
+                    <strong>Width:</strong> @GridState.TotalWidth.ToString("F2")%
+                </MudText>
+                <MudText Typo="Typo.caption">
+                    <strong>Fills:</strong> @GridState.TotalFills
+                </MudText>
+                <MudText Typo="Typo.caption">
+                    <strong>Shifts:</strong> @GridState.ShiftCount
+                </MudText>
+                <MudText Typo="Typo.caption">
+                    <strong>PnL:</strong> @FormatPnl(GridState.RealizedPnl)
+                </MudText>
+            </div>
+        }
+    </MudCardContent>
+</MudCard>
+
+<style>
+    .grid-visualization {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        max-height: 400px;
+        overflow-y: auto;
+    }
+
+    .grid-level {
+        display: grid;
+        grid-template-columns: 100px 1fr 150px;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 8px;
+        border-radius: 4px;
+    }
+
+    .grid-level.filled {
+        background-color: rgba(76, 175, 80, 0.1);
+    }
+
+    .grid-level.current-price-level {
+        background-color: rgba(33, 150, 243, 0.1);
+        border: 1px solid rgba(33, 150, 243, 0.3);
+        padding: 8px;
+    }
+
+    .grid-level.grid-bound {
+        background-color: rgba(0, 0, 0, 0.05);
+    }
+
+    .price {
+        font-family: monospace;
+        text-align: right;
+    }
+
+    .current-price-bar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .bound-bar {
+        height: 2px;
+        background: linear-gradient(90deg, transparent, #888, transparent);
+    }
+</style>
+
+@code {
+    [Parameter]
+    public GridStateInfo? GridState { get; set; }
+
+    [Parameter]
+    public decimal CurrentPrice { get; set; }
+
+    private Color GetStatusColor() => GridState?.Status switch
+    {
+        "Active" => Color.Success,
+        "Paused" => Color.Warning,
+        "Rebuilding" => Color.Info,
+        _ => Color.Default
+    };
+
+    private Color GetLevelColor(GridLevelInfo level) => level.Status switch
+    {
+        "Active" => level.IsBid ? Color.Success : Color.Error,
+        "Filled" => Color.Info,
+        "Pending" => Color.Default,
+        _ => Color.Default
+    };
+
+    private static int GetLevelFill(GridLevelInfo level) => level.Status switch
+    {
+        "Active" => 100,
+        "Filled" => 100,
+        "Pending" => 30,
+        _ => 0
+    };
+
+    private static string FormatPrice(decimal price) => $"${price:N2}";
+
+    private static string FormatPnl(decimal pnl) => pnl >= 0 ? $"+${pnl:N2}" : $"-${Math.Abs(pnl):N2}";
+}

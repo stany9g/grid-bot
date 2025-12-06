@@ -1,0 +1,147 @@
+@using GridBot.Web.Models
+@using MudBlazor
+
+<MudCard Elevation="2" Class="h-100">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.Security" Class="mr-2" />
+                Risk Assessment
+            </MudText>
+        </CardHeaderContent>
+        <CardHeaderActions>
+            @if (RiskInfo?.AnyLimitBreached == true)
+            {
+                <MudChip T="string" Color="Color.Error" Size="Size.Small">LIMIT BREACHED</MudChip>
+            }
+        </CardHeaderActions>
+    </MudCardHeader>
+    <MudCardContent>
+        <div class="d-flex flex-column gap-3">
+            @* Flash Crash Status *@
+            @if (RiskInfo?.FlashCrashActive == true)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mb-2">
+                    Flash Crash: @RiskInfo.FlashCrashSeverity - @RiskInfo.FlashCrashAction
+                </MudAlert>
+            }
+
+            @* Loss Limits *@
+            <div>
+                <div class="d-flex justify-space-between mb-1">
+                    <MudText Typo="Typo.caption">Daily PnL</MudText>
+                    <MudText Typo="Typo.caption" Color="@GetPnlColor(RiskInfo?.DailyPnlPercent ?? 0)">
+                        @FormatPercent(RiskInfo?.DailyPnlPercent ?? 0)
+                    </MudText>
+                </div>
+                <MudProgressLinear Value="@GetProgressValue(RiskInfo?.DailyPnlPercent ?? 0, 5)"
+                                   Color="@GetProgressColor(RiskInfo?.DailyPnlPercent ?? 0)"
+                                   Size="Size.Small"
+                                   Rounded="true" />
+            </div>
+
+            <div>
+                <div class="d-flex justify-space-between mb-1">
+                    <MudText Typo="Typo.caption">Weekly PnL</MudText>
+                    <MudText Typo="Typo.caption" Color="@GetPnlColor(RiskInfo?.WeeklyPnlPercent ?? 0)">
+                        @FormatPercent(RiskInfo?.WeeklyPnlPercent ?? 0)
+                    </MudText>
+                </div>
+                <MudProgressLinear Value="@GetProgressValue(RiskInfo?.WeeklyPnlPercent ?? 0, 10)"
+                                   Color="@GetProgressColor(RiskInfo?.WeeklyPnlPercent ?? 0)"
+                                   Size="Size.Small"
+                                   Rounded="true" />
+            </div>
+
+            <div>
+                <div class="d-flex justify-space-between mb-1">
+                    <MudText Typo="Typo.caption">Max Drawdown</MudText>
+                    <MudText Typo="Typo.caption" Color="@GetDrawdownColor(RiskInfo?.DrawdownPercent ?? 0)">
+                        @FormatPercent(-(RiskInfo?.DrawdownPercent ?? 0))
+                    </MudText>
+                </div>
+                <MudProgressLinear Value="@GetProgressValue(RiskInfo?.DrawdownPercent ?? 0, 20)"
+                                   Color="@GetDrawdownColor(RiskInfo?.DrawdownPercent ?? 0)"
+                                   Size="Size.Small"
+                                   Rounded="true" />
+            </div>
+
+            <MudDivider />
+
+            @* Trading Blocks *@
+            <div class="d-flex justify-space-between align-center">
+                <MudText Typo="Typo.subtitle2">Buys</MudText>
+                @if (RiskInfo?.BuysBlocked == true)
+                {
+                    <MudChip T="string" Color="Color.Error" Size="Size.Small" Variant="Variant.Outlined">BLOCKED</MudChip>
+                }
+                else
+                {
+                    <MudIcon Icon="@Icons.Material.Filled.Check" Color="Color.Success" Size="Size.Small" />
+                }
+            </div>
+
+            <div class="d-flex justify-space-between align-center">
+                <MudText Typo="Typo.subtitle2">Sells</MudText>
+                @if (RiskInfo?.SellsBlocked == true)
+                {
+                    <MudChip T="string" Color="Color.Error" Size="Size.Small" Variant="Variant.Outlined">BLOCKED</MudChip>
+                }
+                else
+                {
+                    <MudIcon Icon="@Icons.Material.Filled.Check" Color="Color.Success" Size="Size.Small" />
+                }
+            </div>
+
+            @* Active Warnings *@
+            @if (RiskInfo?.ActiveWarnings?.Count > 0)
+            {
+                <MudDivider />
+                @foreach (var warning in RiskInfo.ActiveWarnings.Take(3))
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Warning">
+                        <MudIcon Icon="@Icons.Material.Filled.Warning" Size="Size.Small" Class="mr-1" />
+                        @warning
+                    </MudText>
+                }
+            }
+        </div>
+    </MudCardContent>
+</MudCard>
+
+@code {
+    [Parameter]
+    public RiskInfo? RiskInfo { get; set; }
+
+    private static string FormatPercent(decimal percent) =>
+        percent >= 0 ? $"+{percent:F2}%" : $"{percent:F2}%";
+
+    private static Color GetPnlColor(decimal pnl) => pnl switch
+    {
+        > 0 => Color.Success,
+        < -3 => Color.Error,
+        < 0 => Color.Warning,
+        _ => Color.Default
+    };
+
+    private static Color GetProgressColor(decimal pnl) => pnl switch
+    {
+        > 0 => Color.Success,
+        < -3 => Color.Error,
+        < 0 => Color.Warning,
+        _ => Color.Default
+    };
+
+    private static Color GetDrawdownColor(decimal drawdown) => drawdown switch
+    {
+        > 15 => Color.Error,
+        > 10 => Color.Warning,
+        _ => Color.Info
+    };
+
+    private static int GetProgressValue(decimal value, decimal maxLoss)
+    {
+        if (value >= 0) return (int)Math.Min(value * 10, 100);
+        return (int)Math.Min(Math.Abs(value) / maxLoss * 100, 100);
+    }
+}

@@ -25,12 +25,15 @@ public interface ILighterQueryClient
     Task<AccountMetadata> GetAccountMetadataAsync(long accountIndex, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Gets active orders for an account.
+    /// Gets active orders for an account on a specific market.
+    /// This endpoint requires authentication via auth token from SignerClient.CreateAuthTokenAsync().
     /// </summary>
     /// <param name="accountIndex">Account index.</param>
+    /// <param name="marketId">Market ID (required by Lighter API).</param>
+    /// <param name="authToken">Authentication token from SignerClient.CreateAuthTokenAsync().</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>List of active orders.</returns>
-    Task<List<Order>> GetActiveOrdersAsync(long accountIndex, CancellationToken cancellationToken = default);
+    /// <returns>List of active orders for the specified market.</returns>
+    Task<List<Order>> GetActiveOrdersAsync(long accountIndex, int marketId, string authToken, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets all order book metadata for all markets.

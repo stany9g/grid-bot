@@ -66,4 +66,13 @@ public interface IGridOrderManager
         decimal price,
         int totalLevels,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Queries existing orders from the exchange and cancels them all.
+    /// Used on startup to ensure clean state before grid initialization.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Number of orders that were cancelled.</returns>
+    Task<int> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default);
 }

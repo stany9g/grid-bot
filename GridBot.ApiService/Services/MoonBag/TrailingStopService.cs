@@ -487,11 +487,20 @@ public sealed class TrailingStopService : ITrailingStopService, IDisposable
                 long? actualOrderId = null;
                 try
                 {
-                    var orders = await _queryClient.GetActiveOrdersAsync(AccountIndex, ct).ConfigureAwait(false);
-                    var placedOrder = orders.FirstOrDefault(o => o.ClientOrderIndex == clientOrderIndex);
-                    if (placedOrder != null && long.TryParse(placedOrder.OrderId, out var oid))
+                    // Get auth token for authenticated API call
+                    var (authToken, authError) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
+                    if (authError == null && !string.IsNullOrEmpty(authToken))
                     {
-                        actualOrderId = oid;
+                        var orders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, ct).ConfigureAwait(false);
+                        var placedOrder = orders.FirstOrDefault(o => o.ClientOrderIndex == clientOrderIndex);
+                        if (placedOrder != null && long.TryParse(placedOrder.OrderId, out var oid))
+                        {
+                            actualOrderId = oid;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to create auth token: {Error}", authError ?? "empty token");
                     }
                 }
                 catch (Exception queryEx)

@@ -83,6 +83,18 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         {
             _logger.LogInformation("Initializing grid for market {MarketId}", marketId);
 
+            // CRITICAL: Cancel any existing orders on the exchange before creating new grid
+            // This prevents order accumulation on app restart (orders persist on exchange but grid state is in-memory)
+            var cancelledCount = await _orderManager.CancelExistingOrdersOnStartupAsync(marketId, ct)
+                .ConfigureAwait(false);
+
+            if (cancelledCount > 0)
+            {
+                _logger.LogInformation(
+                    "Cleaned up {Count} stale orders from previous session for market {MarketId}",
+                    cancelledCount, marketId);
+            }
+
             // Verify trading state - NEVER HALT
             // In protective mode, allow reduce-only grid initialization
             var state = _stateService.CurrentState;

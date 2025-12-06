@@ -1,0 +1,74 @@
+@using GridBot.Web.Models
+@using MudBlazor
+
+<MudCard Elevation="2" Class="h-100">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.AccountBalance" Class="mr-2" />
+                Price & Position
+            </MudText>
+        </CardHeaderContent>
+    </MudCardHeader>
+    <MudCardContent>
+        <div class="d-flex flex-column gap-3">
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Current Price</MudText>
+                <MudText Typo="Typo.body1" Class="font-weight-bold">
+                    @FormatPrice(State?.CurrentPrice ?? 0)
+                </MudText>
+            </div>
+
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Position</MudText>
+                <MudText Typo="Typo.body2">
+                    @(State?.PositionSize.ToString("F6") ?? "-")
+                </MudText>
+            </div>
+
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Equity</MudText>
+                <MudText Typo="Typo.body2">
+                    @FormatPrice(State?.Equity ?? 0)
+                </MudText>
+            </div>
+
+            <MudDivider />
+
+            <div class="d-flex align-center justify-space-between">
+                <MudText Typo="Typo.subtitle2">Unrealized PnL</MudText>
+                <div class="d-flex align-center gap-1">
+                    @if (State?.UnrealizedPnl != 0)
+                    {
+                        <MudIcon Icon="@GetPnlIcon()" Color="@GetPnlColor()" Size="Size.Small" />
+                    }
+                    <MudText Typo="Typo.body2" Color="@GetPnlColor()">
+                        @FormatPnl(State?.UnrealizedPnl ?? 0) (@FormatPercent(State?.UnrealizedPnlPercent ?? 0))
+                    </MudText>
+                </div>
+            </div>
+        </div>
+    </MudCardContent>
+</MudCard>
+
+@code {
+    [Parameter]
+    public DashboardState? State { get; set; }
+
+    private string GetPnlIcon() => State?.UnrealizedPnl >= 0
+        ? Icons.Material.Filled.TrendingUp
+        : Icons.Material.Filled.TrendingDown;
+
+    private Color GetPnlColor() => State?.UnrealizedPnl switch
+    {
+        > 0 => Color.Success,
+        < 0 => Color.Error,
+        _ => Color.Default
+    };
+
+    private static string FormatPrice(decimal price) => $"${price:N2}";
+
+    private static string FormatPnl(decimal pnl) => pnl >= 0 ? $"+${pnl:N2}" : $"-${Math.Abs(pnl):N2}";
+
+    private static string FormatPercent(decimal percent) => percent >= 0 ? $"+{percent:F2}%" : $"{percent:F2}%";
+}

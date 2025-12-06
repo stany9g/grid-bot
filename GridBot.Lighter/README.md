@@ -159,9 +159,13 @@ var response = await client.CreateOrderAsync(orderRequest);
 Console.WriteLine($"Order submitted! Hash: {response.TxHash}");
 Console.WriteLine($"Predicted execution: {response.PredictedExecutionTimeMs}ms");
 
-// 3. Query your active orders
-var activeOrders = await client.GetActiveOrdersAsync(123456);
-Console.WriteLine($"Active orders: {activeOrders.Count}");
+// 3. Generate auth token and query your active orders for a specific market
+var (authToken, authError) = await commandClient.CreateAuthTokenAsync();
+if (authError == null)
+{
+    var activeOrders = await queryClient.GetActiveOrdersAsync(accountIndex: 123456, marketId: 1, authToken: authToken!);
+    Console.WriteLine($"Active orders: {activeOrders.Count}");
+}
 
 // 4. Get account information
 var account = await client.GetAccountAsync(123456);

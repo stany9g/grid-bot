@@ -1,0 +1,145 @@
+@using GridBot.Web.Client.Models
+@using MudBlazor
+
+<MudCard Elevation="2">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <MudText Typo="Typo.h6">
+                <MudIcon Icon="@Icons.Material.Filled.Notifications" Class="mr-2" />
+                Recent Alerts
+                @if (Alerts?.Count > 0)
+                {
+                    <MudChip T="string" Color="Color.Primary" Size="Size.Small" Class="ml-2">@Alerts.Count</MudChip>
+                }
+            </MudText>
+        </CardHeaderContent>
+        <CardHeaderActions>
+            @if (Alerts?.Count > 0)
+            {
+                <MudTooltip Text="Clear all alerts">
+                    <MudIconButton Icon="@Icons.Material.Filled.ClearAll"
+                                   Size="Size.Small"
+                                   OnClick="@(() => OnClearAlerts.InvokeAsync())" />
+                </MudTooltip>
+            }
+        </CardHeaderActions>
+    </MudCardHeader>
+    <MudCardContent>
+        @if (Alerts is null || Alerts.Count == 0)
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="text-center pa-4">
+                No alerts
+            </MudText>
+        }
+        else
+        {
+            <div class="alerts-container">
+                @foreach (var alert in Alerts.Take(MaxDisplayed))
+                {
+                    <MudPaper Class="@GetAlertItemClass(alert)"
+                              Elevation="0"
+                              Style="@GetAlertStyle(alert)">
+                        <div class="d-flex align-start gap-2">
+                            <MudIcon Icon="@GetAlertIcon(alert)" Color="@GetAlertColor(alert)" Size="Size.Small" />
+                            <div class="flex-grow-1">
+                                <div class="d-flex justify-space-between align-center">
+                                    <MudText Typo="Typo.subtitle2">@alert.Title</MudText>
+                                    <MudText Typo="Typo.caption" Color="Color.Secondary">
+                                        @FormatTimestamp(alert.Timestamp)
+                                    </MudText>
+                                </div>
+                                <MudText Typo="Typo.body2" Color="Color.Secondary">@alert.Message</MudText>
+                            </div>
+                            @if (!alert.IsAcknowledged)
+                            {
+                                <MudTooltip Text="Acknowledge">
+                                    <MudIconButton Icon="@Icons.Material.Filled.Check"
+                                                   Size="Size.Small"
+                                                   OnClick="@(() => OnAcknowledgeAlert.InvokeAsync(alert.Id))" />
+                                </MudTooltip>
+                            }
+                        </div>
+                    </MudPaper>
+                }
+
+                @if (Alerts.Count > MaxDisplayed)
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Secondary" Class="text-center">
+                        ... and @(Alerts.Count - MaxDisplayed) more alerts
+                    </MudText>
+                }
+            </div>
+        }
+    </MudCardContent>
+</MudCard>
+
+<style>
+    .alerts-container {
+        max-height: 300px;
+        overflow-y: auto;
+    }
+
+    .alert-item {
+        border-left: 3px solid transparent;
+        transition: all 0.2s ease;
+    }
+
+    .alert-item.acknowledged {
+        opacity: 0.6;
+    }
+
+    .alert-item:hover {
+        background-color: rgba(0, 0, 0, 0.02);
+    }
+</style>
+
+@code {
+    [Parameter]
+    public List<AlertItem>? Alerts { get; set; }
+
+    [Parameter]
+    public EventCallback OnClearAlerts { get; set; }
+
+    [Parameter]
+    public EventCallback<Guid> OnAcknowledgeAlert { get; set; }
+
+    [Parameter]
+    public int MaxDisplayed { get; set; } = 10;
+
+    private static string GetAlertItemClass(AlertItem alert) =>
+        alert.IsAcknowledged ? "alert-item pa-2 mb-2 acknowledged" : "alert-item pa-2 mb-2";
+
+    private string GetAlertIcon(AlertItem alert) => alert.Severity switch
+    {
+        AlertSeverity.Critical => Icons.Material.Filled.Error,
+        AlertSeverity.Warning => Icons.Material.Filled.Warning,
+        _ => Icons.Material.Filled.Info
+    };
+
+    private Color GetAlertColor(AlertItem alert) => alert.Severity switch
+    {
+        AlertSeverity.Critical => Color.Error,
+        AlertSeverity.Warning => Color.Warning,
+        _ => Color.Info
+    };
+
+    private string GetAlertStyle(AlertItem alert)
+    {
+        var borderColor = alert.Severity switch
+        {
+            AlertSeverity.Critical => "#f44336",
+            AlertSeverity.Warning => "#ff9800",
+            _ => "#2196f3"
+        };
+        return $"border-left-color: {borderColor}; background-color: {borderColor}10;";
+    }
+
+    private static string FormatTimestamp(DateTimeOffset timestamp)
+    {
+        var elapsed = DateTimeOffset.UtcNow - timestamp;
+        if (elapsed.TotalMinutes < 1) return "Just now";
+        if (elapsed.TotalHours < 1) return $"{elapsed.Minutes}m ago";
+        if (elapsed.TotalDays < 1) return timestamp.ToLocalTime().ToString("HH:mm");
+        return timestamp.ToLocalTime().ToString("MM/dd HH:mm");
+    }
+}

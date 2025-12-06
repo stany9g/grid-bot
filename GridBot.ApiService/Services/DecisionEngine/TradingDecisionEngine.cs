@@ -56,6 +56,9 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     private readonly ConcurrentDictionary<int, (decimal? Position, DateTimeOffset Timestamp)> _positionCache = new();
     private readonly ConcurrentDictionary<int, (OrderBookSnapshot? Book, DateTimeOffset Timestamp)> _orderBookCache = new();
 
+    // Last decision result for dashboard
+    private readonly ConcurrentDictionary<int, DecisionResult> _lastDecisionResults = new();
+
     /// <summary>
     /// Creates a new TradingDecisionEngine instance.
     /// </summary>
@@ -421,7 +424,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             TradingMetrics.DecisionLoopDuration.Record(sw.Elapsed.TotalMilliseconds,
                 TradingMetrics.MarketResultTag(marketId, "success"));
 
-            return DecisionResult.Succeeded(
+            var successResult = DecisionResult.Succeeded(
                 marketId,
                 previousState,
                 _stateService.CurrentState,
@@ -438,6 +441,10 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                 sw.Elapsed,
                 ordersPlaced,
                 ordersCancelled);
+
+            // Store for dashboard
+            _lastDecisionResults[marketId] = successResult;
+            return successResult;
         }
         catch (Exception ex)
         {
@@ -450,7 +457,9 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             TradingMetrics.DecisionLoopDuration.Record(sw.Elapsed.TotalMilliseconds,
                 TradingMetrics.MarketResultTag(marketId, "failed"));
 
-            return DecisionResult.Failed(marketId, previousState, ex.Message, sw.Elapsed);
+            var failedResult = DecisionResult.Failed(marketId, previousState, ex.Message, sw.Elapsed);
+            _lastDecisionResults[marketId] = failedResult;
+            return failedResult;
         }
         finally
         {
@@ -648,6 +657,12 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     public int GetConsecutiveTimeoutCount(int marketId)
     {
         return _consecutiveTimeouts.GetValueOrDefault(marketId, 0);
+    }
+
+    /// <inheritdoc />
+    public DecisionResult? GetLastDecisionResult(int marketId)
+    {
+        return _lastDecisionResults.TryGetValue(marketId, out var result) ? result : null;
     }
 
     /// <summary>

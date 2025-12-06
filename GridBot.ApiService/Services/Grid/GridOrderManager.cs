@@ -326,12 +326,20 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
 
         try
         {
-            var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, ct)
+            // Get auth token for authenticated API call
+            var (authToken, authError) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
+            if (authError != null || string.IsNullOrEmpty(authToken))
+            {
+                _logger.LogError("Failed to create auth token: {Error}", authError ?? "empty token");
+                throw new InvalidOperationException($"Failed to create auth token: {authError ?? "empty token"}");
+            }
+
+            var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, ct)
                 .ConfigureAwait(false);
 
             // Build lookup by client order index for matching
             var orderLookup = activeOrders
-                .Where(o => o.MarketId == marketId && o.ClientOrderIndex.HasValue)
+                .Where(o => o.ClientOrderIndex.HasValue)
                 .ToDictionary(o => o.ClientOrderIndex!.Value, o => o);
 
             foreach (var level in levels)
@@ -415,6 +423,75 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         {
             _logger.LogError(ex, "Failed to calculate order size, using minimum");
             return _config.Capital.MinOrderSizeUsd / price;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<int> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default)
+    {
+        _logger.LogInformation(
+            "Checking for existing orders on exchange for market {MarketId} before grid initialization",
+            marketId);
+
+        try
+        {
+            // Get auth token for authenticated API call
+            var (authToken, authError) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
+            if (authError != null || string.IsNullOrEmpty(authToken))
+            {
+                _logger.LogError("Failed to create auth token for startup cleanup: {Error}", authError ?? "empty token");
+                return 0;
+            }
+
+            // Query active orders from exchange
+            var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, ct)
+                .ConfigureAwait(false);
+
+            if (activeOrders.Count == 0)
+            {
+                _logger.LogInformation("No existing orders found on exchange for market {MarketId}", marketId);
+                return 0;
+            }
+
+            _logger.LogWarning(
+                "Found {Count} existing orders on exchange for market {MarketId}. Cancelling all before grid initialization.",
+                activeOrders.Count, marketId);
+
+            // Log order details for debugging
+            foreach (var order in activeOrders)
+            {
+                _logger.LogDebug(
+                    "Cancelling existing order: Id={OrderId}, Side={Side}, Price={Price}, Size={Size}",
+                    order.OrderId,
+                    order.Side,
+                    order.Price,
+                    order.InitialBaseAmount);
+            }
+
+            // Cancel all orders
+            var response = await _commandClient.CancelAllOrdersAsync(marketId, timeInForce: 0, ct)
+                .ConfigureAwait(false);
+
+            if (response.Code == 0 || response.Code == 200)
+            {
+                _logger.LogInformation(
+                    "Successfully cancelled {Count} existing orders for market {MarketId} on startup",
+                    activeOrders.Count, marketId);
+                return activeOrders.Count;
+            }
+
+            _logger.LogWarning(
+                "CancelAllOrders returned non-success code {Code}: {Message}",
+                response.Code, response.Message);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to cancel existing orders on startup for market {MarketId}. " +
+                "Grid initialization will proceed but may result in duplicate orders.",
+                marketId);
+            return 0;
         }
     }
 

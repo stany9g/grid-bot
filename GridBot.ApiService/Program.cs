@@ -410,11 +410,26 @@ public partial class Program
         .WithSummary("Get account metadata")
         .WithDescription("Gets account metadata including public key and status.");
 
-        lighter.MapGet("/account/{accountIndex}/orders", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
+        lighter.MapGet("/account/{accountIndex}/market/{marketId}/orders", async (
+            [Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex,
+            [Microsoft.AspNetCore.Mvc.FromRoute] int marketId,
+            GridBot.Lighter.ILighterQueryClient queryClient,
+            GridBot.Lighter.ILighterCommandClient commandClient,
+            CancellationToken ct) =>
         {
             try
             {
-                var result = await client.GetActiveOrdersAsync(accountIndex, ct);
+                // Generate auth token for authenticated API call
+                var (authToken, authError) = await commandClient.CreateAuthTokenAsync();
+                if (authError != null || string.IsNullOrEmpty(authToken))
+                {
+                    return Results.Problem(
+                        detail: $"Failed to create auth token: {authError ?? "empty token"}",
+                        statusCode: 500,
+                        title: "Authentication Error");
+                }
+
+                var result = await queryClient.GetActiveOrdersAsync(accountIndex, marketId, authToken, ct);
                 return Results.Ok(result);
             }
             catch (GridBot.Lighter.LighterApiException ex)
@@ -434,7 +449,7 @@ public partial class Program
         })
         .WithName("GetActiveOrders")
         .WithSummary("Get active orders")
-        .WithDescription("Gets all active orders for an account.");
+        .WithDescription("Gets active orders for an account on a specific market. Requires authentication.");
 
         // Market Data Endpoints
         lighter.MapGet("/markets", async (GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
@@ -603,6 +618,220 @@ public partial class Program
         // Trading Dashboard Endpoints
         var trading = app.MapGroup("/api/trading")
             .WithTags("Trading Dashboard");
+
+        // Comprehensive dashboard endpoint - returns all data in one call
+        trading.MapGet("/dashboard", async (
+            ITradingStateService stateService,
+            ITradingDecisionEngine decisionEngine,
+            IMoonBagManager moonBagManager,
+            ILossMonitor lossMonitor,
+            IFlashCrashDetector flashCrashDetector,
+            GridBot.ApiService.Services.Grid.IGridLifecycleService gridLifecycle,
+            GridBot.ApiService.Services.MarketData.IMarketDataService marketDataService,
+            GridBot.Lighter.ILighterQueryClient queryClient,
+            Microsoft.Extensions.Options.IOptions<GridBot.Lighter.LighterOptions> lighterOptions,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                const int marketId = 0;
+                var accountIndex = lighterOptions.Value.AccountIndex;
+
+                // Gather all data in parallel
+                var stateTask = Task.FromResult((
+                    State: stateService.CurrentState,
+                    TrendState: stateService.CurrentTrendState,
+                    StateStartedAt: stateService.StateStartedAt
+                ));
+
+                var gridTask = gridLifecycle.GetCurrentGridStateAsync(marketId, ct);
+                var moonBagTask = moonBagManager.GetMoonBagStatusAsync(marketId, ct);
+                var lossTask = lossMonitor.GetCurrentLossStatusAsync(marketId, ct);
+                var flashCrashTask = flashCrashDetector.CheckForFlashCrashAsync(marketId, ct);
+                var priceTask = marketDataService.GetCurrentPriceAsync(marketId, ct);
+                var accountTask = queryClient.GetAccountAsync(accountIndex, ct);
+
+                await Task.WhenAll(gridTask, moonBagTask, lossTask, flashCrashTask, priceTask, accountTask);
+
+                var stateInfo = await stateTask;
+                var gridState = await gridTask;
+                var moonBagStatus = await moonBagTask;
+                var lossStatus = await lossTask;
+                var flashCrashStatus = await flashCrashTask;
+                var currentPrice = await priceTask;
+                var account = await accountTask;
+
+                // Get decision engine metrics
+                var recoveryPhase = decisionEngine.GetCurrentRecoveryPhase(marketId);
+                var positionMultiplier = decisionEngine.GetEffectivePositionMultiplier(marketId);
+                var spreadMultiplier = decisionEngine.GetEffectiveSpreadMultiplier(marketId);
+                var consecutiveTimeouts = decisionEngine.GetConsecutiveTimeoutCount(marketId);
+                var lastDecisionResult = decisionEngine.GetLastDecisionResult(marketId);
+
+                // Parse account data
+                decimal.TryParse(account.Collateral, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var equity);
+                decimal.TryParse(account.AvailableBalance, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var availableBalance);
+
+                // Get position
+                var position = account.Positions.FirstOrDefault(p => p.MarketId == marketId);
+                decimal positionSize = 0;
+                decimal unrealizedPnl = 0;
+                if (position != null)
+                {
+                    decimal.TryParse(position.PositionSize, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out positionSize);
+                    decimal.TryParse(position.UnrealizedPnl, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out unrealizedPnl);
+                }
+
+                // Calculate operational capacity
+                var operationalCapacity = stateInfo.State switch
+                {
+                    TradingState.Active => 100,
+                    TradingState.Degraded_Bootstrap => 50,
+                    TradingState.Degraded_SkewCorrection => 75,
+                    TradingState.Degraded_HighVolatility => 60,
+                    TradingState.Degraded_LowLiquidity => 70,
+                    TradingState.Degraded_ProtectiveMode => 10,
+                    TradingState.Recovering => (int)(positionMultiplier * 100),
+                    _ => 50
+                };
+
+                // Build grid state DTO
+                GridBot.ApiService.Models.Dashboard.GridStateDto? gridDto = null;
+                if (gridState != null)
+                {
+                    gridDto = new GridBot.ApiService.Models.Dashboard.GridStateDto
+                    {
+                        Status = gridState.Status.ToString(),
+                        CenterPrice = gridState.Parameters?.CenterPrice ?? 0,
+                        GridSpacing = gridState.Parameters?.GridSpacing ?? 0,
+                        TotalWidth = gridState.Parameters?.TotalWidth ?? 0,
+                        UpperBound = gridState.Parameters?.UpperBound ?? 0,
+                        LowerBound = gridState.Parameters?.LowerBound ?? 0,
+                        OrdersPerSide = gridState.Parameters?.OrdersPerSide ?? 0,
+                        TotalFills = gridState.TotalFills,
+                        ShiftCount = gridState.ShiftCount,
+                        RebuildCount = gridState.RebuildCount,
+                        ActiveOrders = gridState.Levels.Count(l => l.Status == GridBot.ApiService.Models.Trading.GridLevelStatus.Active),
+                        Levels = gridState.Levels.Select(l => new GridBot.ApiService.Models.Dashboard.GridLevelDto
+                        {
+                            Price = l.Price,
+                            IsBid = l.IsBid,
+                            LevelIndex = l.LevelIndex,
+                            Size = l.Size,
+                            Status = l.Status.ToString()
+                        }).ToList()
+                    };
+                }
+
+                // Build trend info from last decision result
+                GridBot.ApiService.Models.Dashboard.TrendInfoDto? trendDto = null;
+                if (lastDecisionResult?.TrendResult != null)
+                {
+                    var trend = lastDecisionResult.TrendResult.TrendAnalysis;
+                    var inventory = lastDecisionResult.TrendResult.InventoryAnalysis;
+                    trendDto = new GridBot.ApiService.Models.Dashboard.TrendInfoDto
+                    {
+                        CurrentState = trend.CurrentState.ToString(),
+                        ProposedState = trend.ProposedState.ToString(),
+                        ConfirmationRequired = trend.ConfirmationRequired,
+                        Ema20 = trend.Ema20,
+                        Ema50 = trend.Ema50,
+                        Adx = trend.Adx,
+                        TargetSkew = trend.TargetSkew,
+                        CurrentSkew = inventory.CurrentSkew,
+                        RebalanceDelta = inventory.RebalanceDelta,
+                        RebalanceNeeded = inventory.RebalanceNeeded,
+                        CorrectionDirection = inventory.CorrectionDirection.ToString(),
+                        InCooldown = trend.InCooldown
+                    };
+                }
+
+                // Build decision cycle info
+                GridBot.ApiService.Models.Dashboard.DecisionCycleDto? cycleDto = null;
+                if (lastDecisionResult != null)
+                {
+                    cycleDto = new GridBot.ApiService.Models.Dashboard.DecisionCycleDto
+                    {
+                        LastCycleTime = lastDecisionResult.Timestamp,
+                        CycleTimeMs = (int)lastDecisionResult.ExecutionDuration.TotalMilliseconds,
+                        DataCollectionTimeMs = 0, // Not tracked separately
+                        OrdersPlaced = lastDecisionResult.OrdersPlaced,
+                        OrdersCancelled = lastDecisionResult.OrdersCancelled,
+                        Success = lastDecisionResult.Success,
+                        Warnings = lastDecisionResult.Warnings.ToList()
+                    };
+                }
+
+                var response = new GridBot.ApiService.Models.Dashboard.DashboardResponse
+                {
+                    TradingState = stateInfo.State.ToString(),
+                    StateStartedAt = stateInfo.StateStartedAt,
+                    TrendState = stateInfo.TrendState.ToString(),
+                    Uptime = DateTimeOffset.UtcNow - stateInfo.StateStartedAt,
+                    MarketId = marketId,
+                    RecoveryPhase = recoveryPhase.ToString(),
+                    PositionMultiplier = positionMultiplier,
+                    SpreadMultiplier = spreadMultiplier,
+                    ConsecutiveTimeouts = consecutiveTimeouts,
+                    OperationalCapacity = operationalCapacity,
+                    CurrentPrice = currentPrice,
+                    PositionSize = positionSize,
+                    Equity = equity,
+                    AvailableBalance = availableBalance,
+                    UnrealizedPnl = unrealizedPnl,
+                    UnrealizedPnlPercent = equity > 0 ? (unrealizedPnl / equity) * 100 : 0,
+                    Grid = gridDto,
+                    Risk = new GridBot.ApiService.Models.Dashboard.RiskInfoDto
+                    {
+                        TradingAllowed = !lossStatus.AnyLimitBreached,
+                        BuysBlocked = flashCrashStatus.RequiredAction == GridBot.ApiService.Models.Trading.FlashCrashAction.PauseBuys ||
+                                      flashCrashStatus.RequiredAction == GridBot.ApiService.Models.Trading.FlashCrashAction.PauseAll,
+                        SellsBlocked = flashCrashStatus.RequiredAction == GridBot.ApiService.Models.Trading.FlashCrashAction.PauseAll,
+                        DailyPnlPercent = lossStatus.DailyPnlPercent,
+                        WeeklyPnlPercent = lossStatus.WeeklyPnlPercent,
+                        MonthlyPnlPercent = lossStatus.MonthlyPnlPercent,
+                        DrawdownPercent = lossStatus.DrawdownFromAthPercent,
+                        AnyLimitBreached = lossStatus.AnyLimitBreached,
+                        HaltReason = lossStatus.HaltReason,
+                        HaltUntil = lossStatus.HaltUntil,
+                        FlashCrashActive = flashCrashStatus.IsInProtection,
+                        FlashCrashSeverity = flashCrashStatus.Severity.ToString(),
+                        FlashCrashAction = flashCrashStatus.RequiredAction.ToString(),
+                        FlashCrashProtectionUntil = flashCrashStatus.ProtectionUntil,
+                        CrashCount24h = flashCrashDetector.GetCrashCount24h(marketId)
+                    },
+                    Trend = trendDto,
+                    MoonBag = new GridBot.ApiService.Models.Dashboard.MoonBagInfoDto
+                    {
+                        State = moonBagStatus.State.ToString(),
+                        LockedQuantity = moonBagStatus.LockedQuantity,
+                        HighWatermarkPrice = moonBagStatus.HighWatermarkPrice,
+                        TrailingStopPrice = moonBagStatus.TrailingStopPrice,
+                        CurrentProfitPercent = moonBagStatus.CurrentProfitPercent,
+                        MaxPositionAchieved = moonBagStatus.MaxPositionAchieved,
+                        HasActiveStopOrder = moonBagStatus.HasActiveStopOrder
+                    },
+                    Cycle = cycleDto,
+                    Timestamp = DateTimeOffset.UtcNow
+                };
+
+                return Results.Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(
+                    detail: ex.Message,
+                    statusCode: 500,
+                    title: "Failed to get dashboard data");
+            }
+        })
+        .WithName("GetDashboard")
+        .WithSummary("Get comprehensive dashboard data")
+        .WithDescription("Gets all dashboard data in a single call including trading state, grid, risk, trend, and moon bag status.");
 
         trading.MapGet("/status", (
             ITradingStateService stateService,
