@@ -1,4 +1,5 @@
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.MarketData;
 using Microsoft.Extensions.Options;
 
 namespace GridBot.ApiService.Configuration;
@@ -10,14 +11,19 @@ namespace GridBot.ApiService.Configuration;
 public sealed class RiskConfiguration : IRiskConfiguration
 {
     private readonly IOptionsMonitor<TradingBotOptions> _optionsMonitor;
+    private readonly IMarketResolver _marketResolver;
 
     /// <summary>
     /// Creates a new RiskConfiguration instance.
     /// </summary>
-    public RiskConfiguration(IOptionsMonitor<TradingBotOptions> optionsMonitor)
+    public RiskConfiguration(
+        IOptionsMonitor<TradingBotOptions> optionsMonitor,
+        IMarketResolver marketResolver)
     {
         ArgumentNullException.ThrowIfNull(optionsMonitor);
+        ArgumentNullException.ThrowIfNull(marketResolver);
         _optionsMonitor = optionsMonitor;
+        _marketResolver = marketResolver;
     }
 
     /// <inheritdoc />
@@ -45,7 +51,10 @@ public sealed class RiskConfiguration : IRiskConfiguration
     public LiquidityOptions Liquidity => Options.Liquidity;
 
     /// <inheritdoc />
-    public int MarketId => Options.MarketId;
+    public int MarketId => _marketResolver.MarketId;
+
+    /// <inheritdoc />
+    public string Symbol => _marketResolver.Symbol;
 
     /// <inheritdoc />
     public int DecisionLoopIntervalMs => Options.DecisionLoopIntervalMs;

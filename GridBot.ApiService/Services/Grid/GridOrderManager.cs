@@ -290,7 +290,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         await _orderLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var response = await _commandClient.CancelAllOrdersAsync(marketId, timeInForce: 0, ct)
+            var response = await _commandClient.CancelAllOrdersAsync(marketId, cancelTimestampMs: 0, ct)
                 .ConfigureAwait(false);
 
             if (response.Code == 0 || response.Code == 200)
@@ -469,7 +469,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             }
 
             // Cancel all orders
-            var response = await _commandClient.CancelAllOrdersAsync(marketId, timeInForce: 0, ct)
+            var response = await _commandClient.CancelAllOrdersAsync(marketId, cancelTimestampMs: 0, ct)
                 .ConfigureAwait(false);
 
             if (response.Code == 0 || response.Code == 200)

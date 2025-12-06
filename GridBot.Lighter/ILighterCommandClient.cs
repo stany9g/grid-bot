@@ -43,10 +43,11 @@ public interface ILighterCommandClient : IDisposable
     /// Signs the cancellation locally and submits it to the API.
     /// </summary>
     /// <param name="marketId">Market ID.</param>
-    /// <param name="timeInForce">Time in force for the cancellation (default: 0 = immediate).</param>
+    /// <param name="cancelTimestampMs">Unix timestamp in milliseconds. Orders created before this timestamp will be cancelled.
+    /// If 0 is passed (default), the implementation will use current time + 5 minutes.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Response containing transaction hash and predicted execution time.</returns>
-    Task<RespSendTx> CancelAllOrdersAsync(int marketId, long timeInForce = 0, CancellationToken cancellationToken = default);
+    Task<RespSendTx> CancelAllOrdersAsync(int marketId, long cancelTimestampMs = 0, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Modifies an existing order in a single operation.

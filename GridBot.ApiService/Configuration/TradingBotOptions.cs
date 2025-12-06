@@ -52,9 +52,10 @@ public sealed class TradingBotOptions
     public DecisionEngineOptions DecisionEngine { get; set; } = new();
 
     /// <summary>
-    /// Lighter DEX market ID to trade.
+    /// Market symbol to trade (e.g., "BTC", "ETH").
+    /// The symbol is resolved to a market ID at startup by matching against available order books.
     /// </summary>
-    public int MarketId { get; set; } = 1;
+    public string Symbol { get; set; } = "BTC";
 
     /// <summary>
     /// Main decision loop interval in milliseconds.

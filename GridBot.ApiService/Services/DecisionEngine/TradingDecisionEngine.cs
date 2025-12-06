@@ -26,6 +26,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 {
     private readonly ILogger<TradingDecisionEngine> _logger;
     private readonly TradingBotOptions _options;
+    private readonly LighterOptions _lighterOptions;
     private readonly ITradingStateService _stateService;
     private readonly IRiskSentinel _riskSentinel;
     private readonly IMoonBagManager _moonBagManager;
@@ -65,6 +66,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     public TradingDecisionEngine(
         ILogger<TradingDecisionEngine> logger,
         IOptions<TradingBotOptions> options,
+        IOptions<LighterOptions> lighterOptions,
         ITradingStateService stateService,
         IRiskSentinel riskSentinel,
         IMoonBagManager moonBagManager,
@@ -79,6 +81,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(lighterOptions);
         ArgumentNullException.ThrowIfNull(stateService);
         ArgumentNullException.ThrowIfNull(riskSentinel);
         ArgumentNullException.ThrowIfNull(moonBagManager);
@@ -93,6 +96,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 
         _logger = logger;
         _options = options.Value;
+        _lighterOptions = lighterOptions.Value;
         _stateService = stateService;
         _riskSentinel = riskSentinel;
         _moonBagManager = moonBagManager;
@@ -738,7 +742,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         {
             try
             {
-                var account = await _lighterClient.GetAccountAsync(_options.MarketId, timeoutCts.Token)
+                var account = await _lighterClient.GetAccountAsync(_lighterOptions.AccountIndex, timeoutCts.Token)
                     .ConfigureAwait(false);
 
                 // Extract equity from account collateral (string to decimal)

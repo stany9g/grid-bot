@@ -48,9 +48,14 @@ public interface IRiskConfiguration
     LiquidityOptions Liquidity { get; }
 
     /// <summary>
-    /// Gets the target market ID.
+    /// Gets the target market ID (resolved from Symbol at startup).
     /// </summary>
     int MarketId { get; }
+
+    /// <summary>
+    /// Gets the configured trading symbol (e.g., "BTC").
+    /// </summary>
+    string Symbol { get; }
 
     /// <summary>
     /// Gets the decision loop interval in milliseconds.

@@ -223,9 +223,10 @@ public class SignerClient : IDisposable
     /// Signs a request to cancel all orders in a specific market.
     /// </summary>
     /// <param name="marketIndex">Market identifier.</param>
-    /// <param name="timeInForce">Time-in-force for cancellation (0=immediate, 1=scheduled, 2=abort).</param>
+    /// <param name="cancelTimestampMs">Unix timestamp in milliseconds. Orders created before this timestamp will be cancelled.
+    /// If 0 is passed, defaults to current time + 5 minutes. Must be greater than 0 when sent to the API.</param>
     /// <returns>Tuple containing (txInfo, error). If error is not null, signing failed.</returns>
-    public async Task<(string? txInfo, string? error)> CancelAllOrdersAsync(int marketIndex, long timeInForce = 0)
+    public async Task<(string? txInfo, string? error)> CancelAllOrdersAsync(int marketIndex, long cancelTimestampMs = 0)
     {
         if (!_isInitialized)
             return (null, "Client not initialized. Call InitializeAsync first.");
@@ -236,7 +237,13 @@ public class SignerClient : IDisposable
         return await Task.Run(() =>
         {
             long nonce = GetNextNonce();
-            var result = NativeMethods.SignCancelAllOrders(marketIndex, timeInForce, nonce);
+            // If cancelTimestampMs is 0, use current time + 5 minutes as the cancel-all timestamp.
+            // The native library expects this to be a Unix timestamp in milliseconds > 0.
+            long effectiveTimestamp = cancelTimestampMs > 0
+                ? cancelTimestampMs
+                : DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds();
+
+            var result = NativeMethods.SignCancelAllOrders(marketIndex, effectiveTimestamp, nonce);
             return ProcessStrOrErr(result);
         });
     }

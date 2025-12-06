@@ -20,6 +20,9 @@ public static class MarketDataServiceExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
+        // Register market resolver (resolves symbol to market ID at startup)
+        services.AddSingleton<IMarketResolver, MarketResolver>();
+
         // Register market scaling service (fetches and caches market metadata for price/size scaling)
         services.AddSingleton<IMarketScalingService, MarketScalingService>();
 

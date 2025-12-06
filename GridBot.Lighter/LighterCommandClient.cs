@@ -27,7 +27,12 @@ public sealed class LighterCommandClient : ILighterCommandClient
     /// <summary>
     /// Maximum number of retry attempts for nonce errors.
     /// </summary>
-    private const int MaxNonceRetries = 2;
+    private const int MaxNonceRetries = 5;
+
+    /// <summary>
+    /// Delay in milliseconds between nonce retry attempts.
+    /// </summary>
+    private const int NonceRetryDelayMs = 100;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LighterCommandClient"/> class.
@@ -240,20 +245,21 @@ public sealed class LighterCommandClient : ILighterCommandClient
     /// Automatically retries with nonce resync if a nonce mismatch error occurs.
     /// </summary>
     /// <param name="marketId">Market ID.</param>
-    /// <param name="timeInForce">Time in force for the cancellation (default: 0 = immediate).</param>
+    /// <param name="cancelTimestampMs">Unix timestamp in milliseconds. Orders created before this timestamp will be cancelled.
+    /// If 0 is passed (default), the implementation will use current time + 5 minutes.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Response containing transaction hash and predicted execution time.</returns>
     /// <exception cref="LighterApiException">Thrown when signing fails or the API returns an error.</exception>
     public async Task<RespSendTx> CancelAllOrdersAsync(
         int marketId,
-        long timeInForce = 0,
+        long cancelTimestampMs = 0,
         CancellationToken cancellationToken = default)
     {
         return await ExecuteWithNonceRetryAsync(
             async () =>
             {
                 // Sign the cancellation locally
-                var result = await _signer.CancelAllOrdersAsync(marketId, timeInForce);
+                var result = await _signer.CancelAllOrdersAsync(marketId, cancelTimestampMs);
                 if (result.error != null)
                     throw new LighterApiException($"Failed to sign cancel all orders: {result.error}");
 
@@ -379,6 +385,9 @@ public sealed class LighterCommandClient : ILighterCommandClient
                 retryCount++;
                 Console.WriteLine($"[LighterCommandClient] Nonce error on {operationName} (code {ex.Code}), " +
                                   $"resyncing nonce (attempt {retryCount}/{MaxNonceRetries})");
+
+                // Add delay before retry to avoid rapid-fire failures
+                await Task.Delay(NonceRetryDelayMs, cancellationToken);
 
                 // Resync nonce from server
                 await SyncNonceAsync(_signer.AccountIndex, _signer.ApiKeyIndex, cancellationToken);

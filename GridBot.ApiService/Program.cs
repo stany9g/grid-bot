@@ -11,7 +11,7 @@ using Scalar.AspNetCore;
 
 public partial class Program
 {
-    private static void Main(string[] args)
+    private static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
 
@@ -271,11 +271,11 @@ public partial class Program
         .WithSummary("Cancel a specific order")
         .WithDescription("Cancels a specific order by market ID and order ID.");
 
-        lighter.MapDelete("/orders/{marketId}/cancel-all", async ([Microsoft.AspNetCore.Mvc.FromRoute] int marketId, [Microsoft.AspNetCore.Mvc.FromQuery] long timeInForce, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
+        lighter.MapDelete("/orders/{marketId}/cancel-all", async ([Microsoft.AspNetCore.Mvc.FromRoute] int marketId, [Microsoft.AspNetCore.Mvc.FromQuery] long cancelTimestampMs, GridBot.Lighter.ILighterCommandClient client, CancellationToken ct) =>
         {
             try
             {
-                var result = await client.CancelAllOrdersAsync(marketId, timeInForce, ct);
+                var result = await client.CancelAllOrdersAsync(marketId, cancelTimestampMs, ct);
                 return Results.Ok(result);
             }
             catch (GridBot.Lighter.LighterApiException ex)
@@ -1014,6 +1014,10 @@ public partial class Program
 
         app.MapDefaultEndpoints();
 
-        app.Run();
+        // Initialize market resolver before starting the application
+        var marketResolver = app.Services.GetRequiredService<IMarketResolver>();
+        await marketResolver.InitializeAsync();
+
+        await app.RunAsync();
     }
 }
