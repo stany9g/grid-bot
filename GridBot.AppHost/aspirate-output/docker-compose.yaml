@@ -19,9 +19,9 @@ services:
     - target: 6379
       published: 6379
     command:
-    - "-c"
-    - "redis-server --requirepass $REDIS_PASSWORD"
-    - "/bin/sh"
+    - "redis-server"
+    - "--requirepass"
+    - "bwitanFqMa8ZlCcazDkJKw"
     restart: unless-stopped
   apiservice:
     container_name: "apiservice"
@@ -39,6 +39,7 @@ services:
       CACHE_URI: "redis://:{cache-password-uri-encoded.value}@cache:6379"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       OTEL_SERVICE_NAME: "apiservice"
+      ASPNETCORE_ENVIRONMENT: Development
     ports:
     - target: 8080
       published: 10000
@@ -63,6 +64,7 @@ services:
       services__apiservice__http__0: "http://apiservice:8080"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       OTEL_SERVICE_NAME: "webfrontend"
+      ASPNETCORE_ENVIRONMENT: Development
     ports:
     - target: 8080
       published: 10002
