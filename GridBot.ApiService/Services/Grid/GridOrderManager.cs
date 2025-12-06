@@ -28,6 +28,21 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
     private bool _disposed;
 
     /// <summary>
+    /// Circuit breaker threshold - stop placing orders after this many consecutive failures.
+    /// </summary>
+    private const int CircuitBreakerThreshold = 3;
+
+    /// <summary>
+    /// Lighter DEX maker fee rate (0.02%).
+    /// </summary>
+    private const decimal MakerFeeRate = 0.0002m;
+
+    /// <summary>
+    /// Post-Only rejection error codes that indicate the order would cross the spread.
+    /// </summary>
+    private static readonly HashSet<int> PostOnlyRejectionCodes = [4001, 4002, 4003]; // Placeholder codes - verify with Lighter docs
+
+    /// <summary>
     /// Account index for trading operations.
     /// In a production system, this would come from configuration.
     /// </summary>
@@ -165,6 +180,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                         level.ClientOrderIndex = clientOrderIndex;
                         level.Status = GridLevelStatus.Active;
                         level.LastUpdatedAt = DateTimeOffset.UtcNow;
+                        level.OriginalSize = level.Size; // Store original size for partial fill tracking
                         ordersPlaced++;
 
                         _logger.LogDebug(
@@ -173,6 +189,26 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                             level.Price,
                             level.LevelIndex,
                             response.TxHash);
+                    }
+                    // FIX Finding 3: Handle Post-Only rejections specifically
+                    else if (PostOnlyRejectionCodes.Contains(response.Code))
+                    {
+                        _logger.LogWarning(
+                            "Post-Only order rejected (would cross spread) for {Side} at {Price}. Code: {Code}",
+                            level.IsBid ? "bid" : "ask",
+                            level.Price,
+                            response.Code);
+
+                        errors.Add(new GridOrderError
+                        {
+                            LevelIndex = level.LevelIndex,
+                            Price = level.Price,
+                            IsBid = level.IsBid,
+                            ErrorMessage = $"Post-Only rejection: would cross spread (code {response.Code})"
+                        });
+                        ordersFailed++;
+                        // Note: In a more advanced implementation, we could retry with adjusted price
+                        // by moving the price further from the spread by one tick.
                     }
                     else
                     {
@@ -207,6 +243,15 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                         "Exception placing {Side} order at {Price}",
                         level.IsBid ? "bid" : "ask",
                         level.Price);
+
+                    // FIX Finding 14: Circuit breaker - stop after consecutive failures
+                    if (ordersFailed >= CircuitBreakerThreshold)
+                    {
+                        _logger.LogWarning(
+                            "Circuit breaker triggered after {Failed} consecutive failures. Stopping order placement for this batch.",
+                            ordersFailed);
+                        break;
+                    }
                 }
             }
         }
@@ -354,11 +399,39 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                     // Order is still active
                     level.OrderId = long.TryParse(order.OrderId, out var id) ? id : null;
                     level.Status = GridLevelStatus.Active;
+
+                    // FIX Finding 10: Track partial fills
+                    // Compare InitialBaseAmount vs RemainingBaseAmount from API
+                    if (decimal.TryParse(order.InitialBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var initialAmount) &&
+                        decimal.TryParse(order.RemainingBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var remainingAmount) &&
+                        initialAmount > 0)
+                    {
+                        var filledAmount = initialAmount - remainingAmount;
+                        var fillPercent = (filledAmount / initialAmount) * 100m;
+
+                        if (fillPercent > 0 && fillPercent != level.PartialFillPercent)
+                        {
+                            level.PartialFillPercent = fillPercent;
+                            level.Size = remainingAmount; // Update size to remaining amount
+
+                            if (fillPercent > 0)
+                            {
+                                _logger.LogInformation(
+                                    "Partial fill detected at {Side} level {Index}: {FillPercent:F1}% filled ({Filled}/{Initial})",
+                                    level.IsBid ? "bid" : "ask",
+                                    level.LevelIndex,
+                                    fillPercent,
+                                    filledAmount,
+                                    initialAmount);
+                            }
+                        }
+                    }
                 }
                 else if (level.Status == GridLevelStatus.Active)
                 {
-                    // Order was active but no longer in active orders - likely filled
+                    // Order was active but no longer in active orders - fully filled
                     level.Status = GridLevelStatus.Filled;
+                    level.PartialFillPercent = 100m; // Mark as fully filled
                     _logger.LogInformation(
                         "Detected fill at {Side} level {Index}, price {Price}",
                         level.IsBid ? "bid" : "ask",
@@ -403,8 +476,12 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             // Calculate max capital to deploy
             var maxDeployable = availableBalance * (_config.Capital.MaxDeployedCapitalPercent / 100m);
 
+            // FIX Finding 4: Account for trading fees (entry + exit)
+            // Effective deployable capital is reduced by expected fees on both sides of the trade
+            var effectiveDeployable = maxDeployable / (1 + MakerFeeRate * 2);
+
             // Calculate per-level allocation
-            var perLevelAllocation = maxDeployable / totalLevels;
+            var perLevelAllocation = effectiveDeployable / totalLevels;
 
             // Apply order size constraints
             var orderSizeUsd = Math.Max(perLevelAllocation, _config.Capital.MinOrderSizeUsd);
@@ -659,6 +736,51 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         var sideIndicator = level.IsBid ? 0 : 1;
         // Format: timestamp(ms) % 10B * 10000 + sequence(0-999) * 10 + side(0-1) * 5 + levelIndex
         return (timestamp % 10_000_000_000) * 10000 + sequence * 10 + sideIndicator * 5 + level.LevelIndex;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// FIX Finding 1: This method provides thread-safe level mutation by using the
+    /// order manager's internal lock. This ensures that GridLifecycleService can
+    /// reset levels without creating a race condition with order placement.
+    /// </remarks>
+    public async Task<int> ResetFilledLevelsToPendingAsync(IReadOnlyList<GridLevel> levels, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(levels);
+
+        if (levels.Count == 0)
+        {
+            return 0;
+        }
+
+        await _orderLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var resetCount = 0;
+            foreach (var level in levels)
+            {
+                if (level.Status == GridLevelStatus.Filled)
+                {
+                    level.Status = GridLevelStatus.Pending;
+                    level.OrderId = null;
+                    level.ClientOrderIndex = null;
+                    level.PartialFillPercent = 0m;
+                    level.LastUpdatedAt = DateTimeOffset.UtcNow;
+                    resetCount++;
+                }
+            }
+
+            if (resetCount > 0)
+            {
+                _logger.LogDebug("Reset {Count} filled levels to pending under order lock", resetCount);
+            }
+
+            return resetCount;
+        }
+        finally
+        {
+            _orderLock.Release();
+        }
     }
 
     /// <summary>

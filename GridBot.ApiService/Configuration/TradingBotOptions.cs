@@ -560,6 +560,13 @@ public sealed class DecisionEngineOptions
     public int CacheValidityMs { get; set; } = 30000;
 
     /// <summary>
+    /// Maximum age for cached data in grid operations in milliseconds (default 5000ms).
+    /// Grid operations require fresher data than general decision making.
+    /// FIX Finding 6: Reduced from 30s to 5s for grid-specific operations.
+    /// </summary>
+    public int GridOperationCacheValidityMs { get; set; } = 5000;
+
+    /// <summary>
     /// Recovery Phase 1 duration in milliseconds (default 15 minutes).
     /// </summary>
     public int RecoveryPhase1DurationMs { get; set; } = 900000;

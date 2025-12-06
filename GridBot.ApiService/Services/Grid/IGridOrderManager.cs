@@ -79,4 +79,13 @@ public interface IGridOrderManager
     /// - CancelledCount: number of orders that were cancelled (0 if none existed or on failure)
     /// </returns>
     Task<(bool Success, int CancelledCount)> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Atomically resets filled levels to pending state under the order manager's lock.
+    /// This ensures thread-safe coordination between GridLifecycleService and GridOrderManager.
+    /// </summary>
+    /// <param name="levels">Levels to reset (only Filled status levels will be modified).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Number of levels that were reset.</returns>
+    Task<int> ResetFilledLevelsToPendingAsync(IReadOnlyList<GridLevel> levels, CancellationToken ct = default);
 }

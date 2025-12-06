@@ -39,6 +39,23 @@ public sealed class GridCalculator : IGridCalculator
         // Get spacing and orders per side based on ATR
         var (spacing, ordersPerSide) = _config.CalculateGridParameters(atrPercent);
 
+        // FIX Finding 5: Guard against division by zero - use defaults if invalid
+        if (ordersPerSide <= 0)
+        {
+            _logger.LogError(
+                "Invalid ordersPerSide: {Value}. Using default: {Default}",
+                ordersPerSide, _config.Grid.DefaultOrdersPerSide);
+            ordersPerSide = _config.Grid.DefaultOrdersPerSide;
+        }
+
+        if (spacing <= 0)
+        {
+            _logger.LogError(
+                "Invalid spacing: {Value}. Using default: {Default}",
+                spacing, _config.Grid.DefaultSpacing);
+            spacing = _config.Grid.DefaultSpacing;
+        }
+
         // Apply floor and ceiling from configuration
         spacing = Math.Max(spacing, _config.Grid.MinSpacing);
         spacing = Math.Min(spacing, _config.Grid.MaxSpacing);
@@ -52,8 +69,15 @@ public sealed class GridCalculator : IGridCalculator
         totalWidth = Math.Max(totalWidth, _config.Grid.MinWidth);
         totalWidth = Math.Min(totalWidth, _config.Grid.MaxWidth);
 
+        // FIX Finding 5: Guard against division by zero in effective spacing calc
+        var divisor = ordersPerSide * 2;
+        if (divisor <= 0)
+        {
+            divisor = _config.Grid.DefaultOrdersPerSide * 2;
+        }
+
         // Recalculate spacing if width was constrained
-        var effectiveSpacing = totalWidth / (ordersPerSide * 2);
+        var effectiveSpacing = totalWidth / divisor;
         effectiveSpacing = Math.Max(effectiveSpacing, _config.Grid.MinSpacing);
 
         // Calculate bounds

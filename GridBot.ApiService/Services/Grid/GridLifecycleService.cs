@@ -26,7 +26,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     private readonly IRiskConfiguration _config;
     private readonly ITradingStateService _stateService;
     private readonly IOperationalCapacityService _capacityService;
-    private readonly IRiskSentinel _riskSentinel;
+    private readonly ILossMonitor _lossMonitor;
     private readonly ILogger<GridLifecycleService> _logger;
 
     private readonly ConcurrentDictionary<int, GridState> _gridStates = new();
@@ -52,7 +52,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         IRiskConfiguration config,
         ITradingStateService stateService,
         IOperationalCapacityService capacityService,
-        IRiskSentinel riskSentinel,
+        ILossMonitor lossMonitor,
         ILogger<GridLifecycleService> logger)
     {
         ArgumentNullException.ThrowIfNull(gridCalculator);
@@ -63,7 +63,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(stateService);
         ArgumentNullException.ThrowIfNull(capacityService);
-        ArgumentNullException.ThrowIfNull(riskSentinel);
+        ArgumentNullException.ThrowIfNull(lossMonitor);
         ArgumentNullException.ThrowIfNull(logger);
 
         _gridCalculator = gridCalculator;
@@ -74,7 +74,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         _config = config;
         _stateService = stateService;
         _capacityService = capacityService;
-        _riskSentinel = riskSentinel;
+        _lossMonitor = lossMonitor;
         _logger = logger;
     }
 
@@ -299,8 +299,22 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
             // Check if ATR changed significantly
             var currentSpacing = _gridCalculator.CalculateGridSpacingFromAtr(atrPercent);
-            var spacingChange = Math.Abs(currentSpacing - gridState.Parameters.GridSpacing) /
+
+            // FIX Finding 5: Guard against division by zero
+            decimal spacingChange = 0m;
+            if (gridState.Parameters.GridSpacing > 0)
+            {
+                spacingChange = Math.Abs(currentSpacing - gridState.Parameters.GridSpacing) /
                                gridState.Parameters.GridSpacing;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Invalid grid spacing {Spacing} for market {MarketId}. Forcing rebuild.",
+                    gridState.Parameters.GridSpacing, marketId);
+                spacingChange = 1.0m; // Force rebuild
+            }
+
             var shouldRebuild = spacingChange > AtrChangeThreshold;
 
             // EC-002 triggered rebuild or ATR-based rebuild
@@ -353,15 +367,12 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                     filledLevels = filledLevels.Where(l => !l.IsBid).ToList();
                 }
 
-                foreach (var level in filledLevels)
-                {
-                    level.Status = GridLevelStatus.Pending;
-                    level.OrderId = null;
-                    level.ClientOrderIndex = null;
-                }
-
                 if (filledLevels.Count > 0)
                 {
+                    // FIX Finding 1: Use thread-safe method to reset levels under order manager's lock
+                    // This ensures no race condition between GridLifecycleService and GridOrderManager
+                    await _orderManager.ResetFilledLevelsToPendingAsync(filledLevels, ct).ConfigureAwait(false);
+
                     // Use total grid level count for capital allocation, not just the filled subset
                     await UpdateOrderSizesAsync(marketId, filledLevels, gridState.Levels.Count, ct).ConfigureAwait(false);
                     var result = await _orderManager.PlaceGridOrdersAsync(marketId, filledLevels, ct)
@@ -645,7 +656,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     }
 
     /// <summary>
-    /// Records P&L for filled grid orders to the risk sentinel.
+    /// Records P&L for filled grid orders to the loss monitor.
     /// For grid trading, P&L is calculated as follows:
     /// - BID fill (buy): No immediate P&L (position entry)
     /// - ASK fill (sell): P&L = grid spacing profit minus fees
@@ -660,10 +671,9 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         IReadOnlyList<GridLevel> filledLevels,
         CancellationToken ct)
     {
-        // Get current equity for P&L percentage calculation
-        // Equity is tracked by the RiskSentinel via LossMonitor
-        var riskAssessment = await _riskSentinel.AssessRiskAsync(marketId, ct).ConfigureAwait(false);
-        var currentEquity = riskAssessment.LossStatus.CurrentEquity;
+        // Get current equity for P&L percentage calculation from LossMonitor
+        var lossStatus = await _lossMonitor.GetCurrentLossStatusAsync(marketId, ct).ConfigureAwait(false);
+        var currentEquity = lossStatus.CurrentEquity;
 
         if (currentEquity <= 0)
         {
@@ -710,8 +720,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             // Update grid state realized P&L
             gridState.RealizedPnl += netPnlUsd;
 
-            // Record to risk sentinel for rolling window loss limit tracking
-            await _riskSentinel.RecordTradeResultAsync(marketId, pnlPercent, ct).ConfigureAwait(false);
+            // Record to loss monitor for rolling window loss limit tracking
+            await _lossMonitor.RecordTradeResultAsync(marketId, pnlPercent, ct).ConfigureAwait(false);
 
             _logger.LogInformation(
                 "Recorded fill P&L for market {MarketId}: {PnlPercent:F4}% ({PnlUsd:F2} USD) - " +

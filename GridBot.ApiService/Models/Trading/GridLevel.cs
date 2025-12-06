@@ -45,6 +45,18 @@ public sealed class GridLevel
     /// Timestamp when this level was last updated.
     /// </summary>
     public DateTimeOffset LastUpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Partial fill percentage (0-100). 0 = no fill, 100 = fully filled.
+    /// Used for tracking partially filled orders.
+    /// </summary>
+    public decimal PartialFillPercent { get; set; } = 0m;
+
+    /// <summary>
+    /// Original order size before any partial fills.
+    /// Used to calculate fill percentage and position tracking.
+    /// </summary>
+    public decimal OriginalSize { get; set; }
 }
 
 /// <summary>

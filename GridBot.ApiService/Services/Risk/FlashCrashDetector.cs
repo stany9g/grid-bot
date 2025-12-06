@@ -277,19 +277,24 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
     {
         var now = DateTimeOffset.UtcNow;
 
-        // Record crash event with write lock
+        // FIX Finding 7: Record crash event AND calculate crash count within the same write lock scope
+        // This avoids the potential deadlock from acquiring read lock after write lock
+        int crashCount;
         _rwLock.EnterWriteLock();
         try
         {
             state.CrashEvents.Add(now);
+
+            // Calculate crash count within the write lock scope instead of calling GetCrashCount24h
+            var cutoff = DateTimeOffset.UtcNow.AddHours(-24);
+            crashCount = state.CrashEvents.Count(e => e >= cutoff);
         }
         finally
         {
             _rwLock.ExitWriteLock();
         }
 
-        // Check if we've exceeded max events in 24 hours
-        var crashCount = GetCrashCount24h(marketId);
+        // Check if we've exceeded max events in 24 hours (crashCount already calculated)
         if (crashCount > _riskConfig.FlashCrash.MaxEventsIn24Hours)
         {
             // Extended halt
