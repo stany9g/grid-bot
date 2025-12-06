@@ -1,0 +1,30 @@
+{
+  "projectPath": ".",
+  "outputPath": "aspirate-output",
+  "containerRegistry": "192.168.1.176:5000",
+  "containerImageTags": [
+    "latest"
+  ],
+  "runtimeIdentifier": "linux-arm64",
+  "containerBuilder": "docker",
+  "outputFormat": "compose",
+  "privateRegistryEmail": "aspir8@aka.ms",
+  "includeDashboard": true,
+  "secrets": {
+    "salt": "/KcIcnH\u002B2r2iCCQQ",
+    "hash": "7OREfbHS6/WHA5b1N2BG6oWjP0uXbBt3qRZF8S7bARg=",
+    "secrets": {
+      "cache-password": {
+        "value": "/KcIcnH\u002B2r2iCCQQDUOIZ13K8Ohj91n5dTdBpQ/usm3xHrhvAskpDJ8YhympOw8DgOs="
+      },
+      "cache": {},
+      "apiservice": {
+        "ConnectionStrings__cache": "/KcIcnH\u002B2r2iCCQQ3\u002BAoSyGSCS1MVb4aoSytTA74uHH1SsgteJE9JpIolz\u002B8DQB0qevazX0B0Xkl7tqKeCgx\u002B2cGyEsZIg=="
+      },
+      "webfrontend": {
+        "ConnectionStrings__cache": "/KcIcnH\u002B2r2iCCQQ3\u002BAoSyGSCS1MVb4aoSytTA74uHH1SsgteJE9JpIolz\u002B8DQB0qevazX0B0Xkl7tqKeCgx\u002B2cGyEsZIg=="
+      }
+    }
+  },
+  "processAllComponents": true
+}
