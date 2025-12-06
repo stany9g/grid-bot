@@ -19,11 +19,11 @@
 
   <ItemGroup>
     <!-- Copy native libraries to output directory -->
-    <None Include="Native\signer-amd64.dll" Condition="'$(OS)' == 'Windows_NT'">
+    <None Include="Native\signer-amd64.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Native\signer-amd64.dll</Link>
     </None>
-    <None Include="Native\signer-amd64.so" Condition="'$(OS)' != 'Windows_NT'">
+    <None Include="Native\signer-amd64.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Native\signer-amd64.so</Link>
     </None>
