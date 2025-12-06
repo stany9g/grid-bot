@@ -122,3 +122,36 @@ Implement all HIGH and MEDIUM priority fixes from the comprehensive trading bot 
 - Added `CircuitBreakerThreshold = 3` constant
 - After 3 consecutive failures in `PlaceGridOrdersAsync`, break the loop
 - Logs warning when circuit breaker triggers
+
+---
+
+## Code Review (csharp-code-reviewer) - 2025-12-06
+
+### Review Status: NOT APPROVED - CRITICAL ISSUES FOUND
+
+Full review documented in: `.claude/doc/code_review_audit_fixes_session6.md`
+
+### Critical Issues Requiring Fix
+
+1. **SyncOrderStatusAsync Missing Lock Protection**
+   - File: `GridBot.ApiService/Services/Grid/GridOrderManager.cs`
+   - Problem: Method mutates GridLevel objects without acquiring `_orderLock`
+   - Impact: Race condition with PlaceGridOrdersAsync and ResetFilledLevelsToPendingAsync
+   - Fix: Wrap level mutation loop inside `_orderLock.WaitAsync()` / `Release()`
+
+2. **TrendDetector TOCTOU Fix Incomplete**
+   - File: `GridBot.ApiService/Services/Trend/TrendDetector.cs`
+   - Problem: Line 141 checks `pending.State != default` but default TrendState (Neutral) is a valid enum value
+   - Impact: Unnecessary AddOrUpdate calls when TryRemove returns false
+   - Fix: Check TryRemove return value directly, remove else-if branch
+
+### Warnings (Should Fix)
+
+3. Circuit breaker counts total failures, not consecutive (may trigger prematurely)
+4. PostOnlyRejectionCodes are placeholders - need verification with Lighter docs
+5. OriginalSize not initialized before sync operations in edge cases
+6. Lock ordering (gridLock -> orderLock) not documented
+
+### Action Required
+- dotnet-feature-builder must address CRITICAL issues 1 and 2
+- Re-review after fixes applied

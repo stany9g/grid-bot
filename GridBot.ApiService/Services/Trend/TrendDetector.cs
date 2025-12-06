@@ -126,27 +126,32 @@ public sealed class TrendDetector : ITrendDetector
         if (!confirmationRequired && proposedState != currentState)
         {
             // FIX Finding 8: Use atomic compare-and-remove pattern to avoid TOCTOU race
-            // TryRemove returns the value if removed, null otherwise
-            if (_pendingConfirmations.TryRemove(marketId, out var pending) &&
-                pending.State == proposedState &&
-                DateTimeOffset.UtcNow >= pending.ConfirmTime)
-            {
-                // Successfully removed and conditions are met - confirm the trend
-                effectiveState = proposedState;
-                RecordTrendFlip(marketId, currentState, proposedState);
+            // TryRemove returns true if removed, with the removed value in 'pending'
+            var wasRemoved = _pendingConfirmations.TryRemove(marketId, out var pending);
 
-                _logger.LogInformation("Trend confirmed on market {MarketId}: {OldState} -> {NewState}",
-                    marketId, currentState, proposedState);
-            }
-            else if (pending.State != default)
+            if (wasRemoved)
             {
-                // Removed but conditions not met - restore the pending confirmation
-                // Use AddOrUpdate to handle race where another thread may have added one
-                _pendingConfirmations.AddOrUpdate(
-                    marketId,
-                    pending,
-                    (_, existing) => existing.ConfirmTime < pending.ConfirmTime ? existing : pending);
+                // Check if conditions are met for confirmation
+                if (pending.State == proposedState && DateTimeOffset.UtcNow >= pending.ConfirmTime)
+                {
+                    // Successfully removed and conditions are met - confirm the trend
+                    effectiveState = proposedState;
+                    RecordTrendFlip(marketId, currentState, proposedState);
+
+                    _logger.LogInformation("Trend confirmed on market {MarketId}: {OldState} -> {NewState}",
+                        marketId, currentState, proposedState);
+                }
+                else
+                {
+                    // Removed but conditions not met - restore the pending confirmation
+                    // Use AddOrUpdate to handle race where another thread may have added one
+                    _pendingConfirmations.AddOrUpdate(
+                        marketId,
+                        pending,
+                        (_, existing) => existing.ConfirmTime < pending.ConfirmTime ? existing : pending);
+                }
             }
+            // If wasRemoved is false, nothing was in the dictionary - no action needed
         }
 
         return new TrendAnalysis

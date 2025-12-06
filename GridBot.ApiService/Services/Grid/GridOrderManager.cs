@@ -93,6 +93,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
 
         var ordersPlaced = 0;
         var ordersFailed = 0;
+        var consecutiveFailures = 0; // Track consecutive failures for circuit breaker
         var errors = new List<GridOrderError>();
 
         await _orderLock.WaitAsync(ct).ConfigureAwait(false);
@@ -182,6 +183,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                         level.LastUpdatedAt = DateTimeOffset.UtcNow;
                         level.OriginalSize = level.Size; // Store original size for partial fill tracking
                         ordersPlaced++;
+                        consecutiveFailures = 0; // Reset consecutive failure counter on success
 
                         _logger.LogDebug(
                             "Placed {Side} order at {Price} (level {Index}), TxHash: {TxHash}",
@@ -207,6 +209,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                             ErrorMessage = $"Post-Only rejection: would cross spread (code {response.Code})"
                         });
                         ordersFailed++;
+                        // Post-Only rejections are expected in fast markets, don't count as consecutive failures
                         // Note: In a more advanced implementation, we could retry with adjusted price
                         // by moving the price further from the spread by one tick.
                     }
@@ -220,12 +223,22 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                             ErrorMessage = response.Message ?? $"API error code: {response.Code}"
                         });
                         ordersFailed++;
+                        consecutiveFailures++;
 
                         _logger.LogWarning(
                             "Failed to place {Side} order at {Price}: {Message}",
                             level.IsBid ? "bid" : "ask",
                             level.Price,
                             response.Message);
+
+                        // FIX Finding 14: Circuit breaker - stop after consecutive failures
+                        if (consecutiveFailures >= CircuitBreakerThreshold)
+                        {
+                            _logger.LogWarning(
+                                "Circuit breaker triggered after {Failed} consecutive failures. Stopping order placement for this batch.",
+                                consecutiveFailures);
+                            break;
+                        }
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -238,6 +251,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                         ErrorMessage = ex.Message
                     });
                     ordersFailed++;
+                    consecutiveFailures++;
 
                     _logger.LogError(ex,
                         "Exception placing {Side} order at {Price}",
@@ -245,11 +259,11 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                         level.Price);
 
                     // FIX Finding 14: Circuit breaker - stop after consecutive failures
-                    if (ordersFailed >= CircuitBreakerThreshold)
+                    if (consecutiveFailures >= CircuitBreakerThreshold)
                     {
                         _logger.LogWarning(
                             "Circuit breaker triggered after {Failed} consecutive failures. Stopping order placement for this batch.",
-                            ordersFailed);
+                            consecutiveFailures);
                         break;
                     }
                 }
@@ -387,59 +401,69 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                 .Where(o => o.ClientOrderIndex.HasValue)
                 .ToDictionary(o => o.ClientOrderIndex!.Value, o => o);
 
-            foreach (var level in levels)
+            // FIX CRITICAL: Acquire _orderLock before mutating GridLevel objects
+            // This ensures thread-safety with PlaceGridOrdersAsync and ResetFilledLevelsToPendingAsync
+            await _orderLock.WaitAsync(ct).ConfigureAwait(false);
+            try
             {
-                if (!level.ClientOrderIndex.HasValue)
+                foreach (var level in levels)
                 {
-                    continue;
-                }
-
-                if (orderLookup.TryGetValue(level.ClientOrderIndex.Value, out var order))
-                {
-                    // Order is still active
-                    level.OrderId = long.TryParse(order.OrderId, out var id) ? id : null;
-                    level.Status = GridLevelStatus.Active;
-
-                    // FIX Finding 10: Track partial fills
-                    // Compare InitialBaseAmount vs RemainingBaseAmount from API
-                    if (decimal.TryParse(order.InitialBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var initialAmount) &&
-                        decimal.TryParse(order.RemainingBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var remainingAmount) &&
-                        initialAmount > 0)
+                    if (!level.ClientOrderIndex.HasValue)
                     {
-                        var filledAmount = initialAmount - remainingAmount;
-                        var fillPercent = (filledAmount / initialAmount) * 100m;
+                        continue;
+                    }
 
-                        if (fillPercent > 0 && fillPercent != level.PartialFillPercent)
+                    if (orderLookup.TryGetValue(level.ClientOrderIndex.Value, out var order))
+                    {
+                        // Order is still active
+                        level.OrderId = long.TryParse(order.OrderId, out var id) ? id : null;
+                        level.Status = GridLevelStatus.Active;
+
+                        // FIX Finding 10: Track partial fills
+                        // Compare InitialBaseAmount vs RemainingBaseAmount from API
+                        if (decimal.TryParse(order.InitialBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var initialAmount) &&
+                            decimal.TryParse(order.RemainingBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var remainingAmount) &&
+                            initialAmount > 0)
                         {
-                            level.PartialFillPercent = fillPercent;
-                            level.Size = remainingAmount; // Update size to remaining amount
+                            var filledAmount = initialAmount - remainingAmount;
+                            var fillPercent = (filledAmount / initialAmount) * 100m;
 
-                            if (fillPercent > 0)
+                            if (fillPercent > 0 && fillPercent != level.PartialFillPercent)
                             {
-                                _logger.LogInformation(
-                                    "Partial fill detected at {Side} level {Index}: {FillPercent:F1}% filled ({Filled}/{Initial})",
-                                    level.IsBid ? "bid" : "ask",
-                                    level.LevelIndex,
-                                    fillPercent,
-                                    filledAmount,
-                                    initialAmount);
+                                level.PartialFillPercent = fillPercent;
+                                level.Size = remainingAmount; // Update size to remaining amount
+
+                                if (fillPercent > 0)
+                                {
+                                    _logger.LogInformation(
+                                        "Partial fill detected at {Side} level {Index}: {FillPercent:F1}% filled ({Filled}/{Initial})",
+                                        level.IsBid ? "bid" : "ask",
+                                        level.LevelIndex,
+                                        fillPercent,
+                                        filledAmount,
+                                        initialAmount);
+                                }
                             }
                         }
                     }
-                }
-                else if (level.Status == GridLevelStatus.Active)
-                {
-                    // Order was active but no longer in active orders - fully filled
-                    level.Status = GridLevelStatus.Filled;
-                    level.PartialFillPercent = 100m; // Mark as fully filled
-                    _logger.LogInformation(
-                        "Detected fill at {Side} level {Index}, price {Price}",
-                        level.IsBid ? "bid" : "ask",
-                        level.LevelIndex,
-                        level.Price);
-                }
+                    else if (level.Status == GridLevelStatus.Active)
+                    {
+                        // Order was active but no longer in active orders - fully filled
+                        level.Status = GridLevelStatus.Filled;
+                        level.PartialFillPercent = 100m; // Mark as fully filled
+                        _logger.LogInformation(
+                            "Detected fill at {Side} level {Index}, price {Price}",
+                            level.IsBid ? "bid" : "ask",
+                            level.LevelIndex,
+                            level.Price);
+                    }
 
-                level.LastUpdatedAt = DateTimeOffset.UtcNow;
+                    level.LastUpdatedAt = DateTimeOffset.UtcNow;
+                }
+            }
+            finally
+            {
+                _orderLock.Release();
             }
         }
         catch (Exception ex)
