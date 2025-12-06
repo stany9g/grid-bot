@@ -52,7 +52,7 @@ internal static partial class NativeMethods
         }
         else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
         {
-            return Path.Combine(nativeDir, "signer-amd64.so");
+            return Path.Combine(nativeDir, "signer-arm64.so");
         }
         else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
