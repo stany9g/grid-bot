@@ -1,3 +1,4 @@
+using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Extensions;
 using GridBot.ApiService.Models.Dashboard;
 using GridBot.ApiService.Models.Trading;
@@ -630,11 +631,12 @@ public partial class Program
             GridBot.ApiService.Services.MarketData.IMarketDataService marketDataService,
             GridBot.Lighter.ILighterQueryClient queryClient,
             Microsoft.Extensions.Options.IOptions<GridBot.Lighter.LighterOptions> lighterOptions,
+            IRiskConfiguration riskConfig,
             CancellationToken ct) =>
         {
             try
             {
-                const int marketId = 0;
+                var marketId = riskConfig.MarketId;
                 var accountIndex = lighterOptions.Value.AccountIndex;
 
                 // Gather all data in parallel
@@ -791,10 +793,12 @@ public partial class Program
                         BuysBlocked = flashCrashStatus.RequiredAction == GridBot.ApiService.Models.Trading.FlashCrashAction.PauseBuys ||
                                       flashCrashStatus.RequiredAction == GridBot.ApiService.Models.Trading.FlashCrashAction.PauseAll,
                         SellsBlocked = flashCrashStatus.RequiredAction == GridBot.ApiService.Models.Trading.FlashCrashAction.PauseAll,
-                        DailyPnlPercent = lossStatus.DailyPnlPercent,
-                        WeeklyPnlPercent = lossStatus.WeeklyPnlPercent,
-                        MonthlyPnlPercent = lossStatus.MonthlyPnlPercent,
+                        Rolling24hPnlPercent = lossStatus.Rolling24hPnlPercent,
+                        Rolling7dPnlPercent = lossStatus.Rolling7dPnlPercent,
+                        Rolling30dPnlPercent = lossStatus.Rolling30dPnlPercent,
                         DrawdownPercent = lossStatus.DrawdownFromAthPercent,
+                        TradesIn24h = lossStatus.TradesIn24h,
+                        TradesIn7d = lossStatus.TradesIn7d,
                         AnyLimitBreached = lossStatus.AnyLimitBreached,
                         HaltReason = lossStatus.HaltReason,
                         HaltUntil = lossStatus.HaltUntil,
@@ -835,11 +839,12 @@ public partial class Program
 
         trading.MapGet("/status", (
             ITradingStateService stateService,
-            ITradingDecisionEngine decisionEngine) =>
+            ITradingDecisionEngine decisionEngine,
+            IRiskConfiguration riskConfig) =>
         {
             try
             {
-                const int marketId = 0; // Single market for now
+                var marketId = riskConfig.MarketId;
                 var state = stateService.CurrentState;
                 var trendState = stateService.CurrentTrendState;
                 var stateStartedAt = stateService.StateStartedAt;
@@ -922,10 +927,12 @@ public partial class Program
 
                 var response = new RiskIndicatorsResponse(
                     MarketId: marketId,
-                    DailyPnlPercent: lossStatus.DailyPnlPercent,
-                    WeeklyPnlPercent: lossStatus.WeeklyPnlPercent,
-                    MonthlyPnlPercent: lossStatus.MonthlyPnlPercent,
+                    Rolling24hPnlPercent: lossStatus.Rolling24hPnlPercent,
+                    Rolling7dPnlPercent: lossStatus.Rolling7dPnlPercent,
+                    Rolling30dPnlPercent: lossStatus.Rolling30dPnlPercent,
                     DrawdownPercent: lossStatus.DrawdownFromAthPercent,
+                    TradesIn24h: lossStatus.TradesIn24h,
+                    TradesIn7d: lossStatus.TradesIn7d,
                     AnyLimitBreached: lossStatus.AnyLimitBreached,
                     HaltReason: lossStatus.HaltReason,
                     HaltUntil: lossStatus.HaltUntil,

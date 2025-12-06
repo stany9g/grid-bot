@@ -1,5 +1,6 @@
 using System.Text.Json;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Risk;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
 
@@ -342,5 +343,280 @@ public sealed class RedisStateRepository : IStateRepository
     {
         public required string TriggerType { get; init; }
         public DateTimeOffset Timestamp { get; init; }
+    }
+
+    /// <inheritdoc />
+    public async Task SaveTradeRecordAsync(int marketId, TradeRecord record, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+
+        try
+        {
+            var date = DateOnly.FromDateTime(record.Timestamp.UtcDateTime);
+            var key = StateKeys.TradeRecords(marketId, date);
+
+            // Get existing records for this day
+            var json = await _cache.GetStringAsync(key, ct).ConfigureAwait(false);
+            var records = string.IsNullOrEmpty(json)
+                ? []
+                : JsonSerializer.Deserialize<List<TradeRecord>>(json, JsonOptions) ?? [];
+
+            // Add new record
+            records.Add(record);
+
+            // Save with 35-day TTL
+            var options = new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromDays(35)
+            };
+
+            await _cache.SetStringAsync(
+                key,
+                JsonSerializer.Serialize(records, JsonOptions),
+                options,
+                ct).ConfigureAwait(false);
+
+            _logger.LogDebug(
+                "Saved trade record for market {MarketId}: {PnlPercent}%",
+                marketId, record.PnlPercent);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save trade record for market {MarketId}", marketId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<TradeRecord>> LoadTradeRecordsAsync(int marketId, DateTimeOffset since, CancellationToken ct = default)
+    {
+        try
+        {
+            var result = new List<TradeRecord>();
+            var startDate = DateOnly.FromDateTime(since.UtcDateTime);
+            var endDate = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+
+            // Iterate through each day in the range
+            for (var date = startDate; date <= endDate; date = date.AddDays(1))
+            {
+                var key = StateKeys.TradeRecords(marketId, date);
+                var json = await _cache.GetStringAsync(key, ct).ConfigureAwait(false);
+
+                if (!string.IsNullOrEmpty(json))
+                {
+                    var dayRecords = JsonSerializer.Deserialize<List<TradeRecord>>(json, JsonOptions);
+                    if (dayRecords is not null)
+                    {
+                        result.AddRange(dayRecords.Where(r => r.Timestamp >= since));
+                    }
+                }
+            }
+
+            _logger.LogDebug(
+                "Loaded {Count} trade records for market {MarketId} since {Since}",
+                result.Count, marketId, since);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load trade records for market {MarketId}", marketId);
+            return [];
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task CleanupOldTradeRecordsAsync(int marketId, int retentionDays, CancellationToken ct = default)
+    {
+        try
+        {
+            var cutoffDate = DateOnly.FromDateTime(DateTimeOffset.UtcNow.AddDays(-retentionDays).UtcDateTime);
+
+            // We need to delete keys older than the retention period
+            // Since we store by date, we can calculate which keys to delete
+            // For simplicity, we'll try to delete keys for dates before cutoff
+            // In production, you might want to use Redis SCAN to find keys matching the pattern
+
+            for (var daysBack = retentionDays + 1; daysBack <= retentionDays + 30; daysBack++)
+            {
+                var oldDate = DateOnly.FromDateTime(DateTimeOffset.UtcNow.AddDays(-daysBack).UtcDateTime);
+                var key = StateKeys.TradeRecords(marketId, oldDate);
+
+                try
+                {
+                    await _cache.RemoveAsync(key, ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Key may not exist, ignore
+                }
+            }
+
+            _logger.LogDebug("Cleaned up old trade records for market {MarketId}", marketId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to cleanup old trade records for market {MarketId}", marketId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task SaveEquitySnapshotAsync(int marketId, EquitySnapshot snapshot, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+        try
+        {
+            var date = DateOnly.FromDateTime(snapshot.Timestamp.UtcDateTime);
+            var key = StateKeys.EquitySnapshots(marketId, date);
+
+            // Get existing snapshots for this day
+            var json = await _cache.GetStringAsync(key, ct).ConfigureAwait(false);
+            var snapshots = string.IsNullOrEmpty(json)
+                ? []
+                : JsonSerializer.Deserialize<List<EquitySnapshot>>(json, JsonOptions) ?? [];
+
+            // Add new snapshot
+            snapshots.Add(snapshot);
+
+            // Save with 35-day TTL
+            var options = new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromDays(35)
+            };
+
+            await _cache.SetStringAsync(
+                key,
+                JsonSerializer.Serialize(snapshots, JsonOptions),
+                options,
+                ct).ConfigureAwait(false);
+
+            _logger.LogDebug(
+                "Saved equity snapshot for market {MarketId}: {Equity:F2}",
+                marketId, snapshot.Equity);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save equity snapshot for market {MarketId}", marketId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<EquitySnapshot>> LoadEquitySnapshotsAsync(int marketId, DateTimeOffset since, CancellationToken ct = default)
+    {
+        try
+        {
+            var result = new List<EquitySnapshot>();
+            var startDate = DateOnly.FromDateTime(since.UtcDateTime);
+            var endDate = DateOnly.FromDateTime(DateTimeOffset.UtcNow.UtcDateTime);
+
+            // Iterate through each day in the range
+            for (var date = startDate; date <= endDate; date = date.AddDays(1))
+            {
+                var key = StateKeys.EquitySnapshots(marketId, date);
+                var json = await _cache.GetStringAsync(key, ct).ConfigureAwait(false);
+
+                if (!string.IsNullOrEmpty(json))
+                {
+                    var daySnapshots = JsonSerializer.Deserialize<List<EquitySnapshot>>(json, JsonOptions);
+                    if (daySnapshots is not null)
+                    {
+                        result.AddRange(daySnapshots.Where(s => s.Timestamp >= since));
+                    }
+                }
+            }
+
+            _logger.LogDebug(
+                "Loaded {Count} equity snapshots for market {MarketId} since {Since}",
+                result.Count, marketId, since);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load equity snapshots for market {MarketId}", marketId);
+            return [];
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task CleanupOldEquitySnapshotsAsync(int marketId, int retentionDays, CancellationToken ct = default)
+    {
+        try
+        {
+            // Similar to trade records cleanup
+            for (var daysBack = retentionDays + 1; daysBack <= retentionDays + 30; daysBack++)
+            {
+                var oldDate = DateOnly.FromDateTime(DateTimeOffset.UtcNow.AddDays(-daysBack).UtcDateTime);
+                var key = StateKeys.EquitySnapshots(marketId, oldDate);
+
+                try
+                {
+                    await _cache.RemoveAsync(key, ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Key may not exist, ignore
+                }
+            }
+
+            _logger.LogDebug("Cleaned up old equity snapshots for market {MarketId}", marketId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to cleanup old equity snapshots for market {MarketId}", marketId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task SaveRollingLossStateAsync(int marketId, PersistedRollingLossState state, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        try
+        {
+            var key = StateKeys.RollingLossState(marketId);
+            var json = JsonSerializer.Serialize(state, JsonOptions);
+
+            await _cache.SetStringAsync(key, json, ct).ConfigureAwait(false);
+
+            _logger.LogDebug(
+                "Saved rolling loss state for market {MarketId}: Equity={Equity:F2}",
+                marketId, state.CurrentEquity);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save rolling loss state for market {MarketId}", marketId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<PersistedRollingLossState?> LoadRollingLossStateAsync(int marketId, CancellationToken ct = default)
+    {
+        try
+        {
+            var key = StateKeys.RollingLossState(marketId);
+            var json = await _cache.GetStringAsync(key, ct).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(json))
+                return null;
+
+            var state = JsonSerializer.Deserialize<PersistedRollingLossState>(json, JsonOptions);
+
+            _logger.LogDebug(
+                "Loaded rolling loss state for market {MarketId}: Equity={Equity:F2}",
+                marketId, state?.CurrentEquity);
+
+            return state;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load rolling loss state for market {MarketId}", marketId);
+            return null;
+        }
     }
 }

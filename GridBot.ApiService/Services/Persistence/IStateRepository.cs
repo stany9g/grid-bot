@@ -1,4 +1,5 @@
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Risk;
 
 namespace GridBot.ApiService.Services.Persistence;
 
@@ -95,4 +96,70 @@ public interface IStateRepository
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Count of circuit breaker events in last 24 hours.</returns>
     Task<int> GetCircuitBreakerCount24hAsync(int marketId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Saves a trade record for rolling P&amp;L calculations.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="record">Trade record to persist.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task SaveTradeRecordAsync(int marketId, TradeRecord record, CancellationToken ct = default);
+
+    /// <summary>
+    /// Loads trade records for a market since a given timestamp.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="since">Only load records after this timestamp.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>List of trade records.</returns>
+    Task<IReadOnlyList<TradeRecord>> LoadTradeRecordsAsync(int marketId, DateTimeOffset since, CancellationToken ct = default);
+
+    /// <summary>
+    /// Cleans up trade records older than the retention period.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="retentionDays">Number of days to retain.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task CleanupOldTradeRecordsAsync(int marketId, int retentionDays, CancellationToken ct = default);
+
+    /// <summary>
+    /// Saves an equity snapshot for validation and fallback calculations.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="snapshot">Equity snapshot to persist.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task SaveEquitySnapshotAsync(int marketId, EquitySnapshot snapshot, CancellationToken ct = default);
+
+    /// <summary>
+    /// Loads equity snapshots for a market since a given timestamp.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="since">Only load snapshots after this timestamp.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>List of equity snapshots.</returns>
+    Task<IReadOnlyList<EquitySnapshot>> LoadEquitySnapshotsAsync(int marketId, DateTimeOffset since, CancellationToken ct = default);
+
+    /// <summary>
+    /// Cleans up equity snapshots older than the retention period.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="retentionDays">Number of days to retain.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task CleanupOldEquitySnapshotsAsync(int marketId, int retentionDays, CancellationToken ct = default);
+
+    /// <summary>
+    /// Saves rolling loss state for a market.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="state">Rolling loss state to persist.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task SaveRollingLossStateAsync(int marketId, PersistedRollingLossState state, CancellationToken ct = default);
+
+    /// <summary>
+    /// Loads rolling loss state for a market.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Rolling loss state if found, null otherwise.</returns>
+    Task<PersistedRollingLossState?> LoadRollingLossStateAsync(int marketId, CancellationToken ct = default);
 }

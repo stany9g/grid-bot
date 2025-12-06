@@ -11,17 +11,17 @@
     <link rel="stylesheet" href="@Assets["GridBot.Web.styles.css"]" />
     <ImportMap />
     <link rel="icon" type="image/png" href="favicon.png" />
-    <HeadOutlet @rendermode="InteractiveWebAssembly" />
+    <HeadOutlet @rendermode="InteractiveServer" />
 </head>
 
 <body>
-    <MudThemeProvider @rendermode="InteractiveWebAssembly" IsDarkMode="true" />
-    <MudPopoverProvider @rendermode="InteractiveWebAssembly" />
-    <MudDialogProvider @rendermode="InteractiveWebAssembly" />
-    <MudSnackbarProvider @rendermode="InteractiveWebAssembly" />
-    <Routes @rendermode="InteractiveWebAssembly" />
+    <MudThemeProvider @rendermode="InteractiveServer" IsDarkMode="true" />
+    <MudPopoverProvider @rendermode="InteractiveServer" />
+    <MudDialogProvider @rendermode="InteractiveServer" />
+    <MudSnackbarProvider @rendermode="InteractiveServer" />
+    <Routes @rendermode="InteractiveServer" />
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
-    <script src="@Assets["_framework/blazor.web.js"]"></script>
+    <script src="_framework/blazor.web.js"></script>
 </body>
 
 </html>

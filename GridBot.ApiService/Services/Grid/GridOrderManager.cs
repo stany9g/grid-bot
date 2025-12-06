@@ -426,36 +426,96 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         }
     }
 
+    /// <summary>
+    /// Timeout for API calls during startup cleanup (10 seconds).
+    /// </summary>
+    private static readonly TimeSpan StartupApiTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Maximum retry attempts for transient failures during startup cleanup.
+    /// </summary>
+    private const int MaxStartupRetries = 3;
+
+    /// <summary>
+    /// Delay between retry attempts (doubles each retry: 500ms, 1000ms, 2000ms).
+    /// </summary>
+    private const int BaseRetryDelayMs = 500;
+
     /// <inheritdoc />
-    public async Task<int> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default)
+    public async Task<(bool Success, int CancelledCount)> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default)
     {
         _logger.LogInformation(
             "Checking for existing orders on exchange for market {MarketId} before grid initialization",
             marketId);
 
+        for (var attempt = 1; attempt <= MaxStartupRetries; attempt++)
+        {
+            var result = await TryCancelExistingOrdersAsync(marketId, attempt, ct).ConfigureAwait(false);
+
+            if (result.Success)
+            {
+                return result;
+            }
+
+            // Don't retry on final attempt
+            if (attempt < MaxStartupRetries)
+            {
+                var delayMs = BaseRetryDelayMs * (1 << (attempt - 1)); // Exponential backoff
+                _logger.LogWarning(
+                    "Startup order cancellation attempt {Attempt}/{MaxAttempts} failed for market {MarketId}. " +
+                    "Retrying in {DelayMs}ms...",
+                    attempt, MaxStartupRetries, marketId, delayMs);
+
+                await Task.Delay(delayMs, ct).ConfigureAwait(false);
+            }
+        }
+
+        _logger.LogError(
+            "All {MaxAttempts} startup order cancellation attempts failed for market {MarketId}. " +
+            "Grid initialization will be blocked to prevent order accumulation.",
+            MaxStartupRetries, marketId);
+        return (false, 0);
+    }
+
+    /// <summary>
+    /// Single attempt to cancel existing orders with timeout and verification.
+    /// </summary>
+    private async Task<(bool Success, int CancelledCount)> TryCancelExistingOrdersAsync(
+        int marketId,
+        int attemptNumber,
+        CancellationToken ct)
+    {
         try
         {
+            // Create timeout-linked token for API calls
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(StartupApiTimeout);
+            var timeoutToken = timeoutCts.Token;
+
             // Get auth token for authenticated API call
             var (authToken, authError) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
             if (authError != null || string.IsNullOrEmpty(authToken))
             {
-                _logger.LogError("Failed to create auth token for startup cleanup: {Error}", authError ?? "empty token");
-                return 0;
+                _logger.LogError(
+                    "Attempt {Attempt}: Failed to create auth token for startup cleanup: {Error}",
+                    attemptNumber, authError ?? "empty token");
+                return (false, 0);
             }
 
-            // Query active orders from exchange
-            var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, ct)
+            // Query active orders from exchange (with timeout)
+            var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, timeoutToken)
                 .ConfigureAwait(false);
 
             if (activeOrders.Count == 0)
             {
                 _logger.LogInformation("No existing orders found on exchange for market {MarketId}", marketId);
-                return 0;
+                return (true, 0);
             }
 
+            var orderCount = activeOrders.Count;
             _logger.LogWarning(
                 "Found {Count} existing orders on exchange for market {MarketId}. Cancelling all before grid initialization.",
-                activeOrders.Count, marketId);
+                orderCount, marketId);
 
             // Log order details for debugging
             foreach (var order in activeOrders)
@@ -469,29 +529,79 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             }
 
             // Cancel all orders
-            var response = await _commandClient.CancelAllOrdersAsync(marketId, cancelTimestampMs: 0, ct)
+            var response = await _commandClient.CancelAllOrdersAsync(marketId, cancelTimestampMs: 0, timeoutToken)
                 .ConfigureAwait(false);
 
-            if (response.Code == 0 || response.Code == 200)
+            if (response.Code != 0 && response.Code != 200)
             {
-                _logger.LogInformation(
-                    "Successfully cancelled {Count} existing orders for market {MarketId} on startup",
-                    activeOrders.Count, marketId);
-                return activeOrders.Count;
+                _logger.LogError(
+                    "Attempt {Attempt}: CancelAllOrders returned non-success code {Code}: {Message}",
+                    attemptNumber, response.Code, response.Message);
+                return (false, 0);
             }
 
-            _logger.LogWarning(
-                "CancelAllOrders returned non-success code {Code}: {Message}",
-                response.Code, response.Message);
-            return 0;
+            // VERIFICATION: Re-query to confirm cancellation actually succeeded
+            // This guards against exchange reporting success but not actually cancelling
+            // Lighter is a ZK-rollup - cancellations need time to be committed
+            var executionTimeMs = response.PredictedExecutionTimeMs;
+
+            // Use predicted execution time + buffer, minimum 1 second, max 5 seconds
+            var verificationDelayMs = Math.Clamp(executionTimeMs + 500, 1000, 5000);
+
+            _logger.LogDebug(
+                "Waiting {DelayMs}ms for cancellation to be committed (predicted: {PredictedMs}ms) for market {MarketId}...",
+                verificationDelayMs, executionTimeMs, marketId);
+
+            await Task.Delay((int)verificationDelayMs, timeoutToken).ConfigureAwait(false);
+
+            // Get fresh auth token for verification query
+            var (verifyAuthToken, verifyAuthError) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
+            if (verifyAuthError != null || string.IsNullOrEmpty(verifyAuthToken))
+            {
+                _logger.LogWarning(
+                    "Attempt {Attempt}: Could not verify cancellation (auth token failed), " +
+                    "but cancel request succeeded. Proceeding cautiously.",
+                    attemptNumber);
+                // Cancel succeeded, verification failed - accept this
+                return (true, orderCount);
+            }
+
+            var remainingOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, verifyAuthToken, timeoutToken)
+                .ConfigureAwait(false);
+
+            if (remainingOrders.Count > 0)
+            {
+                _logger.LogError(
+                    "Attempt {Attempt}: Cancellation verification FAILED for market {MarketId}. " +
+                    "Exchange reported success but {RemainingCount} orders still exist.",
+                    attemptNumber, marketId, remainingOrders.Count);
+                return (false, 0);
+            }
+
+            _logger.LogInformation(
+                "Successfully cancelled and verified {Count} existing orders for market {MarketId} on startup",
+                orderCount, marketId);
+            return (true, orderCount);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Timeout (not user cancellation)
+            _logger.LogError(
+                "Attempt {Attempt}: Startup order cancellation timed out after {Timeout}s for market {MarketId}",
+                attemptNumber, StartupApiTimeout.TotalSeconds, marketId);
+            return (false, 0);
+        }
+        catch (OperationCanceledException)
+        {
+            // User cancellation - re-throw
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "Failed to cancel existing orders on startup for market {MarketId}. " +
-                "Grid initialization will proceed but may result in duplicate orders.",
-                marketId);
-            return 0;
+                "Attempt {Attempt}: Failed to cancel existing orders on startup for market {MarketId}",
+                attemptNumber, marketId);
+            return (false, 0);
         }
     }
 

@@ -950,8 +950,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         if (assessment.LossStatus.AnyLimitBreached)
         {
             _logger.LogWarning(
-                "Loss limit breached for market {MarketId}. Daily: {Daily}, Weekly: {Weekly}",
-                marketId, assessment.LossStatus.DailyLimitBreached, assessment.LossStatus.WeeklyLimitBreached);
+                "Loss limit breached for market {MarketId}. Rolling24h: {Rolling24h}, Rolling7d: {Rolling7d}",
+                marketId, assessment.LossStatus.Rolling24hBreached, assessment.LossStatus.Rolling7dBreached);
 
             // DO NOT teardown grid - keep sell orders alive for position protection
             // Enter protective mode - grid will switch to reduce-only mode
@@ -1003,13 +1003,13 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 
     private static string GetTriggerType(RiskAssessment assessment)
     {
-        if (assessment.LossStatus.MonthlyLimitBreached)
-            return "MonthlyLossLimit";
-        if (assessment.LossStatus.WeeklyLimitBreached)
-            return "WeeklyLossLimit";
-        if (assessment.LossStatus.DailyLimitBreached)
-            return "DailyLossLimit";
-        if (assessment.LossStatus.DrawdownLimitBreached)
+        if (assessment.LossStatus.Rolling30dBreached)
+            return "Rolling30dLossLimit";
+        if (assessment.LossStatus.Rolling7dBreached)
+            return "Rolling7dLossLimit";
+        if (assessment.LossStatus.Rolling24hBreached)
+            return "Rolling24hLossLimit";
+        if (assessment.LossStatus.DrawdownBreached)
             return "MaxDrawdown";
         if (assessment.FlashCrashStatus.CrashDetected)
             return $"FlashCrash_{assessment.FlashCrashStatus.Severity}";

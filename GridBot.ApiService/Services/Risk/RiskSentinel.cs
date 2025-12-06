@@ -81,15 +81,15 @@ public sealed class RiskSentinel : IRiskSentinel
         var warnings = new List<string>();
         var overallSeverity = AlertSeverity.Low;
 
-        // Loss limit checks
+        // Loss limit checks (using rolling windows)
         if (lossStatus.AnyLimitBreached)
         {
             tradingAllowed = false;
             overallSeverity = AlertSeverity.Critical;
-            if (lossStatus.DailyLimitBreached) warnings.Add("Daily loss limit breached");
-            if (lossStatus.WeeklyLimitBreached) warnings.Add("Weekly loss limit breached");
-            if (lossStatus.MonthlyLimitBreached) warnings.Add("Monthly loss limit breached");
-            if (lossStatus.DrawdownLimitBreached) warnings.Add("Max drawdown breached");
+            if (lossStatus.Rolling24hBreached) warnings.Add("Rolling 24h loss limit breached");
+            if (lossStatus.Rolling7dBreached) warnings.Add("Rolling 7d loss limit breached");
+            if (lossStatus.Rolling30dBreached) warnings.Add("Rolling 30d loss limit breached");
+            if (lossStatus.DrawdownBreached) warnings.Add("Max drawdown breached");
         }
 
         // Flash crash checks
@@ -287,12 +287,12 @@ public sealed class RiskSentinel : IRiskSentinel
         return _marketStates.GetOrAdd(marketId, _ => new MarketRiskState());
     }
 
-    private decimal CalculatePositionMultiplier(LossStatus lossStatus, FlashCrashStatus crashStatus, LiquidityStatus liquidityStatus)
+    private decimal CalculatePositionMultiplier(RollingLossStatus lossStatus, FlashCrashStatus crashStatus, LiquidityStatus liquidityStatus)
     {
         var multiplier = 1.0m;
 
         // Max drawdown reduction (75% reduction = 0.25 multiplier)
-        if (lossStatus.DrawdownLimitBreached)
+        if (lossStatus.DrawdownBreached)
         {
             multiplier = Math.Min(multiplier, 1.0m - (_riskConfig.LossLimits.DrawdownPositionReductionPercent / 100m));
         }

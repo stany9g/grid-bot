@@ -5,6 +5,7 @@ using GridBot.ApiService.Services.Capacity;
 using GridBot.ApiService.Services.Indicators;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.OrderBook;
+using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using Microsoft.Extensions.Logging;
 
@@ -25,6 +26,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     private readonly IRiskConfiguration _config;
     private readonly ITradingStateService _stateService;
     private readonly IOperationalCapacityService _capacityService;
+    private readonly IRiskSentinel _riskSentinel;
     private readonly ILogger<GridLifecycleService> _logger;
 
     private readonly ConcurrentDictionary<int, GridState> _gridStates = new();
@@ -50,6 +52,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         IRiskConfiguration config,
         ITradingStateService stateService,
         IOperationalCapacityService capacityService,
+        IRiskSentinel riskSentinel,
         ILogger<GridLifecycleService> logger)
     {
         ArgumentNullException.ThrowIfNull(gridCalculator);
@@ -60,6 +63,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(stateService);
         ArgumentNullException.ThrowIfNull(capacityService);
+        ArgumentNullException.ThrowIfNull(riskSentinel);
         ArgumentNullException.ThrowIfNull(logger);
 
         _gridCalculator = gridCalculator;
@@ -70,6 +74,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         _config = config;
         _stateService = stateService;
         _capacityService = capacityService;
+        _riskSentinel = riskSentinel;
         _logger = logger;
     }
 
@@ -85,8 +90,19 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
             // CRITICAL: Cancel any existing orders on the exchange before creating new grid
             // This prevents order accumulation on app restart (orders persist on exchange but grid state is in-memory)
-            var cancelledCount = await _orderManager.CancelExistingOrdersOnStartupAsync(marketId, ct)
+            var (cancellationSuccess, cancelledCount) = await _orderManager.CancelExistingOrdersOnStartupAsync(marketId, ct)
                 .ConfigureAwait(false);
+
+            if (!cancellationSuccess)
+            {
+                _logger.LogError(
+                    "Failed to verify cancellation of existing orders for market {MarketId}. " +
+                    "Grid initialization aborted to prevent order accumulation.",
+                    marketId);
+                throw new InvalidOperationException(
+                    $"Cannot initialize grid for market {marketId}: failed to cancel existing orders. " +
+                    "This prevents duplicate orders on the exchange.");
+            }
 
             if (cancelledCount > 0)
             {
@@ -224,11 +240,21 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             await _orderManager.SyncOrderStatusAsync(marketId, gridState.Levels, ct)
                 .ConfigureAwait(false);
 
-            // Count only NEW fills (not already filled)
-            var fillsDetected = gridState.Levels.Count(l =>
-                l.Status == GridLevelStatus.Filled &&
-                !previouslyFilled.Contains(l.ClientOrderIndex));
+            // Get newly filled levels (not already filled before sync)
+            var newlyFilledLevels = gridState.Levels
+                .Where(l => l.Status == GridLevelStatus.Filled &&
+                            !previouslyFilled.Contains(l.ClientOrderIndex))
+                .ToList();
+
+            var fillsDetected = newlyFilledLevels.Count;
             gridState.TotalFills += fillsDetected;
+
+            // BUG FIX: Record P&L for each fill to the risk sentinel
+            // This enables the rolling window loss limit monitoring
+            if (fillsDetected > 0)
+            {
+                await RecordFillPnlAsync(marketId, gridState, newlyFilledLevels, ct).ConfigureAwait(false);
+            }
 
             // EC-002: Check if all orders were cancelled externally while position exists
             var activeOrderCount = gridState.Levels.Count(l =>
@@ -616,6 +642,82 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         }
 
         return (1.0m, 1.0m);
+    }
+
+    /// <summary>
+    /// Records P&L for filled grid orders to the risk sentinel.
+    /// For grid trading, P&L is calculated as follows:
+    /// - BID fill (buy): No immediate P&L (position entry)
+    /// - ASK fill (sell): P&L = grid spacing profit minus fees
+    /// </summary>
+    /// <param name="marketId">The market ID.</param>
+    /// <param name="gridState">Current grid state with parameters.</param>
+    /// <param name="filledLevels">Newly filled grid levels.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task RecordFillPnlAsync(
+        int marketId,
+        GridState gridState,
+        IReadOnlyList<GridLevel> filledLevels,
+        CancellationToken ct)
+    {
+        // Get current equity for P&L percentage calculation
+        // Equity is tracked by the RiskSentinel via LossMonitor
+        var riskAssessment = await _riskSentinel.AssessRiskAsync(marketId, ct).ConfigureAwait(false);
+        var currentEquity = riskAssessment.LossStatus.CurrentEquity;
+
+        if (currentEquity <= 0)
+        {
+            _logger.LogWarning(
+                "Cannot record fill P&L: current equity is {Equity}. Skipping P&L recording for {Count} fills.",
+                currentEquity, filledLevels.Count);
+            return;
+        }
+
+        // Lighter DEX maker fee (0.02%)
+        const decimal MakerFeeRate = 0.0002m;
+
+        foreach (var level in filledLevels)
+        {
+            // For BID fills (buys), there's no immediate realized P&L
+            // The P&L will be realized when the corresponding ASK fills
+            if (level.IsBid)
+            {
+                _logger.LogDebug(
+                    "BID fill at {Price} for market {MarketId}: position entry, no immediate P&L",
+                    level.Price, marketId);
+                continue;
+            }
+
+            // For ASK fills (sells), calculate realized P&L
+            // Grid profit = sell price - buy price (approximately grid spacing)
+            // We estimate the entry price as one grid spacing below the exit price
+            var gridSpacingDecimal = gridState.Parameters.GridSpacing / 100m;
+            var estimatedEntryPrice = level.Price * (1 - gridSpacingDecimal);
+            var exitPrice = level.Price;
+            var quantity = level.Size;
+
+            // Gross P&L from the trade
+            var grossPnl = (exitPrice - estimatedEntryPrice) * quantity;
+
+            // Fee estimate (maker fee on both entry and exit)
+            var entryFee = estimatedEntryPrice * quantity * MakerFeeRate;
+            var exitFee = exitPrice * quantity * MakerFeeRate;
+            var totalFees = entryFee + exitFee;
+
+            var netPnlUsd = grossPnl - totalFees;
+            var pnlPercent = (netPnlUsd / currentEquity) * 100m;
+
+            // Update grid state realized P&L
+            gridState.RealizedPnl += netPnlUsd;
+
+            // Record to risk sentinel for rolling window loss limit tracking
+            await _riskSentinel.RecordTradeResultAsync(marketId, pnlPercent, ct).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Recorded fill P&L for market {MarketId}: {PnlPercent:F4}% ({PnlUsd:F2} USD) - " +
+                "EstEntry: {Entry:F2}, Exit: {Exit:F2}, Qty: {Qty:F4}, Fees: {Fees:F4}",
+                marketId, pnlPercent, netPnlUsd, estimatedEntryPrice, exitPrice, quantity, totalFees);
+        }
     }
 
     /// <summary>

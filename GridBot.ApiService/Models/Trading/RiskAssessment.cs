@@ -26,9 +26,9 @@ public sealed class RiskAssessment
     public bool SellsBlocked { get; init; }
 
     /// <summary>
-    /// Current loss status.
+    /// Current rolling loss status.
     /// </summary>
-    public required LossStatus LossStatus { get; init; }
+    public required RollingLossStatus LossStatus { get; init; }
 
     /// <summary>
     /// Current flash crash status.
@@ -84,7 +84,7 @@ public sealed class RiskAssessment
     /// <summary>
     /// Creates an assessment indicating all systems are normal.
     /// </summary>
-    public static RiskAssessment AllClear(int marketId, LossStatus lossStatus, LiquidityStatus liquidityStatus) => new()
+    public static RiskAssessment AllClear(int marketId, RollingLossStatus lossStatus, LiquidityStatus liquidityStatus) => new()
     {
         MarketId = marketId,
         TradingAllowed = true,

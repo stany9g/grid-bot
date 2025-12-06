@@ -73,6 +73,10 @@ public interface IGridOrderManager
     /// </summary>
     /// <param name="marketId">Lighter DEX market ID.</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>Number of orders that were cancelled.</returns>
-    Task<int> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default);
+    /// <returns>
+    /// Tuple containing:
+    /// - Success: true if cancellation was verified successful, false if any step failed
+    /// - CancelledCount: number of orders that were cancelled (0 if none existed or on failure)
+    /// </returns>
+    Task<(bool Success, int CancelledCount)> CancelExistingOrdersOnStartupAsync(int marketId, CancellationToken ct = default);
 }

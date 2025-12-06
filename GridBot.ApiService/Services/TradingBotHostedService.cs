@@ -74,9 +74,9 @@ public sealed class TradingBotHostedService : BackgroundService
             _riskConfig.MarketId,
             _riskConfig.DecisionLoopIntervalMs);
         _logger.LogInformation(
-            "Risk Parameters: MaxLeverage={MaxLeverage}x, DailyLossLimit={DailyLoss}%, MaxDrawdown={MaxDrawdown}%",
+            "Risk Parameters: MaxLeverage={MaxLeverage}x, Rolling24hLossLimit={Rolling24h}%, MaxDrawdown={MaxDrawdown}%",
             _riskConfig.Capital.MaxLeverage,
-            _riskConfig.LossLimits.DailyLossPercent,
+            _riskConfig.LossLimits.Rolling24HourLossPercent,
             _riskConfig.LossLimits.MaxDrawdownPercent);
 
         // Load persisted state from Redis
@@ -150,9 +150,9 @@ public sealed class TradingBotHostedService : BackgroundService
             {
                 var lossStatus = await _lossMonitor.GetCurrentLossStatusAsync(marketId, ct).ConfigureAwait(false);
                 _logger.LogInformation(
-                    "Restored loss status for market {MarketId}: Daily={Daily:P2}, Halt={HaltReason}",
+                    "Restored loss status for market {MarketId}: Rolling24h={Rolling24h:F2}%, Halt={HaltReason}",
                     marketId,
-                    lossStatus.DailyPnlPercent,
+                    lossStatus.Rolling24hPnlPercent,
                     lossStatus.HaltReason ?? "None");
             }
 

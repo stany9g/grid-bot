@@ -124,38 +124,71 @@ public sealed class CapitalOptions
 
 /// <summary>
 /// Loss limit thresholds and circuit breaker configuration.
+/// Uses rolling windows instead of calendar-based periods for 24/7 crypto trading.
 /// </summary>
 public sealed class LossLimitOptions
 {
     /// <summary>
-    /// Daily loss limit as percentage (default -5%).
+    /// Rolling 24-hour loss limit as percentage (default -12%).
+    /// Triggers protective mode if breached.
     /// </summary>
-    public decimal DailyLossPercent { get; set; } = -5m;
+    public decimal Rolling24HourLossPercent { get; set; } = -12m;
 
     /// <summary>
-    /// Weekly loss limit as percentage (default -10%).
+    /// Rolling 7-day loss limit as percentage (default -20%).
+    /// Triggers protective mode with extended recovery.
     /// </summary>
-    public decimal WeeklyLossPercent { get; set; } = -10m;
+    public decimal Rolling7DayLossPercent { get; set; } = -20m;
 
     /// <summary>
-    /// Monthly loss limit as percentage (default -15%).
+    /// Rolling 30-day loss limit as percentage (default -30%).
+    /// Triggers protective mode requiring manual review.
     /// </summary>
-    public decimal MonthlyLossPercent { get; set; } = -15m;
+    public decimal Rolling30DayLossPercent { get; set; } = -30m;
 
     /// <summary>
-    /// Maximum drawdown from all-time high as percentage (default -20%).
+    /// Maximum drawdown from all-time high as percentage (default -35%).
+    /// Only clears when equity recovers to 75% of HWM or manual override.
     /// </summary>
-    public decimal MaxDrawdownPercent { get; set; } = -20m;
+    public decimal MaxDrawdownPercent { get; set; } = -35m;
 
     /// <summary>
-    /// Single trade loss limit as percentage (default -2%).
+    /// Single trade loss limit as percentage (default -3%).
+    /// Triggers alert but not halt.
     /// </summary>
-    public decimal SingleTradeLossPercent { get; set; } = -2m;
+    public decimal SingleTradeLossPercent { get; set; } = -3m;
 
     /// <summary>
     /// Position size reduction on max drawdown breach (default 75%).
     /// </summary>
     public decimal DrawdownPositionReductionPercent { get; set; } = 75m;
+
+    /// <summary>
+    /// Minimum hours to wait before entering recovery for 24h breach (default 4).
+    /// </summary>
+    public int Rolling24HourRecoveryWaitHours { get; set; } = 4;
+
+    /// <summary>
+    /// Minimum hours to wait before entering recovery for 7d breach (default 24).
+    /// </summary>
+    public int Rolling7DayRecoveryWaitHours { get; set; } = 24;
+
+    /// <summary>
+    /// Minimum hours to wait before entering recovery for 30d breach (default 72).
+    /// </summary>
+    public int Rolling30DayRecoveryWaitHours { get; set; } = 72;
+
+    /// <summary>
+    /// Days to retain trade records for rolling calculations (default 35).
+    /// Must be at least 30 days + buffer.
+    /// </summary>
+    public int TradeRecordRetentionDays { get; set; } = 35;
+
+    /// <summary>
+    /// Interval in minutes for equity snapshots (default 60).
+    /// Used for validation and fallback calculations.
+    /// </summary>
+    public int EquitySnapshotIntervalMinutes { get; set; } = 60;
 }
 
 /// <summary>

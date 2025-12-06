@@ -13,9 +13,9 @@ builder.AddRedisOutputCache("cache");
 builder.Services.AddMudServices();
 
 // Add services to the container.
-// Configure for Interactive WebAssembly (Auto mode)
+// Configure for Interactive Server mode (server-side Blazor)
 builder.Services.AddRazorComponents()
-    .AddInteractiveWebAssemblyComponents();
+    .AddInteractiveServerComponents();
 
 // Add YARP for API proxying (browser -> web server -> apiservice)
 builder.Services.AddHttpForwarder();
@@ -30,6 +30,19 @@ builder.Services.Configure<WebhookOptions>(builder.Configuration.GetSection(Webh
 
 // Register webhook notification service (server-side only)
 builder.Services.AddHttpClient<IWebhookNotificationService, WebhookNotificationService>();
+
+// Register named HttpClient for TradingApiClient (used by singleton DashboardStateProvider)
+builder.Services.AddHttpClient(nameof(GridBot.Web.Client.TradingApiClient), client =>
+    {
+        client.BaseAddress = new("https+http://apiservice");
+    });
+
+// Register singleton dashboard state provider (polls API in background)
+builder.Services.AddSingleton<IDashboardStateProvider, DashboardStateProvider>();
+builder.Services.AddHostedService(sp => (DashboardStateProvider)sp.GetRequiredService<IDashboardStateProvider>());
+
+// Register scoped dashboard state service (thin wrapper for Blazor circuits)
+builder.Services.AddScoped<GridBot.Web.Client.Services.IDashboardStateService, DashboardStateService>();
 
 var app = builder.Build();
 
@@ -52,10 +65,10 @@ app.MapStaticAssets();
 // The WebAssembly client calls /api/* which gets proxied to the apiservice
 app.MapForwarder("/api/{**catch-all}", "https+http://apiservice", "/api/{**catch-all}");
 
-// Configure for Interactive WebAssembly (Auto mode)
+// Configure for Interactive Server mode
 // The client project contains the Dashboard and related components
 app.MapRazorComponents<App>()
-    .AddInteractiveWebAssemblyRenderMode()
+    .AddInteractiveServerRenderMode()
     .AddAdditionalAssemblies(typeof(GridBot.Web.Client._Imports).Assembly);
 
 app.MapDefaultEndpoints();

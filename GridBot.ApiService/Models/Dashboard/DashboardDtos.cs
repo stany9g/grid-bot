@@ -73,10 +73,12 @@ public sealed record RiskInfoDto
     public bool TradingAllowed { get; init; } = true;
     public bool BuysBlocked { get; init; }
     public bool SellsBlocked { get; init; }
-    public decimal DailyPnlPercent { get; init; }
-    public decimal WeeklyPnlPercent { get; init; }
-    public decimal MonthlyPnlPercent { get; init; }
+    public decimal Rolling24hPnlPercent { get; init; }
+    public decimal Rolling7dPnlPercent { get; init; }
+    public decimal Rolling30dPnlPercent { get; init; }
     public decimal DrawdownPercent { get; init; }
+    public int TradesIn24h { get; init; }
+    public int TradesIn7d { get; init; }
     public bool AnyLimitBreached { get; init; }
     public string? HaltReason { get; init; }
     public DateTimeOffset? HaltUntil { get; init; }
@@ -160,10 +162,12 @@ public sealed record PositionSummaryResponse(
 /// </summary>
 public sealed record RiskIndicatorsResponse(
     int MarketId,
-    decimal DailyPnlPercent,
-    decimal WeeklyPnlPercent,
-    decimal MonthlyPnlPercent,
+    decimal Rolling24hPnlPercent,
+    decimal Rolling7dPnlPercent,
+    decimal Rolling30dPnlPercent,
     decimal DrawdownPercent,
+    int TradesIn24h,
+    int TradesIn7d,
     bool AnyLimitBreached,
     string? HaltReason,
     DateTimeOffset? HaltUntil,

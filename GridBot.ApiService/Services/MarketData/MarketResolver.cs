@@ -106,16 +106,33 @@ public sealed class MarketResolver : IMarketResolver
                     "No order books returned from Lighter API. Cannot resolve market symbol.");
             }
 
-            // Find the order book where Symbol contains the configured symbol (case-insensitive)
+            // Log all available markets for debugging
+            _logger.LogInformation(
+                "Available markets: {Markets}",
+                string.Join(", ", orderBooks.Select(ob => $"{ob.Symbol}(ID:{ob.MarketId})")));
+
+            // Priority 1: Exact match (e.g., "BTC-USDC" matches "BTC-USDC")
             var matchingOrderBook = orderBooks.FirstOrDefault(ob =>
-                ob.Symbol.Contains(configuredSymbol, StringComparison.OrdinalIgnoreCase));
+                ob.Symbol.Equals(configuredSymbol, StringComparison.OrdinalIgnoreCase));
+
+            // Priority 2: Symbol starts with configured symbol followed by separator
+            // (e.g., "BTC" matches "BTC-USDC" but NOT "ETH-BTC")
+            matchingOrderBook ??= orderBooks.FirstOrDefault(ob =>
+                ob.Symbol.StartsWith(configuredSymbol + "-", StringComparison.OrdinalIgnoreCase));
+
+            // Priority 3: Symbol starts with configured symbol followed by any character
+            // (e.g., "BTC" matches "BTCUSDC")
+            matchingOrderBook ??= orderBooks.FirstOrDefault(ob =>
+                ob.Symbol.StartsWith(configuredSymbol, StringComparison.OrdinalIgnoreCase) &&
+                ob.Symbol.Length > configuredSymbol.Length);
 
             if (matchingOrderBook == null)
             {
-                var availableSymbols = string.Join(", ", orderBooks.Select(ob => ob.Symbol));
+                var availableSymbols = string.Join(", ", orderBooks.Select(ob => $"{ob.Symbol}(ID:{ob.MarketId})"));
                 throw new InvalidOperationException(
                     $"Symbol '{configuredSymbol}' not found in available markets. " +
-                    $"Available symbols: {availableSymbols}");
+                    $"Available symbols: {availableSymbols}. " +
+                    $"Tip: Use exact symbol like 'BTC-USDC' or base symbol like 'BTC'.");
             }
 
             _marketId = matchingOrderBook.MarketId;
