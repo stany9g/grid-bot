@@ -132,13 +132,13 @@ public sealed class LossLimitOptions
     /// Rolling 24-hour loss limit as percentage (default -12%).
     /// Triggers protective mode if breached.
     /// </summary>
-    public decimal Rolling24HourLossPercent { get; set; } = -12m;
+    public decimal Rolling24HourLossPercent { get; set; } = -15m;
 
     /// <summary>
     /// Rolling 7-day loss limit as percentage (default -20%).
     /// Triggers protective mode with extended recovery.
     /// </summary>
-    public decimal Rolling7DayLossPercent { get; set; } = -20m;
+    public decimal Rolling7DayLossPercent { get; set; } = -25m;
 
     /// <summary>
     /// Rolling 30-day loss limit as percentage (default -30%).
@@ -156,7 +156,7 @@ public sealed class LossLimitOptions
     /// Single trade loss limit as percentage (default -3%).
     /// Triggers alert but not halt.
     /// </summary>
-    public decimal SingleTradeLossPercent { get; set; } = -3m;
+    public decimal SingleTradeLossPercent { get; set; } = -5m;
 
     /// <summary>
     /// Position size reduction on max drawdown breach (default 75%).
