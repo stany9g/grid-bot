@@ -326,7 +326,7 @@ public sealed class LighterQueryClient : ILighterQueryClient
             var response = await _httpClient.GetAsync(endpoint, cancellationToken);
 
             var rawJson = await response.Content.ReadAsStringAsync(cancellationToken);
-            _logger?.LogInformation("API Response for {Endpoint}: {RawJson}", endpoint, rawJson);
+            _logger?.LogDebug("API Response for {Endpoint}: {RawJson}", endpoint, rawJson);
             await EnsureSuccessStatusCodeAsync(response);
     
 
