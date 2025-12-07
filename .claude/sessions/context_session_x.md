@@ -10,6 +10,77 @@
 ## Current Task
 Define correct inventory/skew management behavior for perpetual futures trading, replacing the broken spot-trading model.
 
+---
+
+## Lighter WebSocket Batch Transaction Research (2025-12-07)
+
+### Research Request
+Research the Lighter DEX WebSocket API for batch transaction submission.
+
+### Key Findings
+
+**WebSocket Transaction Submission IS Supported**
+
+Transactions can be submitted via WebSocket using two message types:
+1. `jsonapi/sendtx` - Single transaction
+2. `jsonapi/sendtxbatch` - Batch transactions
+
+### Documentation Created
+Full specification at:
+`C:\Users\stany\source\repos\plan\GridBot\.claude\doc\lighter-websocket-batch-transactions-specification.md`
+
+### Summary of Findings
+
+#### 1. WebSocket Batch Message Format
+```json
+{
+  "type": "jsonapi/sendtxbatch",
+  "data": {
+    "id": "unique_request_id",
+    "tx_types": "[1,1,5]",         // JSON-encoded array string
+    "tx_infos": "[{...},{...}]"    // JSON-encoded array string
+  }
+}
+```
+
+**CRITICAL**: `tx_types` and `tx_infos` are DOUBLE-ENCODED - they are JSON strings containing JSON arrays.
+
+#### 2. Transaction Types (tx_types)
+- tx_type values are uint8 returned by native signer library
+- Do NOT hardcode - always use values from `SignedTxResponse.TxType`
+- Available signing methods:
+  - `SignCreateOrder`, `SignCancelOrder`, `SignModifyOrder`
+  - `SignCancelAllOrders`, `SignCreateGroupedOrders`
+  - `SignUpdateLeverage`, `SignUpdateMargin`, `SignTransfer`, etc.
+
+#### 3. Batch Constraints
+- **Same API Key**: All transactions in batch MUST use same `api_key_index`
+- **Sequential Nonces**: Each transaction needs unique, incrementing nonce
+- **Size Limit**: Likely 50 transactions (mentioned but not confirmed in docs)
+
+#### 4. Order Constants (from official SDK)
+```
+ORDER_TYPE_LIMIT = 0
+ORDER_TYPE_MARKET = 1
+ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = 0  (IOC)
+ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = 1       (GTC)
+ORDER_TIME_IN_FORCE_POST_ONLY = 2
+```
+
+#### 5. WebSocket vs REST Format Difference
+| Aspect | REST | WebSocket |
+|--------|------|-----------|
+| tx_types | Comma-separated string | JSON-encoded array string |
+| tx_infos | Comma-separated string | JSON-encoded array string |
+
+### Implementation Notes for C#
+1. Add new message types to `Models/WebSocket/`
+2. Extend `ILighterWebSocketClient` with `SendTransactionBatchAsync`
+3. Handle response correlation via `id` field
+4. Double-encode arrays using `JsonSerializer.Serialize()`
+
+---
+
 ## New Task: Perpetual Futures Skew Specification
 
 ### Problem Statement

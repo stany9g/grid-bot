@@ -91,14 +91,15 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             };
         }
 
-        var ordersPlaced = 0;
-        var ordersFailed = 0;
-        var consecutiveFailures = 0; // Track consecutive failures for circuit breaker
         var errors = new List<GridOrderError>();
+        var ordersToPlace = new List<(GridLevel Level, CreateOrderRequest Request, long ClientOrderIndex)>();
 
         await _orderLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // Phase 1: Prepare all orders (validation, moon bag checks, scaling)
+            decimal? cachedPosition = null;
+
             foreach (var level in levels)
             {
                 if (level.Status == GridLevelStatus.Active || level.Status == GridLevelStatus.Filled)
@@ -108,182 +109,178 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
 
                 ct.ThrowIfCancellationRequested();
 
-                try
+                // HIGH-005 FIX: Check moon bag protection before placing sell orders
+                if (!level.IsBid) // This is a sell order (ask)
                 {
-                    // HIGH-005 FIX: Check moon bag protection before placing sell orders
-                    if (!level.IsBid) // This is a sell order (ask)
-                    {
-                        var currentPosition = await GetCurrentPositionAsync(marketId, ct).ConfigureAwait(false);
-                        var shouldBlock = await _moonBagManager.ShouldBlockSellOrderAsync(
-                            marketId, level.Size, currentPosition, ct).ConfigureAwait(false);
+                    cachedPosition ??= await GetCurrentPositionAsync(marketId, ct).ConfigureAwait(false);
+                    var shouldBlock = await _moonBagManager.ShouldBlockSellOrderAsync(
+                        marketId, level.Size, cachedPosition.Value, ct).ConfigureAwait(false);
 
-                        if (shouldBlock)
-                        {
-                            _logger.LogWarning(
-                                "Sell order blocked by moon bag protection for market {MarketId} at level {Level}: size {Size:F4}",
-                                marketId, level.LevelIndex, level.Size);
-
-                            errors.Add(new GridOrderError
-                            {
-                                LevelIndex = level.LevelIndex,
-                                Price = level.Price,
-                                IsBid = level.IsBid,
-                                ErrorMessage = "Blocked by moon bag protection"
-                            });
-                            ordersFailed++;
-                            continue;
-                        }
-                    }
-
-                    var clientOrderIndex = GenerateClientOrderIndex(level);
-                    var scaledPrice = await _scalingService.ScalePriceAsync(level.Price, marketId, ct)
-                        .ConfigureAwait(false);
-                    var scaledSize = await _scalingService.ScaleBaseAmountAsync(level.Size, marketId, ct)
-                        .ConfigureAwait(false);
-
-                    var request = new CreateOrderRequest
-                    {
-                        MarketIndex = marketId,
-                        ClientOrderIndex = clientOrderIndex,
-                        Price = scaledPrice,
-                        BaseAmount = scaledSize,
-                        IsAsk = !level.IsBid, // IsAsk is true for sells
-                        OrderType = OrderType.Limit,
-                        TimeInForce = TimeInForce.PostOnly,
-                        ReduceOnly = false,
-                        OrderExpiry = OrderConstants.Default28DayOrderExpiry
-                    };
-
-                    var validationError = request.Validate();
-                    if (validationError != null)
+                    if (shouldBlock)
                     {
                         _logger.LogWarning(
-                            "Order validation failed for level {LevelIndex}: {Error}",
-                            level.LevelIndex, validationError);
+                            "Sell order blocked by moon bag protection for market {MarketId} at level {Level}: size {Size:F4}",
+                            marketId, level.LevelIndex, level.Size);
 
                         errors.Add(new GridOrderError
                         {
                             LevelIndex = level.LevelIndex,
                             Price = level.Price,
                             IsBid = level.IsBid,
-                            ErrorMessage = validationError
+                            ErrorMessage = "Blocked by moon bag protection"
                         });
-                        ordersFailed++;
                         continue;
                     }
-                    var response = await _commandClient.CreateOrderAsync(request, priceProtection: false, ct)
-                        .ConfigureAwait(false);
-
-                    if (response.Code == 0 || response.Code == 200)
-                    {
-                        // Note: Order ID comes from transaction confirmation, not immediate response
-                        // We store the client order index and sync status later
-                        level.ClientOrderIndex = clientOrderIndex;
-                        level.Status = GridLevelStatus.Active;
-                        level.LastUpdatedAt = DateTimeOffset.UtcNow;
-                        level.OriginalSize = level.Size; // Store original size for partial fill tracking
-                        ordersPlaced++;
-                        consecutiveFailures = 0; // Reset consecutive failure counter on success
-
-                        _logger.LogDebug(
-                            "Placed {Side} order at {Price} (level {Index}), TxHash: {TxHash}",
-                            level.IsBid ? "bid" : "ask",
-                            level.Price,
-                            level.LevelIndex,
-                            response.TxHash);
-                    }
-                    // FIX Finding 3: Handle Post-Only rejections specifically
-                    else if (PostOnlyRejectionCodes.Contains(response.Code))
-                    {
-                        _logger.LogWarning(
-                            "Post-Only order rejected (would cross spread) for {Side} at {Price}. Code: {Code}",
-                            level.IsBid ? "bid" : "ask",
-                            level.Price,
-                            response.Code);
-
-                        errors.Add(new GridOrderError
-                        {
-                            LevelIndex = level.LevelIndex,
-                            Price = level.Price,
-                            IsBid = level.IsBid,
-                            ErrorMessage = $"Post-Only rejection: would cross spread (code {response.Code})"
-                        });
-                        ordersFailed++;
-                        // Post-Only rejections are expected in fast markets, don't count as consecutive failures
-                        // Note: In a more advanced implementation, we could retry with adjusted price
-                        // by moving the price further from the spread by one tick.
-                    }
-                    else
-                    {
-                        errors.Add(new GridOrderError
-                        {
-                            LevelIndex = level.LevelIndex,
-                            Price = level.Price,
-                            IsBid = level.IsBid,
-                            ErrorMessage = response.Message ?? $"API error code: {response.Code}"
-                        });
-                        ordersFailed++;
-                        consecutiveFailures++;
-
-                        _logger.LogWarning(
-                            "Failed to place {Side} order at {Price}: {Message}",
-                            level.IsBid ? "bid" : "ask",
-                            level.Price,
-                            response.Message);
-
-                        // FIX Finding 14: Circuit breaker - stop after consecutive failures
-                        if (consecutiveFailures >= CircuitBreakerThreshold)
-                        {
-                            _logger.LogWarning(
-                                "Circuit breaker triggered after {Failed} consecutive failures. Stopping order placement for this batch.",
-                                consecutiveFailures);
-                            break;
-                        }
-                    }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+
+                var clientOrderIndex = GenerateClientOrderIndex(level);
+                var scaledPrice = await _scalingService.ScalePriceAsync(level.Price, marketId, ct)
+                    .ConfigureAwait(false);
+                var scaledSize = await _scalingService.ScaleBaseAmountAsync(level.Size, marketId, ct)
+                    .ConfigureAwait(false);
+
+                var request = new CreateOrderRequest
+                {
+                    MarketIndex = marketId,
+                    ClientOrderIndex = clientOrderIndex,
+                    Price = scaledPrice,
+                    BaseAmount = scaledSize,
+                    IsAsk = !level.IsBid, // IsAsk is true for sells
+                    OrderType = OrderType.Limit,
+                    TimeInForce = TimeInForce.PostOnly,
+                    ReduceOnly = false,
+                    OrderExpiry = OrderConstants.Default28DayOrderExpiry
+                };
+
+                var validationError = request.Validate();
+                if (validationError != null)
+                {
+                    _logger.LogWarning(
+                        "Order validation failed for level {LevelIndex}: {Error}",
+                        level.LevelIndex, validationError);
+
+                    errors.Add(new GridOrderError
+                    {
+                        LevelIndex = level.LevelIndex,
+                        Price = level.Price,
+                        IsBid = level.IsBid,
+                        ErrorMessage = validationError
+                    });
+                    continue;
+                }
+
+                ordersToPlace.Add((level, request, clientOrderIndex));
+            }
+
+            // Phase 2: Submit all orders in a single batch
+            if (ordersToPlace.Count == 0)
+            {
+                _logger.LogInformation("No valid orders to place after validation");
+                return new GridPlacementResult
+                {
+                    OrdersPlaced = 0,
+                    OrdersFailed = errors.Count,
+                    Errors = errors
+                };
+            }
+
+            _logger.LogInformation(
+                "Submitting batch of {Count} orders for market {MarketId}",
+                ordersToPlace.Count, marketId);
+
+            var requests = ordersToPlace.Select(o => o.Request).ToArray();
+            var batchResult = await _commandClient.CreateOrderBatchAsync(requests, ct).ConfigureAwait(false);
+
+            int ordersPlaced;
+            int ordersFailed;
+
+            if (batchResult.IsSuccess)
+            {
+                // Mark all orders as active
+                for (var i = 0; i < ordersToPlace.Count; i++)
+                {
+                    var (level, _, clientOrderIndex) = ordersToPlace[i];
+                    level.ClientOrderIndex = clientOrderIndex;
+                    level.Status = GridLevelStatus.Active;
+                    level.LastUpdatedAt = DateTimeOffset.UtcNow;
+                    level.OriginalSize = level.Size;
+
+                    var txHash = i < batchResult.TxHashes.Length ? batchResult.TxHashes[i] : "N/A";
+                    _logger.LogDebug(
+                        "Placed {Side} order at {Price} (level {Index}), TxHash: {TxHash}",
+                        level.IsBid ? "bid" : "ask",
+                        level.Price,
+                        level.LevelIndex,
+                        txHash);
+                }
+
+                ordersPlaced = ordersToPlace.Count;
+                ordersFailed = errors.Count;
+
+                _logger.LogInformation(
+                    "Batch order placement successful: {Placed} orders placed in single request",
+                    ordersPlaced);
+            }
+            else
+            {
+                // Batch failed - all orders failed
+                _logger.LogError(
+                    "Batch order placement failed: {Error} (code {Code})",
+                    batchResult.ErrorMessage, batchResult.Code);
+
+                foreach (var (level, _, _) in ordersToPlace)
                 {
                     errors.Add(new GridOrderError
                     {
                         LevelIndex = level.LevelIndex,
                         Price = level.Price,
                         IsBid = level.IsBid,
-                        ErrorMessage = ex.Message
+                        ErrorMessage = batchResult.ErrorMessage ?? $"Batch failed with code {batchResult.Code}"
                     });
-                    ordersFailed++;
-                    consecutiveFailures++;
-
-                    _logger.LogError(ex,
-                        "Exception placing {Side} order at {Price}",
-                        level.IsBid ? "bid" : "ask",
-                        level.Price);
-
-                    // FIX Finding 14: Circuit breaker - stop after consecutive failures
-                    if (consecutiveFailures >= CircuitBreakerThreshold)
-                    {
-                        _logger.LogWarning(
-                            "Circuit breaker triggered after {Failed} consecutive failures. Stopping order placement for this batch.",
-                            consecutiveFailures);
-                        break;
-                    }
                 }
+
+                ordersPlaced = 0;
+                ordersFailed = errors.Count;
             }
+
+            _logger.LogInformation(
+                "Grid order placement complete: {Placed} placed, {Failed} failed",
+                ordersPlaced, ordersFailed);
+
+            return new GridPlacementResult
+            {
+                OrdersPlaced = ordersPlaced,
+                OrdersFailed = ordersFailed,
+                Errors = errors
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Exception during batch order placement for market {MarketId}", marketId);
+
+            // Mark all pending orders as failed
+            foreach (var (level, _, _) in ordersToPlace)
+            {
+                errors.Add(new GridOrderError
+                {
+                    LevelIndex = level.LevelIndex,
+                    Price = level.Price,
+                    IsBid = level.IsBid,
+                    ErrorMessage = ex.Message
+                });
+            }
+
+            return new GridPlacementResult
+            {
+                OrdersPlaced = 0,
+                OrdersFailed = errors.Count,
+                Errors = errors
+            };
         }
         finally
         {
             _orderLock.Release();
         }
-
-        _logger.LogInformation(
-            "Grid order placement complete: {Placed} placed, {Failed} failed",
-            ordersPlaced, ordersFailed);
-
-        return new GridPlacementResult
-        {
-            OrdersPlaced = ordersPlaced,
-            OrdersFailed = ordersFailed,
-            Errors = errors
-        };
     }
 
     /// <inheritdoc />

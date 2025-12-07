@@ -4,6 +4,42 @@ using GridBot.Lighter.Models.Api;
 namespace GridBot.Lighter;
 
 /// <summary>
+/// Result of signing an order without submitting it.
+/// </summary>
+public sealed record SignedOrderResult(int TxType, string TxInfo, string? Error);
+
+/// <summary>
+/// Result of a batch order submission.
+/// </summary>
+public sealed record BatchOrderResult
+{
+    /// <summary>
+    /// Whether the batch submission was successful.
+    /// </summary>
+    public required bool IsSuccess { get; init; }
+
+    /// <summary>
+    /// Number of orders successfully submitted.
+    /// </summary>
+    public required int OrdersSubmitted { get; init; }
+
+    /// <summary>
+    /// Transaction hashes for submitted orders.
+    /// </summary>
+    public required string[] TxHashes { get; init; }
+
+    /// <summary>
+    /// Error message if submission failed.
+    /// </summary>
+    public string? ErrorMessage { get; init; }
+
+    /// <summary>
+    /// API response code.
+    /// </summary>
+    public int Code { get; init; }
+}
+
+/// <summary>
 /// Interface for Lighter command operations (orders and transactions).
 /// Handles signing and submission of write operations.
 /// </summary>
@@ -93,4 +129,34 @@ public interface ILighterCommandClient : IDisposable
     /// <param name="validitySeconds">How long the token should be valid (default 600 = 10 minutes).</param>
     /// <returns>Tuple containing (authToken, error). If error is not null, token creation failed.</returns>
     Task<(string? authToken, string? error)> CreateAuthTokenAsync(int validitySeconds = 600);
+
+    /// <summary>
+    /// Signs an order without submitting it. Used for batch order preparation.
+    /// Each call increments the nonce, so orders must be submitted in the same sequence they were signed.
+    /// </summary>
+    /// <param name="request">Order creation request.</param>
+    /// <returns>Signed order result containing tx_type and tx_info, or error.</returns>
+    Task<SignedOrderResult> SignOrderAsync(CreateOrderRequest request);
+
+    /// <summary>
+    /// Submits multiple pre-signed orders in a single batch request.
+    /// More efficient than individual submissions - all orders go in one HTTP call.
+    /// </summary>
+    /// <param name="signedOrders">Array of signed order results from SignOrderAsync.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Batch result containing success status and transaction hashes.</returns>
+    Task<BatchOrderResult> SubmitOrderBatchAsync(
+        SignedOrderResult[] signedOrders,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Signs and submits multiple orders in a single batch request.
+    /// Convenience method that combines SignOrderAsync + SubmitOrderBatchAsync.
+    /// </summary>
+    /// <param name="requests">Array of order creation requests.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Batch result containing success status and transaction hashes.</returns>
+    Task<BatchOrderResult> CreateOrderBatchAsync(
+        CreateOrderRequest[] requests,
+        CancellationToken cancellationToken = default);
 }

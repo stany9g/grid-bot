@@ -278,3 +278,48 @@ This is acceptable for single-market trading but should be addressed for multi-m
 
 ## Session Complete
 Grid rebuild loop bug fixed on 2025-12-07.
+
+---
+
+## Session 3: Lighter DEX sendTxBatch Error Investigation (2025-12-07)
+
+### Problem
+Getting error `{"code":21501,"message":"invalid tx info"}` when calling `POST /api/v1/sendTxBatch`.
+
+Current implementation sends:
+- `tx_types`: `"[14,14,14,14,14,14,14,14]"` (JSON array string)
+- `tx_infos`: `"[{...},{...},{...}]"` (JSON array of tx_info objects)
+
+### Research Findings
+
+#### 1. tx_types Format: CORRECT
+- Format: JSON array as string `"[14,14,14]"`
+- Current implementation is correct
+
+#### 2. tx_infos Format: CORRECT STRUCTURE
+- Format: JSON array of objects as string `"[{...},{...}]"`
+- Current implementation structure is correct
+
+#### 3. Property Names: PascalCase REQUIRED
+From official WebSocket documentation, tx_info uses **PascalCase**:
+- `AccountIndex`, `ApiKeyIndex`, `MarketIndex`, `ClientOrderIndex`
+- `BaseAmount`, `Price`, `IsAsk`, `Type`, `TimeInForce`
+- `ReduceOnly`, `TriggerPrice`, `OrderExpiry`, `ExpiredAt`
+- `Nonce`, `Sig`
+
+#### 4. Signature Format
+- Should be hex string starting with `0x`, NOT base64
+
+### Likely Root Cause
+The native signer library returns tx_info with specific property names. Need to verify:
+1. Exact property names from native signer match API expectations
+2. Signature format (`Sig` field) is correct
+3. No double-escaping when building the JSON array
+
+### Next Steps
+1. Add debug logging to capture exact native signer output
+2. Compare single sendTx (working) with batch sendTxBatch (failing)
+3. Verify signature format matches `0x...` hex format
+
+### Documentation Created
+- `C:\Users\stany\source\repos\plan\GridBot\.claude\doc\lighter-rest-sendtxbatch-format-specification.md`

@@ -458,6 +458,7 @@ public sealed class LighterCommandClient : ILighterCommandClient
 
     /// <summary>
     /// Submits multiple signed transactions in a batch to the Lighter API.
+    /// Uses multipart/form-data format (same as single transaction endpoint).
     /// </summary>
     /// <param name="txTypes">Array of transaction types.</param>
     /// <param name="txInfos">Array of signed transaction info JSON strings.</param>
@@ -478,19 +479,31 @@ public sealed class LighterCommandClient : ILighterCommandClient
         if (txTypes.Length != txInfos.Length)
             throw new ArgumentException("Transaction types and infos arrays must have the same length.");
 
-        // Use PascalCase - JsonNamingPolicy.SnakeCaseLower will convert to snake_case
-        var request = new
-        {
-            TxTypes = string.Join(",", txTypes),
-            TxInfos = string.Join(",", txInfos)
-        };
+        // Try different formats - the API might expect JSON array of STRINGS (double-encoded)
+        // Format: ["{\\"AccountIndex\\":293,...}", "{\\"AccountIndex\\":293,...}"]
+        var txTypesJson = JsonSerializer.Serialize(txTypes); // [14,14,14]
+        var txInfosJson = JsonSerializer.Serialize(txInfos); // Array of strings (double-encoded)
 
-        var response = await PostAsync<RespSendTxBatch>("sendTxBatch", request, cancellationToken);
+        // Use multipart/form-data (as per API docs) with JSON array strings
+        using var formContent = new MultipartFormDataContent();
+        formContent.Add(new StringContent(txTypesJson), "tx_types");
+        formContent.Add(new StringContent(txInfosJson), "tx_infos");
 
-        if (!response.IsSuccess)
-            throw new LighterApiException(response.Message ?? "Batch transaction submission failed", response.Code);
+        Console.WriteLine($"[LighterCommandClient] POST sendTxBatch DEBUG:");
+        Console.WriteLine($"  tx_types: {txTypesJson}");
+        Console.WriteLine($"  tx_infos[0]: {txInfos[0]}");
+        Console.WriteLine($"  Full request tx_infos: {txInfosJson}");
 
-        return response;
+        var response = await _writeHttpClient.PostAsync("sendTxBatch", formContent, cancellationToken);
+        await EnsureSuccessStatusCodeAsync(response);
+
+        var result = await response.Content.ReadFromJsonAsync<RespSendTxBatch>(_jsonOptions, cancellationToken)
+            ?? throw new LighterApiException("Failed to deserialize batch response");
+
+        if (!result.IsSuccess)
+            throw new LighterApiException(result.Message ?? "Batch transaction submission failed", result.Code);
+
+        return result;
     }
 
 
@@ -556,6 +569,165 @@ public sealed class LighterCommandClient : ILighterCommandClient
     public async Task<(string? authToken, string? error)> CreateAuthTokenAsync(int validitySeconds = 600)
     {
         return await _signer.CreateAuthTokenAsync(validitySeconds);
+    }
+
+    /// <inheritdoc />
+    public async Task<SignedOrderResult> SignOrderAsync(CreateOrderRequest request)
+    {
+        var (txInfo, error) = await _signer.CreateOrderAsync(request);
+        if (error != null)
+            return new SignedOrderResult(0, string.Empty, error);
+
+        return new SignedOrderResult(TransactionTypes.CreateOrder, txInfo!, null);
+    }
+
+    /// <inheritdoc />
+    public async Task<BatchOrderResult> SubmitOrderBatchAsync(
+        SignedOrderResult[] signedOrders,
+        CancellationToken cancellationToken = default)
+    {
+        if (signedOrders == null || signedOrders.Length == 0)
+        {
+            return new BatchOrderResult
+            {
+                IsSuccess = false,
+                OrdersSubmitted = 0,
+                TxHashes = [],
+                ErrorMessage = "No orders to submit"
+            };
+        }
+
+        // Check for signing errors
+        var signingErrors = signedOrders.Where(o => o.Error != null).ToList();
+        if (signingErrors.Count > 0)
+        {
+            return new BatchOrderResult
+            {
+                IsSuccess = false,
+                OrdersSubmitted = 0,
+                TxHashes = [],
+                ErrorMessage = $"Signing failed for {signingErrors.Count} orders: {signingErrors[0].Error}"
+            };
+        }
+
+        var txTypes = signedOrders.Select(o => o.TxType).ToArray();
+        var txInfos = signedOrders.Select(o => o.TxInfo).ToArray();
+
+        try
+        {
+            var response = await SendTransactionBatchAsync(txTypes, txInfos, cancellationToken);
+
+            return new BatchOrderResult
+            {
+                IsSuccess = response.IsSuccess,
+                OrdersSubmitted = response.IsSuccess ? signedOrders.Length : 0,
+                TxHashes = response.TxHashArray,
+                ErrorMessage = response.IsSuccess ? null : response.Message,
+                Code = response.Code
+            };
+        }
+        catch (LighterApiException ex)
+        {
+            return new BatchOrderResult
+            {
+                IsSuccess = false,
+                OrdersSubmitted = 0,
+                TxHashes = [],
+                ErrorMessage = ex.Message,
+                Code = ex.Code ?? 0
+            };
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<BatchOrderResult> CreateOrderBatchAsync(
+        CreateOrderRequest[] requests,
+        CancellationToken cancellationToken = default)
+    {
+        if (requests == null || requests.Length == 0)
+        {
+            return new BatchOrderResult
+            {
+                IsSuccess = false,
+                OrdersSubmitted = 0,
+                TxHashes = [],
+                ErrorMessage = "No orders to create"
+            };
+        }
+
+        // Sign all orders sequentially (nonces must be sequential)
+        var signedOrders = new SignedOrderResult[requests.Length];
+        for (var i = 0; i < requests.Length; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            signedOrders[i] = await SignOrderAsync(requests[i]);
+
+            if (signedOrders[i].Error != null)
+            {
+                Console.WriteLine($"[LighterCommandClient] Batch signing failed at order {i}: {signedOrders[i].Error}");
+                return new BatchOrderResult
+                {
+                    IsSuccess = false,
+                    OrdersSubmitted = 0,
+                    TxHashes = [],
+                    ErrorMessage = $"Failed to sign order {i}: {signedOrders[i].Error}"
+                };
+            }
+        }
+
+        Console.WriteLine($"[LighterCommandClient] Signed {requests.Length} orders, submitting batch...");
+
+        // Try batch first
+        var batchResult = await SubmitOrderBatchAsync(signedOrders, cancellationToken);
+
+        if (batchResult.IsSuccess)
+        {
+            return batchResult;
+        }
+
+        // Batch failed - fall back to sequential submission
+        Console.WriteLine($"[LighterCommandClient] Batch failed ({batchResult.ErrorMessage}), falling back to sequential submission...");
+
+        // Need to re-sign orders since nonces were consumed
+        await SyncNonceAsync(_signer.AccountIndex, _signer.ApiKeyIndex, cancellationToken);
+
+        var txHashes = new List<string>();
+        var successCount = 0;
+
+        for (var i = 0; i < requests.Length; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                var response = await CreateOrderAsync(requests[i], priceProtection: false, cancellationToken);
+
+                Console.WriteLine($"[LighterCommandClient] Sequential order {i} SUCCESS - tx_info was sent as: check single sendTx log above");
+
+                if (response.IsSuccess)
+                {
+                    txHashes.Add(response.TxHash ?? "");
+                    successCount++;
+                }
+                else
+                {
+                    Console.WriteLine($"[LighterCommandClient] Sequential order {i} failed: {response.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[LighterCommandClient] Sequential order {i} exception: {ex.Message}");
+            }
+        }
+
+        return new BatchOrderResult
+        {
+            IsSuccess = successCount == requests.Length,
+            OrdersSubmitted = successCount,
+            TxHashes = txHashes.ToArray(),
+            ErrorMessage = successCount < requests.Length ? $"Only {successCount}/{requests.Length} orders succeeded in sequential fallback" : null,
+            Code = 200
+        };
     }
 
     /// <summary>

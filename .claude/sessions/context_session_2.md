@@ -611,3 +611,221 @@ The WebSocket models now correctly match the Lighter API WebSocket specification
 - User stats channel (`user_stats/{ACCOUNT_ID}`)
 - Notification channel (`notification/{ACCOUNT_ID}`)
 - Trade channel (`trade/{MARKET_INDEX}`)
+
+---
+
+## Order Placement Analysis (2025-12-07)
+
+### Current Implementation
+
+**Orders are placed via REST API, NOT WebSocket**
+
+1. **Single order placement via REST**
+   - `LighterCommandClient.SendTransactionAsync` uses HTTP POST to `sendTx` endpoint
+   - File: `GridBot.Lighter\LighterCommandClient.cs:447`
+
+2. **Sequential order placement in GridOrderManager**
+   - Orders placed one-by-one in a foreach loop
+   - File: `GridBot.ApiService\Services\Grid\GridOrderManager.cs:102-270`
+   - Each order = separate HTTP request
+
+3. **REST Batch exists but is INTERNAL and UNUSED**
+   - `LighterCommandClient.SendTransactionBatchAsync` (lines 467-494) exists
+   - Marked `internal` - not exposed via `ILighterCommandClient`
+   - `GridOrderManager` doesn't use it
+
+4. **WebSocket client doesn't support transaction submission**
+   - `LighterWebSocketClient` only handles subscriptions (order book, account, orders)
+   - No `SendTx` or `SendTxBatch` methods
+
+### API Support for WebSocket Transactions
+
+**Lighter DOES support WebSocket transaction submission:**
+
+| Message Type | Description |
+|--------------|-------------|
+| `jsonapi/sendtx` | Single transaction |
+| `jsonapi/sendtxbatch` | Batch up to 50 transactions |
+
+### Key Implementation Difference
+
+| Aspect | REST | WebSocket |
+|--------|------|-----------|
+| Format | Comma-separated strings | JSON-encoded array strings |
+| `tx_types` | `"1,1,5"` | `"[1,1,5]"` |
+| `tx_infos` | `"{...},{...}"` | `"[{...},{...}]"` |
+
+### Batch Transaction WebSocket Format
+
+```json
+{
+  "type": "jsonapi/sendtxbatch",
+  "data": {
+    "id": "unique_request_id",
+    "tx_types": "[1,1,5]",           // JSON-encoded array
+    "tx_infos": "[{...},{...},{...}]" // JSON-encoded array
+  }
+}
+```
+
+**CRITICAL**: `tx_types` and `tx_infos` are **double-encoded** (JSON strings containing JSON arrays).
+
+### Constraints
+
+- All transactions in batch MUST use same `api_key_index`
+- Sequential nonces required for each transaction
+- Batch size limit: ~50 transactions (recommended: start with 10-20)
+
+### Potential Improvements
+
+1. **Expose REST batch via interface**
+   - Add `SendTransactionBatchAsync` to `ILighterCommandClient`
+   - Update `GridOrderManager.PlaceGridOrdersAsync` to batch orders
+
+2. **Add WebSocket transaction support**
+   - Extend `ILighterWebSocketClient` with `SendTransactionBatchAsync`
+   - Implement in `LighterWebSocketClient`
+   - Lower latency than REST for persistent connections
+
+### Documentation Reference
+Full specification: `.claude/doc/lighter-websocket-batch-transactions-specification.md`
+
+---
+
+## Batch Order Placement Implementation (Completed 2025-12-07)
+
+### Summary
+Implemented REST batch order placement to replace sequential order submission. All grid orders are now submitted in a single HTTP request instead of one request per order.
+
+### Changes Made
+
+#### 1. ILighterCommandClient Interface (`GridBot.Lighter\ILighterCommandClient.cs`)
+
+Added new types and methods:
+
+```csharp
+// New result types
+public sealed record SignedOrderResult(int TxType, string TxInfo, string? Error);
+
+public sealed record BatchOrderResult
+{
+    public required bool IsSuccess { get; init; }
+    public required int OrdersSubmitted { get; init; }
+    public required string[] TxHashes { get; init; }
+    public string? ErrorMessage { get; init; }
+    public int Code { get; init; }
+}
+
+// New interface methods
+Task<SignedOrderResult> SignOrderAsync(CreateOrderRequest request);
+Task<BatchOrderResult> SubmitOrderBatchAsync(SignedOrderResult[] signedOrders, CancellationToken ct);
+Task<BatchOrderResult> CreateOrderBatchAsync(CreateOrderRequest[] requests, CancellationToken ct);
+```
+
+#### 2. LighterCommandClient (`GridBot.Lighter\LighterCommandClient.cs`)
+
+Implemented the new batch methods:
+
+- `SignOrderAsync` - Signs a single order without submitting (for batch preparation)
+- `SubmitOrderBatchAsync` - Submits pre-signed orders in a single batch
+- `CreateOrderBatchAsync` - Convenience method that signs and submits all orders
+
+Key implementation details:
+- Orders are signed sequentially (each needs unique, incrementing nonce)
+- All signed orders submitted in single `sendTxBatch` REST call
+- Existing `SendTransactionBatchAsync` (internal) now used by public batch methods
+
+#### 3. GridOrderManager (`GridBot.ApiService\Services\Grid\GridOrderManager.cs`)
+
+Refactored `PlaceGridOrdersAsync` to use batch placement:
+
+**Before (sequential):**
+```
+foreach order:
+  validate → sign → submit → check response
+```
+
+**After (batch):**
+```
+Phase 1: foreach order: validate → prepare request
+Phase 2: submit all orders in single batch → update all levels
+```
+
+Key changes:
+- Removed circuit breaker logic (batch is all-or-nothing)
+- Cached position lookup to avoid redundant API calls
+- All orders succeed or fail together
+- Single log entry for batch success/failure
+
+### Impact
+
+| Metric | Before | After |
+|--------|--------|-------|
+| HTTP requests for 12 orders | 12 | 1 |
+| API weight for 12 orders | 72 (12×6) | 6 |
+| Error handling | Per-order | All-or-nothing |
+| Latency | ~12× single request | ~1× single request |
+
+### Build Status
+- Solution builds with 0 warnings, 0 errors
+
+### Files Modified
+1. `GridBot.Lighter\ILighterCommandClient.cs` - Added batch types and methods
+2. `GridBot.Lighter\LighterCommandClient.cs` - Implemented batch methods
+3. `GridBot.ApiService\Services\Grid\GridOrderManager.cs` - Refactored to use batch
+
+### Notes
+- The existing `SendTransactionBatchAsync` method was already implemented but marked `internal`
+- REST batch uses comma-separated strings for `tx_types` and `tx_infos`
+- WebSocket batch (future) would use JSON-encoded arrays instead
+
+### Critical Bug Fixes During Implementation
+
+#### 1. JSON Encoding Format (21501 "invalid tx info" error)
+
+The API requires a specific double-encoded format:
+
+```csharp
+// WRONG - comma-separated
+formContent.Add(new StringContent("14,14,14"), "tx_types");
+formContent.Add(new StringContent("{...},{...}"), "tx_infos");
+
+// WRONG - JSON arrays of objects
+formContent.Add(new StringContent("[14,14,14]"), "tx_types");
+formContent.Add(new StringContent("[{...},{...}]"), "tx_infos");
+
+// CORRECT - JSON array of integers + JSON array of STRINGS (double-encoded)
+formContent.Add(new StringContent("[14,14,14]"), "tx_types");
+formContent.Add(new StringContent("[\"{\\"AccountIndex\\":293...}\",\"...\"]"), "tx_infos");
+```
+
+**Solution**: `JsonSerializer.Serialize(txInfos)` where `txInfos` is `string[]` creates the correct double-encoded format.
+
+#### 2. Base64 Signature Escaping
+
+The `+` character in base64-encoded signatures was being escaped to `\u002B` by default JSON serialization, corrupting the signature.
+
+**Solution**: Use `UnsafeRelaxedJsonEscaping` when re-serializing tx_info strings.
+
+#### 3. Response Model Flexibility (`RespSendTxBatch.cs`)
+
+The API returns `predicted_execution_time_ms` and `tx_hashes` in various formats (string, number, or array). The original model expected only strings.
+
+**Solution**: Changed to `JsonElement` with accessor properties:
+
+```csharp
+[JsonPropertyName("tx_hashes")]
+public JsonElement TxHashesRaw { get; set; }
+
+[JsonPropertyName("predicted_execution_time_ms")]
+public JsonElement PredictedExecutionTimeMsRaw { get; set; }
+
+[JsonIgnore]
+public string[] TxHashArray => /* handles String and Array */;
+
+[JsonIgnore]
+public int[] PredictedExecutionTimeMsArray => /* handles String, Number, and Array */;
+```
+
+### Implementation Status
+**COMPLETE** - Ready for testing

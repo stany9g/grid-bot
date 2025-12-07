@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace GridBot.Lighter.Models.Api;
@@ -20,16 +21,18 @@ public sealed class RespSendTxBatch
     public string? Message { get; set; }
 
     /// <summary>
-    /// Transaction hashes for the submitted transactions, comma-separated.
+    /// Transaction hashes for the submitted transactions.
+    /// Can be comma-separated string or array.
     /// </summary>
     [JsonPropertyName("tx_hashes")]
-    public string TxHashes { get; set; } = string.Empty;
+    public JsonElement TxHashesRaw { get; set; }
 
     /// <summary>
-    /// Predicted execution times in milliseconds for each transaction, comma-separated.
+    /// Predicted execution times in milliseconds for each transaction.
+    /// Can be comma-separated string, number, or array.
     /// </summary>
     [JsonPropertyName("predicted_execution_time_ms")]
-    public string PredictedExecutionTimeMs { get; set; } = string.Empty;
+    public JsonElement PredictedExecutionTimeMsRaw { get; set; }
 
     /// <summary>
     /// Gets whether the operation was successful (code == 200 or 0).
@@ -41,14 +44,51 @@ public sealed class RespSendTxBatch
     /// Gets the transaction hashes as an array.
     /// </summary>
     [JsonIgnore]
-    public string[] TxHashArray => TxHashes.Split(',', StringSplitOptions.RemoveEmptyEntries);
+    public string[] TxHashArray
+    {
+        get
+        {
+            if (TxHashesRaw.ValueKind == JsonValueKind.String)
+            {
+                var str = TxHashesRaw.GetString() ?? "";
+                return str.Split(',', StringSplitOptions.RemoveEmptyEntries);
+            }
+            if (TxHashesRaw.ValueKind == JsonValueKind.Array)
+            {
+                return TxHashesRaw.EnumerateArray()
+                    .Select(x => x.GetString() ?? "")
+                    .ToArray();
+            }
+            return [];
+        }
+    }
 
     /// <summary>
     /// Gets the predicted execution times as an array of integers.
     /// </summary>
     [JsonIgnore]
-    public int[] PredictedExecutionTimeMsArray =>
-        PredictedExecutionTimeMs.Split(',', StringSplitOptions.RemoveEmptyEntries)
-            .Select(x => int.TryParse(x, out var val) ? val : 0)
-            .ToArray();
+    public int[] PredictedExecutionTimeMsArray
+    {
+        get
+        {
+            if (PredictedExecutionTimeMsRaw.ValueKind == JsonValueKind.String)
+            {
+                var str = PredictedExecutionTimeMsRaw.GetString() ?? "";
+                return str.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(x => int.TryParse(x, out var val) ? val : 0)
+                    .ToArray();
+            }
+            if (PredictedExecutionTimeMsRaw.ValueKind == JsonValueKind.Number)
+            {
+                return [PredictedExecutionTimeMsRaw.GetInt32()];
+            }
+            if (PredictedExecutionTimeMsRaw.ValueKind == JsonValueKind.Array)
+            {
+                return PredictedExecutionTimeMsRaw.EnumerateArray()
+                    .Select(x => x.ValueKind == JsonValueKind.Number ? x.GetInt32() : 0)
+                    .ToArray();
+            }
+            return [];
+        }
+    }
 }
