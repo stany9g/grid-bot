@@ -1,0 +1,16 @@
+{
+  "projectPath": ".",
+  "outputPath": "aspirate-output",
+  "containerImageTags": [
+    "latest"
+  ],
+  "runtimeIdentifier": "linux-arm64",
+  "containerBuilder": "docker",
+  "outputFormat": "compose",
+  "privateRegistryEmail": "aspir8@aka.ms",
+  "secrets": {
+    "salt": "Fm4J1dZfNzlKGVVk",
+    "hash": "mlHOdghvtXJUG7EX0tVtWWxFN3Q50DPlyuaiEUYsNFo=",
+    "secrets": {}
+  }
+}
