@@ -298,7 +298,11 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             var shouldShift = priceDeviation > halfWidth * PriceShiftThreshold;
 
             // Check if ATR changed significantly
-            var currentSpacing = _gridCalculator.CalculateGridSpacingFromAtr(atrPercent);
+            // FIX: Use CalculateGridParameters for comparison to ensure consistent calculation
+            // Previously used CalculateGridSpacingFromAtr which doesn't apply width constraints,
+            // causing false 52% change detection immediately after initialization
+            var proposedParams = _gridCalculator.CalculateGridParameters(currentPrice, atr, atrPercent);
+            var currentSpacing = proposedParams.GridSpacing;
 
             // FIX Finding 5: Guard against division by zero
             decimal spacingChange = 0m;
@@ -330,7 +334,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                 gridState.Status = GridStatus.Rebuilding;
                 await _orderManager.CancelAllGridOrdersAsync(marketId, ct).ConfigureAwait(false);
 
-                var newParams = _gridCalculator.CalculateGridParameters(currentPrice, atr, atrPercent);
+                // Reuse proposedParams calculated above instead of recalculating
+                var newParams = proposedParams;
                 var newLevels = _gridCalculator.CalculateGridLevels(currentPrice, newParams);
 
                 await UpdateOrderSizesAsync(marketId, newLevels, newLevels.Count, ct).ConfigureAwait(false);

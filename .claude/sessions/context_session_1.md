@@ -206,5 +206,75 @@ The code reviewer found and we fixed three critical race conditions:
 - Subscribes to `StateChanged` in `OnInitialized()`
 - Unsubscribes in `Dispose()` - no memory leak
 
+---
+
+## Session 2: Grid Rebuild Loop Bug Fix (2025-12-07)
+
+### Problem Reported
+Grid orders were being created, then all cancelled, and new ones opened in an infinite loop every few seconds.
+
+### Log Evidence
+```
+10:19:25.709 - Grid initialized for market 1: 12 orders, spacing=0.42%, width=5.00%
+10:19:29.229 - Rebuilding grid for market 1: ATR changed significantly (52 %)
+```
+Grid was rebuilt just 4 seconds after initialization due to false 52% ATR change detection.
+
+### Root Cause Analysis
+
+**Bug #1: ATR Spacing Calculation Mismatch (PRIMARY)**
+
+Location: `GridLifecycleService.cs:301-318`
+
+During **initialization** (line 145):
+```csharp
+var parameters = _gridCalculator.CalculateGridParameters(currentPrice, atr, atrPercent);
+```
+This method applies width constraints and produces `effectiveSpacing`.
+
+During **update check** (line 301, before fix):
+```csharp
+var currentSpacing = _gridCalculator.CalculateGridSpacingFromAtr(atrPercent);
+```
+This method uses simple threshold-based calculation WITHOUT constraint application.
+
+**Result:** Two different spacing values for the same ATR input, causing false rebuild triggers.
+
+**Bug #2: CancelAllOrders Cancels ALL Markets (DOCUMENTED)**
+
+Location: `LighterCommandClient.cs:247-261`
+
+The native signing library's `SignCancelAllOrders` cancels ALL orders across ALL markets.
+The `marketId` parameter is kept for interface compatibility but is NOT used for filtering.
+
+```csharp
+// NOTE: The native signing library cancels ALL orders across all markets.
+// The marketId parameter is kept for interface compatibility but is NOT used for filtering.
+```
+
+### Fix Applied
+
+**File Modified:** `GridLifecycleService.cs`
+
+Changed the ATR change detection to use `CalculateGridParameters` instead of `CalculateGridSpacingFromAtr`:
+
+```csharp
+// Before (BUGGY):
+var currentSpacing = _gridCalculator.CalculateGridSpacingFromAtr(atrPercent);
+
+// After (FIXED):
+var proposedParams = _gridCalculator.CalculateGridParameters(currentPrice, atr, atrPercent);
+var currentSpacing = proposedParams.GridSpacing;
+```
+
+Also optimized rebuild to reuse `proposedParams` instead of recalculating.
+
+### Build Status
+- Solution builds successfully with 0 warnings, 0 errors
+
+### Known Limitation (Not Fixed)
+`CancelAllOrdersAsync` still cancels ALL orders across ALL markets due to native library limitation.
+This is acceptable for single-market trading but should be addressed for multi-market support.
+
 ## Session Complete
-Migration fully completed on 2025-12-07. The GridBot project now has a simplified architecture with the dashboard integrated directly into the ApiService.
+Grid rebuild loop bug fixed on 2025-12-07.
