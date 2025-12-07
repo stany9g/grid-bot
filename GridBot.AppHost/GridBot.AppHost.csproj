@@ -10,7 +10,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\GridBot.ApiService\GridBot.ApiService.csproj" />
-    <ProjectReference Include="..\GridBot.Web\GridBot.Web.csproj" />
   </ItemGroup>
 
   <ItemGroup>

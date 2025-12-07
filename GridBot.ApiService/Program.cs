@@ -1,13 +1,16 @@
+using GridBot.ApiService.Components;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Extensions;
 using GridBot.ApiService.Models.Dashboard;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Dashboard;
 using GridBot.ApiService.Services.DecisionEngine;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.Lighter;
+using MudBlazor.Services;
 using Scalar.AspNetCore;
 
 public partial class Program
@@ -40,14 +43,29 @@ public partial class Program
         // Learn more about configuring OpenAPI at https://aka.ms/aspnet/opentapi
         builder.Services.AddOpenApi();
 
+        // Add MudBlazor services
+        builder.Services.AddMudServices();
+
+        // Add Razor Components with Interactive Server mode
+        builder.Services.AddRazorComponents()
+            .AddInteractiveServerComponents();
+
+        // Register dashboard state service as both a singleton and a hosted service
+        builder.Services.AddSingleton<DashboardStateService>();
+        builder.Services.AddSingleton<IDashboardStateService>(sp => sp.GetRequiredService<DashboardStateService>());
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardStateService>());
+
         var app = builder.Build();
 
         // Configure the HTTP request pipeline.
         app.UseExceptionHandler();
 
-       
-            app.MapOpenApi();
-            app.MapScalarApiReference();
+        // Add static file serving and antiforgery for Blazor
+        app.UseAntiforgery();
+        app.MapStaticAssets();
+
+        app.MapOpenApi();
+        app.MapScalarApiReference();
 
 
         var lighter = app.MapGroup("/api/lighter")
@@ -1020,6 +1038,10 @@ public partial class Program
         .WithDescription("Forces immediate return to full active trading. Use with caution - bypasses recovery procedure.");
 
         app.MapDefaultEndpoints();
+
+        // Map Razor components for Blazor Server dashboard
+        app.MapRazorComponents<App>()
+            .AddInteractiveServerRenderMode();
 
         // Initialize market resolver before starting the application
         var marketResolver = app.Services.GetRequiredService<IMarketResolver>();
