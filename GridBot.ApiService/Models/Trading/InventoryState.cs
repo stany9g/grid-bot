@@ -1,30 +1,33 @@
 namespace GridBot.ApiService.Models.Trading;
 
 /// <summary>
-/// Represents the current inventory allocation state for trend-based position management.
+/// Represents the current inventory/exposure state for trend-based position management.
+/// For perpetual futures: skew ranges from -100% (fully short) to +100% (fully long).
 /// </summary>
 public sealed class InventoryState
 {
     /// <summary>
-    /// Current percentage allocated to crypto (0 to 100).
+    /// Current position exposure percentage (-100 to +100 for perpetuals).
+    /// Positive = long exposure, Negative = short exposure, Zero = flat.
     /// </summary>
-    public decimal CryptoAllocation { get; set; } = 50m;
+    public decimal CryptoAllocation { get; set; } = 0m;
 
     /// <summary>
-    /// Current percentage allocated to USDT (0 to 100).
-    /// Should equal 100 - CryptoAllocation.
+    /// Collateral/margin percentage. For perpetuals, represents available margin.
     /// </summary>
-    public decimal UsdtAllocation { get; set; } = 50m;
+    public decimal UsdtAllocation { get; set; } = 100m;
 
     /// <summary>
-    /// Target crypto percentage based on current trend state (0 to 100).
+    /// Target exposure percentage based on current trend state (-100 to +100).
+    /// Positive = long target, Negative = short target, Zero = flat.
     /// </summary>
-    public decimal TargetSkew { get; set; } = 50m;
+    public decimal TargetSkew { get; set; } = 0m;
 
     /// <summary>
-    /// Current crypto percentage (same as CryptoAllocation, for clarity).
+    /// Current exposure percentage (-100 to +100).
+    /// Positive = long, Negative = short, Zero = flat.
     /// </summary>
-    public decimal CurrentSkew { get; set; } = 50m;
+    public decimal CurrentSkew { get; set; } = 0m;
 
     /// <summary>
     /// Whether a rebalance is needed based on tolerance threshold.
@@ -34,7 +37,7 @@ public sealed class InventoryState
 
     /// <summary>
     /// The delta needed to reach target skew.
-    /// Positive = need more crypto, Negative = need more USDT.
+    /// Positive = need to increase exposure (buy/cover), Negative = need to reduce exposure (sell/short).
     /// </summary>
     public decimal RebalanceDelta { get; set; }
 
@@ -50,17 +53,18 @@ public sealed class InventoryState
 
     /// <summary>
     /// Returns the target skew percentage for a given trend state.
+    /// For perpetual futures: negative values indicate short exposure targets.
     /// </summary>
     public static decimal GetTargetSkewForTrend(TrendState trend)
     {
         return trend switch
         {
-            TrendState.StrongBull => 80m,
-            TrendState.MildBull => 70m,
-            TrendState.Neutral => 50m,
-            TrendState.MildBear => 30m,
-            TrendState.StrongBear => 20m,
-            _ => 50m
+            TrendState.StrongBull => 80m,    // +80% long exposure
+            TrendState.MildBull => 50m,      // +50% long exposure
+            TrendState.Neutral => 0m,        // 0% = flat (no position)
+            TrendState.MildBear => -50m,     // -50% short exposure
+            TrendState.StrongBear => -80m,   // -80% short exposure
+            _ => 0m                          // Default to flat
         };
     }
 

@@ -48,6 +48,12 @@ public sealed class LighterCommandClient : ILighterCommandClient
         _jsonOptions = CreateJsonOptions();
     }
 
+    /// <summary>
+    /// Gets the underlying signer client for auth token generation.
+    /// Used by WebSocket client for private channel authentication.
+    /// </summary>
+    internal SignerClient Signer => _signer;
+
 
     /// <summary>
     /// Creates and submits a limit, market, stop-loss, or take-profit order in a single operation.

@@ -76,8 +76,10 @@ public sealed class InventoryManager : IInventoryManager
         var rebalanceNeeded = ShouldRebalance(currentSkew, targetSkew, trendOptions.RebalanceTolerancePercent);
         var isEmergency = IsEmergencyRebalance(currentSkew, targetSkew);
 
-        // Detect bootstrap mode (no position)
-        var isBootstrapMode = positionSize == 0;
+        // For perpetual futures, position = 0 (flat) is normal operation, not a bootstrap condition.
+        // Unlike spot trading where you need inventory to sell, perpetuals allow opening
+        // long or short positions freely. Bootstrap mode is not applicable.
+        var isBootstrapMode = false;
 
         // Get acceptable range for current trend
         var (minSkew, maxSkew) = GetAcceptableSkewRange(currentTrendState);
@@ -86,18 +88,23 @@ public sealed class InventoryManager : IInventoryManager
         var skewDeviation = Math.Abs(currentSkew - targetSkew);
 
         // Determine if skew correction is needed
+        // For perpetual futures: works with both positive (long) and negative (short) skews
         var skewCorrectionMode = false;
         var correctionDirection = SkewCorrectionDirection.None;
 
         if (currentSkew > maxSkew)
         {
+            // Current exposure is higher than maximum acceptable
+            // Need to reduce exposure (sell if long, increase short if short)
             skewCorrectionMode = true;
-            correctionDirection = SkewCorrectionDirection.NeedLessCrypto;
+            correctionDirection = SkewCorrectionDirection.ReduceExposure;
         }
-        else if (currentSkew < minSkew && !isBootstrapMode)
+        else if (currentSkew < minSkew)
         {
+            // Current exposure is lower than minimum acceptable
+            // Need to increase exposure (buy if flat/long, cover if short)
             skewCorrectionMode = true;
-            correctionDirection = SkewCorrectionDirection.NeedMoreCrypto;
+            correctionDirection = SkewCorrectionDirection.IncreaseExposure;
         }
 
         // Determine rebalance direction
@@ -171,6 +178,7 @@ public sealed class InventoryManager : IInventoryManager
     /// <summary>
     /// Gets the acceptable skew range for a given trend state.
     /// These ranges define when skew correction mode is triggered.
+    /// For perpetual futures: supports negative ranges for short positions.
     /// </summary>
     /// <param name="trend">Current trend state.</param>
     /// <returns>Tuple of (min, max) acceptable skew percentages.</returns>
@@ -178,12 +186,12 @@ public sealed class InventoryManager : IInventoryManager
     {
         return trend switch
         {
-            TrendState.StrongBull => (60m, 95m),
-            TrendState.MildBull => (50m, 85m),
-            TrendState.Neutral => (35m, 65m),
-            TrendState.MildBear => (15m, 50m),
-            TrendState.StrongBear => (5m, 40m),
-            _ => (30m, 70m)  // Default neutral range
+            TrendState.StrongBull => (60m, 95m),     // +60% to +95% long
+            TrendState.MildBull => (30m, 70m),       // +30% to +70% long
+            TrendState.Neutral => (-20m, 20m),       // -20% to +20% (slightly flat)
+            TrendState.MildBear => (-70m, -30m),     // -30% to -70% short
+            TrendState.StrongBear => (-95m, -60m),   // -60% to -95% short
+            _ => (-20m, 20m)                         // Default neutral range
         };
     }
 
@@ -201,15 +209,17 @@ public sealed class InventoryManager : IInventoryManager
 
         if (position != null && decimal.TryParse(position.Positionn, NumberStyles.Number, CultureInfo.InvariantCulture, out var size))
         {
-            // Position size is typically in base asset units
-            positionSize = size;
+            // Position size is in base asset units
+            // CRITICAL: Multiply by Sign to get signed position value
+            // Sign: 1 = Long, -1 = Short, 0 = None
+            positionSize = size * position.Sign;
         }
 
-        // Calculate crypto value in USD
-        var cryptoValueUsd = Math.Abs(positionSize) * currentPrice;
+        // Calculate crypto value in USD - PRESERVE SIGN for perpetual futures
+        // Positive = long exposure, Negative = short exposure
+        var cryptoValueUsd = positionSize * currentPrice;
 
-        // The "USDT" balance is the collateral minus margin used
-        // For simplicity, we use collateral as the quote balance
+        // The "USDT" balance is the collateral (margin)
         var usdtBalance = collateral;
 
         // Total portfolio = collateral (which includes unrealized PnL in Lighter)
@@ -218,10 +228,10 @@ public sealed class InventoryManager : IInventoryManager
         // If we have a position, its unrealized PnL is already included in collateral by Lighter
         // API returns human-readable values, no scaling needed
 
-        // Ensure we have a valid total
+        // Ensure we have a valid total (use absolute crypto value for total calculation)
         if (totalPortfolioUsd <= 0)
         {
-            totalPortfolioUsd = cryptoValueUsd + usdtBalance;
+            totalPortfolioUsd = Math.Abs(cryptoValueUsd) + usdtBalance;
         }
 
         return (cryptoValueUsd, usdtBalance, totalPortfolioUsd, positionSize);
@@ -279,20 +289,23 @@ public sealed class InventoryManager : IInventoryManager
         SkewCorrectionDirection correctionDirection,
         TrendState trendState)
     {
+        // Note: isBootstrapMode is always false for perpetuals, but kept for API compatibility
         if (isBootstrapMode)
         {
-            return $"BOOTSTRAP: No position (0% crypto). Buy-only mode to build initial position. Target={targetSkew:F1}% (Trend: {trendState}).";
+            return $"FLAT: No position (0% exposure). Symmetric grid active. Target={targetSkew:F1}% (Trend: {trendState}).";
         }
 
         if (skewCorrectionMode)
         {
-            var action = correctionDirection == SkewCorrectionDirection.NeedMoreCrypto ? "buy more" : "sell more";
+            var action = correctionDirection == SkewCorrectionDirection.IncreaseExposure
+                ? "increase exposure (buy/cover)"
+                : "reduce exposure (sell/short)";
             return $"SKEW CORRECTION: Current={currentSkew:F1}% outside acceptable range. Grid biased to {action}. Target={targetSkew:F1}% (Trend: {trendState}).";
         }
 
         if (!rebalanceNeeded)
         {
-            return $"Inventory balanced. Current={currentSkew:F1}%, Target={targetSkew:F1}% (Trend: {trendState}). Delta {delta:F1}% within tolerance.";
+            return $"Exposure balanced. Current={currentSkew:F1}%, Target={targetSkew:F1}% (Trend: {trendState}). Delta {delta:F1}% within tolerance.";
         }
 
         if (isEmergency)
@@ -300,7 +313,7 @@ public sealed class InventoryManager : IInventoryManager
             return $"EMERGENCY: Delta {delta:F1}% exceeds 30%. Force rebalance from {currentSkew:F1}% to {targetSkew:F1}% (Trend: {trendState}).";
         }
 
-        var rebalanceAction = delta > 0 ? "BUY crypto" : "SELL crypto";
+        var rebalanceAction = delta > 0 ? "INCREASE exposure (buy/cover)" : "REDUCE exposure (sell/short)";
         return $"Rebalance needed: {rebalanceAction} to move from {currentSkew:F1}% to {targetSkew:F1}% (Trend: {trendState}). Delta={delta:F1}%.";
     }
 }

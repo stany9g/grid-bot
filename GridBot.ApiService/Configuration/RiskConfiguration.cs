@@ -60,16 +60,19 @@ public sealed class RiskConfiguration : IRiskConfiguration
     public int DecisionLoopIntervalMs => Options.DecisionLoopIntervalMs;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// For perpetual futures: negative values indicate short exposure targets.
+    /// </remarks>
     public decimal GetTargetSkewForTrend(TrendState trend)
     {
         return trend switch
         {
-            TrendState.StrongBull => 80m,
-            TrendState.MildBull => 70m,
-            TrendState.Neutral => 50m,
-            TrendState.MildBear => 30m,
-            TrendState.StrongBear => 20m,
-            _ => 50m
+            TrendState.StrongBull => 80m,    // +80% long exposure
+            TrendState.MildBull => 50m,      // +50% long exposure
+            TrendState.Neutral => 0m,        // 0% = flat (no position)
+            TrendState.MildBear => -50m,     // -50% short exposure
+            TrendState.StrongBear => -80m,   // -80% short exposure
+            _ => 0m                          // Default to flat
         };
     }
 

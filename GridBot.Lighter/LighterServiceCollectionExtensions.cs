@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace GridBot.Lighter;
 
@@ -122,6 +123,42 @@ public static class LighterServiceCollectionExtensions
 
             Console.WriteLine("[LighterClient] SignerClient initialized successfully");
             return new LighterCommandClient(queryClient, writeClient, signer);
+        });
+
+        // Register SignerClient as singleton for WebSocket auth token generation
+        services.AddSingleton(serviceProvider =>
+        {
+            // Get the signer from the command client (they share the same instance)
+            var commandClient = serviceProvider.GetRequiredService<ILighterCommandClient>();
+            return ((LighterCommandClient)commandClient).Signer;
+        });
+
+        return services;
+    }
+
+    /// <summary>
+    /// Adds the Lighter WebSocket client to the service collection.
+    /// Call this after AddLighterClient to ensure SignerClient is available.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">Configuration containing the "LighterWebSocket" section.</param>
+    /// <returns>The service collection for chaining.</returns>
+    public static IServiceCollection AddLighterWebSocket(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<WebSocketOptions>()
+            .Bind(configuration.GetSection(WebSocketOptions.SectionName));
+
+        // Register WebSocket client as singleton
+        services.AddSingleton<ILighterWebSocketClient>(serviceProvider =>
+        {
+            var signerClient = serviceProvider.GetRequiredService<SignerClient>();
+            var wsOptions = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebSocketOptions>>();
+            var lighterOptions = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<LighterOptions>>();
+            var logger = serviceProvider.GetRequiredService<ILogger<LighterWebSocketClient>>();
+
+            return new LighterWebSocketClient(signerClient, wsOptions, lighterOptions, logger);
         });
 
         return services;

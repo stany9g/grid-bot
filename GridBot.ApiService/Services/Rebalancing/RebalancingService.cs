@@ -116,10 +116,11 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
         if (analysis.IsEmergency)
         {
             // Emergency: force rebalance to within 15% of target, clamped to valid range
+            // For perpetual futures: allow negative values for short positions
             var emergencyTarget = Math.Clamp(
                 analysis.TargetSkew + (analysis.RebalanceDelta > 0 ? -15m : 15m),
-                10m,  // Never go below 10% crypto allocation
-                90m   // Never exceed 90% crypto allocation
+                -95m,  // Maximum short exposure (95% short)
+                95m    // Maximum long exposure (95% long)
             );
             targetDelta = emergencyTarget - analysis.CurrentSkew;
 

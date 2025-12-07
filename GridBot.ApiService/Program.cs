@@ -7,6 +7,7 @@ using GridBot.ApiService.Services.Dashboard;
 using GridBot.ApiService.Services.DecisionEngine;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
+using GridBot.ApiService.Services.Realtime;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.Lighter;
@@ -31,11 +32,23 @@ public partial class Program
         // Add Lighter client from configuration
         builder.Services.AddLighterClient(builder.Configuration);
 
+        // Add Lighter WebSocket client for real-time data streaming
+        builder.Services.AddLighterWebSocket(builder.Configuration);
+
+        // Register real-time state service (processes WebSocket channel events)
+        builder.Services.AddSingleton<ILighterRealtimeState, LighterRealtimeStateService>();
+        builder.Services.AddHostedService(sp =>
+            (LighterRealtimeStateService)sp.GetRequiredService<ILighterRealtimeState>());
+
         // Add state persistence services
         builder.Services.AddPersistence();
 
         // Add ALTE trading bot services
         builder.Services.AddTradingBot(builder.Configuration);
+
+        // Override IMarketDataService with HybridMarketDataService (WebSocket-first with REST fallback)
+        // This must come after AddTradingBot which registers the default MarketDataService
+        builder.Services.AddSingleton<IMarketDataService, HybridMarketDataService>();
 
         // Add services to the container.
         builder.Services.AddProblemDetails();

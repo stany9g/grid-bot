@@ -260,7 +260,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             var activeOrderCount = gridState.Levels.Count(l =>
                 l.Status == GridLevelStatus.Active && l.OrderId.HasValue);
             var inventory = _stateService.CurrentInventory;
-            var hasPosition = inventory.CurrentSkew > 5; // More than 5% crypto = has position
+            var hasPosition = Math.Abs(inventory.CurrentSkew) > 5; // More than 5% exposure (long or short) = has position
 
             if (activeOrderCount == 0 && hasPosition && gridState.Levels.Count > 0)
             {
@@ -638,21 +638,24 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         }
 
         // Determine correction direction based on current vs target skew
+        // This logic works for both long and short positions (perpetual futures)
         var skewDelta = inventory.CurrentSkew - inventory.TargetSkew;
 
-        if (skewDelta > 5) // Too much crypto - need to sell more
+        if (skewDelta > 5) // Current exposure higher than target - need to reduce exposure
         {
             // Per framework spec: buy orders = reduce by 75%, sell orders = increase by 50%
+            // For longs: sell more. For shorts: this means we're less short than we should be.
             _logger.LogDebug(
-                "Skew correction: Need less crypto. Skew={Current:F1}%, Target={Target:F1}%",
+                "Skew correction: Reduce exposure. Current={Current:F1}%, Target={Target:F1}%",
                 inventory.CurrentSkew, inventory.TargetSkew);
             return (0.25m, 1.5m);
         }
-        else if (skewDelta < -5) // Too little crypto - need to buy more
+        else if (skewDelta < -5) // Current exposure lower than target - need to increase exposure
         {
             // Per framework spec: buy orders = increase by 50%, sell orders = reduce by 75%
+            // For longs: buy more. For shorts: cover some position.
             _logger.LogDebug(
-                "Skew correction: Need more crypto. Skew={Current:F1}%, Target={Target:F1}%",
+                "Skew correction: Increase exposure. Current={Current:F1}%, Target={Target:F1}%",
                 inventory.CurrentSkew, inventory.TargetSkew);
             return (1.5m, 0.25m);
         }

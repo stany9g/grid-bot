@@ -1,12 +1,137 @@
-# Session Context - Native Library Crash Diagnosis
+# Session Context - Perpetual Futures Skew Management
 
 ## Date
 2025-12-07
 
-## Previous Task (Completed)
-Fixed critical race conditions in `DashboardStateService.cs` identified by the code reviewer.
+## Previous Tasks (Completed)
+1. Fixed critical race conditions in `DashboardStateService.cs`
+2. Fixed P/Invoke signature mismatch causing crashes on Raspberry Pi
 
 ## Current Task
+Define correct inventory/skew management behavior for perpetual futures trading, replacing the broken spot-trading model.
+
+## New Task: Perpetual Futures Skew Specification
+
+### Problem Statement
+The current inventory management system was designed for spot trading and fails for perpetual futures:
+- Uses `Math.Abs(position)` - ignores position direction
+- Skew range 0-100% cannot represent short positions
+- Target skew for bearish = 20% (reduced long) instead of negative (short)
+- Correction signals are inverted for short positions
+
+### Specification Created
+Full specification document created at:
+`C:\Users\stany\source\repos\plan\GridBot\.claude\doc\perpetual-futures-skew-specification.md`
+
+### Key Changes Defined
+
+1. **Skew Definition:** Signed exposure ratio from -100% to +100%
+   - Positive = Long exposure
+   - Zero = Flat (no position)
+   - Negative = Short exposure
+
+2. **New Target Skew Mapping:**
+   | Trend | Old Target | New Target |
+   |-------|------------|------------|
+   | StrongBull | 80% | +80% |
+   | MildBull | 70% | +50% |
+   | Neutral | 50% | 0% |
+   | MildBear | 30% | -50% |
+   | StrongBear | 20% | -80% |
+
+3. **Correction Directions:**
+   - Replace `NeedMoreCrypto`/`NeedLessCrypto` with `IncreaseExposure`/`ReduceExposure`
+
+4. **Cross-Zero Capability:** System must support transitioning from long to short and vice versa
+
+### Files Requiring Changes
+- `GridBot.ApiService/Services/Inventory/InventoryManager.cs` - Core calculation logic
+- `GridBot.ApiService/Models/Trading/InventoryState.cs` - Model definitions
+- `GridBot.ApiService/Models/Trading/InventoryAnalysis.cs` - Enums and analysis result
+- `GridBot.ApiService/Services/Grid/GridLifecycleService.cs` - Grid bias logic
+- `GridBot.ApiService/Services/Rebalancing/RebalancingService.cs` - Rebalance execution
+
+### Next Steps
+1. Review specification with dotnet-feature-builder for implementation
+2. Implement changes per specification
+3. Code review with csharp-code-reviewer
+4. Validate with trading-bot-auditor
+
+---
+
+## Code Review Results (2025-12-07)
+
+**Reviewer:** csharp-code-reviewer
+**Full Report:** `C:\Users\stany\source\repos\plan\GridBot\.claude\doc\code-review-perpetual-skew-changes-2025-12-07.md`
+
+### CRITICAL Issue Found
+
+**EC-002 Position Detection Broken for Short Positions**
+- **Location:** `GridLifecycleService.cs:263`
+- **Problem:** The check `inventory.CurrentSkew > 5` only detects LONG positions. Short positions (negative skew) will not trigger the EC-002 safety mechanism when orders are externally cancelled.
+- **Fix Required:**
+  ```csharp
+  // OLD:
+  var hasPosition = inventory.CurrentSkew > 5;
+
+  // NEW:
+  var hasPosition = Math.Abs(inventory.CurrentSkew) > 5;
+  ```
+
+### Verified Correct
+1. `InventoryManager.CalculatePortfolioValues` - Position sign handling is correct (`size * position.Sign`)
+2. Enum rename complete - No remaining `NeedMoreCrypto`/`NeedLessCrypto` in code
+3. All negative skew comparisons work correctly
+4. Thread safety is maintained
+
+### Status
+- CRITICAL fix required before deployment
+- Implementation agent should fix `GridLifecycleService.cs:263`
+
+---
+
+## Trading Bot Audit Results (2025-12-07)
+
+**Auditor:** trading-bot-auditor
+**Full Report:** `C:\Users\stany\source\repos\plan\GridBot\.claude\doc\trading-bot-audit-perpetual-futures-skew.md`
+
+### Overall Verdict: CONDITIONAL PASS
+
+### Audit Questions Assessment
+
+| Question | Verdict | Notes |
+|----------|---------|-------|
+| Position Sign Logic | PASS | `size * position.Sign` correctly produces negative skew for shorts |
+| Target Skew in Bear Markets | PASS | -80% for StrongBear is intentional design for directional trading |
+| Skew Correction for Shorts | PASS | When short -50%, target -80%, correctly triggers ReduceExposure |
+| Crossing Zero | CONDITIONAL | Works but no explicit two-phase handling |
+| MoonBag Interaction | PASS | Correctly resets on direction change |
+| Risk Considerations | CONDITIONAL | Safe at 1x leverage, needs validation for higher |
+
+### Findings Summary
+
+**MEDIUM Risk (2):**
+1. **FINDING-001:** No explicit cross-zero logic - large rebalances attempted in single order
+2. **FINDING-002:** No leverage validation - system assumes 1x but doesn't verify
+
+**LOW Risk (3):**
+3. **FINDING-003:** Potential skew correction oscillation (needs hysteresis)
+4. **FINDING-004:** EC-002 check broken for shorts (confirmed by code review)
+5. **FINDING-005:** RebalanceDirection enum uses spot-era naming (cosmetic)
+
+### Numerical Verification (Correct)
+- Short -0.1 BTC at $90k with $9k collateral = -100% skew (CORRECT)
+- Short -50% to target -80%: triggers ReduceExposure (CORRECT)
+- Grid bias: buy=0.25x, sell=1.5x to increase short (CORRECT)
+
+### Deployment Recommendation
+1. **REQUIRED:** Fix FINDING-004 (EC-002 position detection)
+2. **RECOMMENDED:** Add leverage validation (FINDING-002)
+3. **MONITOR:** Cross-zero transitions, skew oscillation
+
+---
+
+## Previous Task Context (Reference Only)
 Investigate and fix silent crash on Raspberry Pi Docker deployment. The service was failing without error logs after showing:
 ```
 Found 2 existing orders on exchange for market 1. Cancelling all before grid initialization.

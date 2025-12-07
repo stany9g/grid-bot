@@ -24,6 +24,7 @@ public enum RebalanceDirection
 /// <summary>
 /// Direction of skew correction needed for inventory management.
 /// Used when skew is outside acceptable range for current trend.
+/// For perpetual futures: handles both long and short positions.
 /// </summary>
 public enum SkewCorrectionDirection
 {
@@ -33,44 +34,50 @@ public enum SkewCorrectionDirection
     None,
 
     /// <summary>
-    /// Need more crypto - buy more aggressively, reduce sells.
+    /// Need to increase exposure - buy more (if flat/long) or cover short (if short).
+    /// Used when current skew is below the minimum acceptable range.
     /// </summary>
-    NeedMoreCrypto,
+    IncreaseExposure,
 
     /// <summary>
-    /// Need less crypto - sell more aggressively, reduce buys.
+    /// Need to reduce exposure - sell (if long) or open/add short (if flat/short).
+    /// Used when current skew is above the maximum acceptable range.
     /// </summary>
-    NeedLessCrypto
+    ReduceExposure
 }
 
 /// <summary>
-/// Result of inventory analysis containing current allocations and rebalance requirements.
+/// Result of inventory analysis containing current exposure and rebalance requirements.
+/// For perpetual futures: skew ranges from -100% (fully short) to +100% (fully long).
 /// </summary>
 public sealed class InventoryAnalysis
 {
     /// <summary>
-    /// Current crypto allocation percentage (0-100).
+    /// Current position exposure percentage (-100 to +100 for perpetuals).
+    /// Positive = long exposure, Negative = short exposure, Zero = flat.
     /// </summary>
     public decimal CryptoAllocation { get; init; }
 
     /// <summary>
-    /// Current USDT allocation percentage (0-100).
+    /// USDT allocation percentage. For perpetuals, this represents collateral.
     /// </summary>
     public decimal UsdtAllocation { get; init; }
 
     /// <summary>
-    /// Current crypto skew percentage (same as CryptoAllocation).
+    /// Current position exposure percentage (-100 to +100).
+    /// Positive = long, Negative = short, Zero = flat.
     /// </summary>
     public decimal CurrentSkew { get; init; }
 
     /// <summary>
-    /// Target crypto skew percentage based on trend state.
+    /// Target exposure percentage based on trend state (-100 to +100).
+    /// Positive = long target, Negative = short target, Zero = flat.
     /// </summary>
     public decimal TargetSkew { get; init; }
 
     /// <summary>
     /// Delta between current and target skew.
-    /// Positive = need more crypto, Negative = need less crypto.
+    /// Positive = need to increase exposure (buy/cover), Negative = need to reduce exposure (sell/short).
     /// </summary>
     public decimal RebalanceDelta { get; init; }
 
@@ -105,12 +112,12 @@ public sealed class InventoryAnalysis
     public decimal TotalPortfolioValueUsd { get; init; }
 
     /// <summary>
-    /// Total crypto value in USD.
+    /// Position value in USD (signed: positive for long, negative for short).
     /// </summary>
     public decimal CryptoValueUsd { get; init; }
 
     /// <summary>
-    /// USDT balance.
+    /// Collateral/margin balance in USD.
     /// </summary>
     public decimal UsdtBalance { get; init; }
 
@@ -122,12 +129,13 @@ public sealed class InventoryAnalysis
 
     /// <summary>
     /// Direction of skew correction needed.
+    /// IncreaseExposure = buy/cover, ReduceExposure = sell/short.
     /// </summary>
     public SkewCorrectionDirection CorrectionDirection { get; init; }
 
     /// <summary>
-    /// Whether this is a bootstrap scenario (position = 0).
-    /// In bootstrap mode, only buy orders should be placed.
+    /// Not applicable for perpetual futures. Always false.
+    /// For perpetuals, flat position (0) is normal operation, not bootstrap.
     /// </summary>
     public bool IsBootstrapMode { get; init; }
 
@@ -149,17 +157,18 @@ public sealed class InventoryAnalysis
 
     /// <summary>
     /// Empty inventory analysis for use when no data is available.
+    /// Defaults to neutral/flat position for perpetual futures.
     /// </summary>
     public static InventoryAnalysis Empty { get; } = new()
     {
-        CryptoAllocation = 50m,
-        UsdtAllocation = 50m,
-        CurrentSkew = 50m,
-        TargetSkew = 50m,
+        CryptoAllocation = 0m,
+        UsdtAllocation = 100m,
+        CurrentSkew = 0m,
+        TargetSkew = 0m,
         Direction = RebalanceDirection.None,
         CorrectionDirection = SkewCorrectionDirection.None,
-        AcceptableSkewMin = 35m,
-        AcceptableSkewMax = 65m,
+        AcceptableSkewMin = -20m,
+        AcceptableSkewMax = 20m,
         Reason = "No data available"
     };
 }

@@ -172,19 +172,20 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
         // Handle skew correction mode
         if (inventoryAnalysis.SkewCorrectionMode)
         {
-            var direction = inventoryAnalysis.CorrectionDirection == SkewCorrectionDirection.NeedMoreCrypto
-                ? "buying" : "selling";
+            // For perpetual futures: IncreaseExposure = buy/cover, ReduceExposure = sell/short
+            var direction = inventoryAnalysis.CorrectionDirection == SkewCorrectionDirection.IncreaseExposure
+                ? "increasing exposure (buying/covering)" : "reducing exposure (selling/shorting)";
 
             if (currentState != TradingState.Degraded_SkewCorrection)
             {
                 _logger.LogInformation(
-                    "Skew correction mode on market {MarketId}. Current={CurrentSkew:F1}%, Target range [{Min:F1}%-{Max:F1}%] requires more {Direction}.",
+                    "Skew correction mode on market {MarketId}. Current={CurrentSkew:F1}%, Target range [{Min:F1}%-{Max:F1}%] requires {Direction}.",
                     marketId, inventoryAnalysis.CurrentSkew,
                     inventoryAnalysis.AcceptableSkewMin, inventoryAnalysis.AcceptableSkewMax, direction);
 
                 await _tradingStateService.TransitionToAsync(
                     TradingState.Degraded_SkewCorrection,
-                    $"Correcting skew via {direction}");
+                    $"Correcting skew: {direction}");
             }
             return;
         }
