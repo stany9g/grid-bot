@@ -40,11 +40,14 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       OTEL_SERVICE_NAME: "apiservice"
       ASPNETCORE_ENVIRONMENT: Development
+      Logging__FilePath: "/var/log/gridbot"
     ports:
     - target: 8080
       published: 10000
     - target: 8443
       published: 10001
+    volumes:
+    - /var/log/gridbot:/var/log/gridbot
     restart: unless-stopped
   webfrontend:
     container_name: "webfrontend"
@@ -65,9 +68,12 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       OTEL_SERVICE_NAME: "webfrontend"
       ASPNETCORE_ENVIRONMENT: Development
+      Logging__FilePath: "/var/log/gridbot"
     ports:
     - target: 8080
       published: 10002
     - target: 8443
       published: 10003
+    volumes:
+    - /var/log/gridbot:/var/log/gridbot
     restart: unless-stopped
