@@ -30,6 +30,16 @@ public class SignerClient : IDisposable
     public int ChainId { get; private set; }
 
     /// <summary>
+    /// Validates that the native signing library can be loaded.
+    /// Call this at startup before using any signing operations.
+    /// </summary>
+    /// <returns>Null if the library is valid, error message otherwise.</returns>
+    public static string? ValidateNativeLibrary()
+    {
+        return NativeMethods.ValidateNativeLibrary();
+    }
+
+    /// <summary>
     /// Generates a new API key pair.
     /// </summary>
     /// <param name="seed">Optional seed string for deterministic key generation.</param>
@@ -108,17 +118,19 @@ public class SignerClient : IDisposable
                 request.MarketIndex,
                 request.ClientOrderIndex,
                 request.BaseAmount,
-                request.Price,
+                (int)request.Price,
                 request.IsAsk ? 1 : 0,
                 (int)request.OrderType,
                 (int)request.TimeInForce,
                 request.ReduceOnly ? 1 : 0,
                 request.TriggerPrice,
                 request.OrderExpiry,
-                nonce
+                nonce,
+                ApiKeyIndex,
+                AccountIndex
             );
 
-            return ProcessStrOrErr(result);
+            return ProcessSignedTxResponse(result);
         });
     }
 
@@ -176,10 +188,12 @@ public class SignerClient : IDisposable
                     (byte)request.GroupingType,
                     ordersPtr,
                     nativeOrders.Length,
-                    nonce
+                    nonce,
+                    ApiKeyIndex,
+                    AccountIndex
                 );
 
-                return ProcessStrOrErr(result);
+                return ProcessSignedTxResponse(result);
             }
             finally
             {
@@ -214,37 +228,37 @@ public class SignerClient : IDisposable
         return await Task.Run(() =>
         {
             long nonce = GetNextNonce();
-            var result = NativeMethods.SignCancelOrder(marketIndex, orderId, nonce);
-            return ProcessStrOrErr(result);
+            var result = NativeMethods.SignCancelOrder(marketIndex, orderId, nonce, ApiKeyIndex, AccountIndex);
+            return ProcessSignedTxResponse(result);
         });
     }
 
     /// <summary>
-    /// Signs a request to cancel all orders in a specific market.
+    /// Signs a request to cancel all orders.
+    /// Note: The native function cancels all orders across all markets - there is no market filter.
     /// </summary>
-    /// <param name="marketIndex">Market identifier.</param>
-    /// <param name="cancelTimestampMs">Unix timestamp in milliseconds. Orders created before this timestamp will be cancelled.
-    /// If 0 is passed, defaults to current time + 5 minutes. Must be greater than 0 when sent to the API.</param>
+    /// <param name="timeInForce">Time-in-force for the cancellation (0 = immediate).</param>
+    /// <param name="cancelTimestampMs">Unix timestamp in milliseconds. Pass 0 to cancel all orders immediately (recommended).
+    /// Non-zero values filter by order creation time.</param>
     /// <returns>Tuple containing (txInfo, error). If error is not null, signing failed.</returns>
-    public async Task<(string? txInfo, string? error)> CancelAllOrdersAsync(int marketIndex, long cancelTimestampMs = 0)
+    public async Task<(string? txInfo, string? error)> CancelAllOrdersAsync(int timeInForce = 0, long cancelTimestampMs = 0)
     {
         if (!_isInitialized)
             return (null, "Client not initialized. Call InitializeAsync first.");
 
-        if (marketIndex < 0)
-            return (null, "MarketIndex must be non-negative");
-
         return await Task.Run(() =>
         {
             long nonce = GetNextNonce();
-            // If cancelTimestampMs is 0, use current time + 5 minutes as the cancel-all timestamp.
-            // The native library expects this to be a Unix timestamp in milliseconds > 0.
-            long effectiveTimestamp = cancelTimestampMs > 0
-                ? cancelTimestampMs
-                : DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds();
 
-            var result = NativeMethods.SignCancelAllOrders(marketIndex, effectiveTimestamp, nonce);
-            return ProcessStrOrErr(result);
+            // Log before P/Invoke call - helps diagnose native crashes
+            Console.WriteLine($"[SignerClient] Calling SignCancelAllOrders: timeInForce={timeInForce}, timestamp={cancelTimestampMs}, nonce={nonce}, apiKeyIndex={ApiKeyIndex}, accountIndex={AccountIndex}");
+            Console.Out.Flush();
+
+            // Pass timestamp as-is (0 = cancel all immediately, which is what we want)
+            var result = NativeMethods.SignCancelAllOrders(timeInForce, cancelTimestampMs, nonce, ApiKeyIndex, AccountIndex);
+
+            Console.WriteLine("[SignerClient] SignCancelAllOrders returned successfully");
+            return ProcessSignedTxResponse(result);
         });
     }
 
@@ -268,13 +282,15 @@ public class SignerClient : IDisposable
             var result = NativeMethods.SignModifyOrder(
                 request.MarketIndex,
                 request.OrderId,
-                request.NewClientOrderIndex,
                 request.NewBaseAmount,
                 request.NewPrice,
-                nonce
+                request.NewTriggerPrice,
+                nonce,
+                ApiKeyIndex,
+                AccountIndex
             );
 
-            return ProcessStrOrErr(result);
+            return ProcessSignedTxResponse(result);
         });
     }
 
@@ -297,12 +313,14 @@ public class SignerClient : IDisposable
             long nonce = GetNextNonce();
             var result = NativeMethods.SignUpdateLeverage(
                 request.MarketIndex,
+                request.InitialMarginFraction,
                 (int)request.MarginMode,
-                request.Leverage,
-                nonce
+                nonce,
+                ApiKeyIndex,
+                AccountIndex
             );
 
-            return ProcessStrOrErr(result);
+            return ProcessSignedTxResponse(result);
         });
     }
 
@@ -369,6 +387,15 @@ public class SignerClient : IDisposable
     private static (string? result, string? error) ProcessStrOrErr(StrOrErr response)
     {
         return (MarshalString(response.Str), MarshalString(response.Err));
+    }
+
+    /// <summary>
+    /// Processes a SignedTxResponse and returns a result tuple.
+    /// Uses TxInfo as the primary result for compatibility with existing code.
+    /// </summary>
+    private static (string? result, string? error) ProcessSignedTxResponse(SignedTxResponse response)
+    {
+        return (MarshalString(response.TxInfo), MarshalString(response.Err));
     }
 
     /// <summary>

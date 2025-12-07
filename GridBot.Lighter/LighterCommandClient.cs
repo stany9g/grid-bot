@@ -243,8 +243,10 @@ public sealed class LighterCommandClient : ILighterCommandClient
     /// Cancels all orders in a market in a single operation.
     /// Signs the cancellation locally and submits it to the API.
     /// Automatically retries with nonce resync if a nonce mismatch error occurs.
+    /// NOTE: The native signing library cancels ALL orders across all markets.
+    /// The marketId parameter is kept for interface compatibility but is NOT used for filtering.
     /// </summary>
-    /// <param name="marketId">Market ID.</param>
+    /// <param name="marketId">Market ID (NOTE: ignored - native library cancels all orders across all markets).</param>
     /// <param name="cancelTimestampMs">Unix timestamp in milliseconds. Orders created before this timestamp will be cancelled.
     /// If 0 is passed (default), the implementation will use current time + 5 minutes.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -255,11 +257,14 @@ public sealed class LighterCommandClient : ILighterCommandClient
         long cancelTimestampMs = 0,
         CancellationToken cancellationToken = default)
     {
+        // NOTE: marketId is ignored - native library doesn't support market-specific cancel all
+        Console.WriteLine($"[LighterCommandClient] CancelAllOrdersAsync called (marketId={marketId} is ignored - cancels ALL orders across all markets)");
+
         return await ExecuteWithNonceRetryAsync(
             async () =>
             {
-                // Sign the cancellation locally
-                var result = await _signer.CancelAllOrdersAsync(marketId, cancelTimestampMs);
+                // Sign the cancellation locally (timeInForce=0 means immediate)
+                var result = await _signer.CancelAllOrdersAsync(timeInForce: 0, cancelTimestampMs: cancelTimestampMs);
                 if (result.error != null)
                     throw new LighterApiException($"Failed to sign cancel all orders: {result.error}");
 

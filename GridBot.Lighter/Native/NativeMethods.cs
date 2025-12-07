@@ -8,7 +8,9 @@ namespace GridBot.Lighter.Native;
 /// </summary>
 internal static partial class NativeMethods
 {
-    private const string LibraryName = "signer-amd64";
+    private const string LibraryName = "lighter-signer-windows-amd64";
+    private static IntPtr _loadedLibrary = IntPtr.Zero;
+    private static string? _loadError;
 
     /// <summary>
     /// Static constructor to configure native library loading based on platform.
@@ -16,6 +18,63 @@ internal static partial class NativeMethods
     static NativeMethods()
     {
         NativeLibrary.SetDllImportResolver(typeof(NativeMethods).Assembly, DllImportResolver);
+    }
+
+    /// <summary>
+    /// Validates that the native library can be loaded. Call this at startup to catch issues early.
+    /// </summary>
+    /// <returns>Null if successful, error message if library cannot be loaded.</returns>
+    public static string? ValidateNativeLibrary()
+    {
+        try
+        {
+            var libPath = GetNativeLibraryPath();
+
+            Console.WriteLine($"[NativeLibrary] Validating native library...");
+            Console.WriteLine($"[NativeLibrary] Platform: {RuntimeInformation.OSDescription}");
+            Console.WriteLine($"[NativeLibrary] Architecture: {RuntimeInformation.ProcessArchitecture}");
+            Console.WriteLine($"[NativeLibrary] Library path: {libPath}");
+
+            if (!File.Exists(libPath))
+            {
+                return $"Native library not found at: {libPath}";
+            }
+
+            var fileInfo = new FileInfo(libPath);
+            Console.WriteLine($"[NativeLibrary] File size: {fileInfo.Length} bytes");
+
+            // Try to load the library
+            if (_loadedLibrary == IntPtr.Zero)
+            {
+                _loadedLibrary = NativeLibrary.Load(libPath);
+            }
+
+            if (_loadedLibrary == IntPtr.Zero)
+            {
+                return "NativeLibrary.Load returned null pointer";
+            }
+
+            Console.WriteLine($"[NativeLibrary] Library loaded successfully at 0x{_loadedLibrary:X}");
+            return null;
+        }
+        catch (DllNotFoundException ex)
+        {
+            _loadError = $"DllNotFoundException: {ex.Message}. This usually means a dependency is missing (e.g., libstdc++, libgcc).";
+            Console.WriteLine($"[NativeLibrary] ERROR: {_loadError}");
+            return _loadError;
+        }
+        catch (BadImageFormatException ex)
+        {
+            _loadError = $"BadImageFormatException: {ex.Message}. The library was compiled for a different architecture (expected: {RuntimeInformation.ProcessArchitecture}).";
+            Console.WriteLine($"[NativeLibrary] ERROR: {_loadError}");
+            return _loadError;
+        }
+        catch (Exception ex)
+        {
+            _loadError = $"{ex.GetType().Name}: {ex.Message}";
+            Console.WriteLine($"[NativeLibrary] ERROR: {_loadError}");
+            return _loadError;
+        }
     }
 
     /// <summary>
@@ -28,6 +87,12 @@ internal static partial class NativeMethods
             return IntPtr.Zero;
         }
 
+        // Return cached library if already loaded
+        if (_loadedLibrary != IntPtr.Zero)
+        {
+            return _loadedLibrary;
+        }
+
         string libPath = GetNativeLibraryPath();
 
         if (!File.Exists(libPath))
@@ -35,7 +100,8 @@ internal static partial class NativeMethods
             throw new FileNotFoundException($"Native library not found at: {libPath}");
         }
 
-        return NativeLibrary.Load(libPath);
+        _loadedLibrary = NativeLibrary.Load(libPath);
+        return _loadedLibrary;
     }
 
     /// <summary>
@@ -48,11 +114,31 @@ internal static partial class NativeMethods
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return Path.Combine(nativeDir, "signer-amd64.dll");
+            return Path.Combine(nativeDir, "lighter-signer-windows-amd64.dll");
         }
         else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
         {
-            return Path.Combine(nativeDir, "signer-arm64.so");
+            // Check architecture for Linux
+            var arch = RuntimeInformation.ProcessArchitecture;
+            if (arch == Architecture.Arm64)
+            {
+                return Path.Combine(nativeDir, "signer-arm64.so");
+            }
+            else if (arch == Architecture.X64)
+            {
+                // Fall back to arm64 if amd64 not available (for compatibility)
+                var amd64Path = Path.Combine(nativeDir, "signer-amd64.so");
+                if (File.Exists(amd64Path))
+                {
+                    return amd64Path;
+                }
+                Console.WriteLine($"[NativeLibrary] WARNING: Running on x64 but signer-amd64.so not found, trying arm64.so");
+                return Path.Combine(nativeDir, "signer-arm64.so");
+            }
+            else
+            {
+                throw new PlatformNotSupportedException($"Linux architecture {arch} is not supported. Supported: x64, arm64");
+            }
         }
         else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
@@ -107,20 +193,24 @@ internal static partial class NativeMethods
     /// <param name="triggerPrice">Trigger price for conditional orders (0 for none).</param>
     /// <param name="orderExpiry">Unix timestamp or -1 for 28-day default.</param>
     /// <param name="nonce">Transaction nonce.</param>
-    /// <returns>StrOrErr containing transaction info or error.</returns>
+    /// <param name="apiKeyIndex">API key index.</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>SignedTxResponse containing transaction info or error.</returns>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    internal static extern StrOrErr SignCreateOrder(
+    internal static extern SignedTxResponse SignCreateOrder(
         int marketIndex,
         long clientOrderIndex,
         long baseAmount,
-        long price,
+        int price,
         int isAsk,
         int orderType,
         int timeInForce,
         int reduceOnly,
         int triggerPrice,
         long orderExpiry,
-        long nonce);
+        long nonce,
+        int apiKeyIndex,
+        long accountIndex);
 
     /// <summary>
     /// Signs a grouped orders request (OCO, OTO, OTOCO).
@@ -129,75 +219,93 @@ internal static partial class NativeMethods
     /// <param name="orders">Pointer to array of CreateOrderTxReq structs.</param>
     /// <param name="ordersLength">Number of orders in the array.</param>
     /// <param name="nonce">Transaction nonce.</param>
-    /// <returns>StrOrErr containing transaction info or error.</returns>
+    /// <param name="apiKeyIndex">API key index.</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>SignedTxResponse containing transaction info or error.</returns>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    internal static extern StrOrErr SignCreateGroupedOrders(
+    internal static extern SignedTxResponse SignCreateGroupedOrders(
         byte groupingType,
         IntPtr orders,
         int ordersLength,
-        long nonce);
+        long nonce,
+        int apiKeyIndex,
+        long accountIndex);
 
     /// <summary>
     /// Signs a request to cancel a specific order.
     /// </summary>
     /// <param name="marketIndex">Market identifier.</param>
-    /// <param name="orderId">Order ID to cancel.</param>
+    /// <param name="orderIndex">Order index to cancel.</param>
     /// <param name="nonce">Transaction nonce.</param>
-    /// <returns>StrOrErr containing transaction info or error.</returns>
+    /// <param name="apiKeyIndex">API key index.</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>SignedTxResponse containing transaction info or error.</returns>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    internal static extern StrOrErr SignCancelOrder(
+    internal static extern SignedTxResponse SignCancelOrder(
         int marketIndex,
-        long orderId,
-        long nonce);
+        long orderIndex,
+        long nonce,
+        int apiKeyIndex,
+        long accountIndex);
 
     /// <summary>
-    /// Signs a request to cancel all orders in a market.
+    /// Signs a request to cancel all orders.
     /// </summary>
-    /// <param name="marketIndex">Market identifier.</param>
-    /// <param name="tif">Time-in-force for cancellation (0=immediate).</param>
+    /// <param name="timeInForce">Time-in-force for cancellation.</param>
+    /// <param name="time">Timestamp for cancellation.</param>
     /// <param name="nonce">Transaction nonce.</param>
-    /// <returns>StrOrErr containing transaction info or error.</returns>
+    /// <param name="apiKeyIndex">API key index.</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>SignedTxResponse containing transaction info or error.</returns>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    internal static extern StrOrErr SignCancelAllOrders(
-        int marketIndex,
-        long tif,
-        long nonce);
+    internal static extern SignedTxResponse SignCancelAllOrders(
+        int timeInForce,
+        long time,
+        long nonce,
+        int apiKeyIndex,
+        long accountIndex);
 
     /// <summary>
     /// Signs a request to modify an existing order.
     /// </summary>
     /// <param name="marketIndex">Market identifier.</param>
-    /// <param name="orderId">Order ID to modify.</param>
-    /// <param name="newClientOrderIndex">New client order index.</param>
-    /// <param name="newBaseAmount">New order size.</param>
-    /// <param name="newPrice">New order price.</param>
+    /// <param name="orderIndex">Order index to modify.</param>
+    /// <param name="baseAmount">New order size.</param>
+    /// <param name="price">New order price.</param>
+    /// <param name="triggerPrice">New trigger price.</param>
     /// <param name="nonce">Transaction nonce.</param>
-    /// <returns>StrOrErr containing transaction info or error.</returns>
+    /// <param name="apiKeyIndex">API key index.</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>SignedTxResponse containing transaction info or error.</returns>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    internal static extern StrOrErr SignModifyOrder(
+    internal static extern SignedTxResponse SignModifyOrder(
         int marketIndex,
-        long orderId,
-        long newClientOrderIndex,
-        long newBaseAmount,
-        long newPrice,
-        long nonce);
-
-
+        long orderIndex,
+        long baseAmount,
+        long price,
+        long triggerPrice,
+        long nonce,
+        int apiKeyIndex,
+        long accountIndex);
 
     /// <summary>
     /// Signs a request to update position leverage settings.
     /// </summary>
     /// <param name="marketIndex">Market identifier.</param>
+    /// <param name="initialMarginFraction">Initial margin fraction.</param>
     /// <param name="marginMode">0=cross, 1=isolated.</param>
-    /// <param name="leverage">Leverage multiplier.</param>
     /// <param name="nonce">Transaction nonce.</param>
-    /// <returns>StrOrErr containing transaction info or error.</returns>
+    /// <param name="apiKeyIndex">API key index.</param>
+    /// <param name="accountIndex">Account identifier.</param>
+    /// <returns>SignedTxResponse containing transaction info or error.</returns>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    internal static extern StrOrErr SignUpdateLeverage(
+    internal static extern SignedTxResponse SignUpdateLeverage(
         int marketIndex,
+        int initialMarginFraction,
         int marginMode,
-        int leverage,
-        long nonce);
+        long nonce,
+        int apiKeyIndex,
+        long accountIndex);
 
     /// <summary>
     /// Creates an authentication token for accessing private API endpoints.

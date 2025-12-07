@@ -27,7 +27,7 @@ internal struct ApiKeyResponse
 
 /// <summary>
 /// Generic response structure for operations that return a string result or error.
-/// Maps to the Go struct used by most signing operations.
+/// Maps to the Go StrOrErr struct.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct StrOrErr
@@ -36,6 +36,39 @@ internal struct StrOrErr
     /// Pointer to the result string (UTF-8) - typically transaction info or signed data.
     /// </summary>
     public IntPtr Str;
+
+    /// <summary>
+    /// Pointer to error message string (UTF-8) if operation failed, otherwise IntPtr.Zero.
+    /// </summary>
+    public IntPtr Err;
+}
+
+/// <summary>
+/// Response structure for transaction signing operations.
+/// Maps to the Go SignedTxResponse struct returned by all Sign* functions.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct SignedTxResponse
+{
+    /// <summary>
+    /// Transaction type identifier.
+    /// </summary>
+    public byte TxType;
+
+    /// <summary>
+    /// Pointer to transaction info JSON string (UTF-8).
+    /// </summary>
+    public IntPtr TxInfo;
+
+    /// <summary>
+    /// Pointer to transaction hash string (UTF-8).
+    /// </summary>
+    public IntPtr TxHash;
+
+    /// <summary>
+    /// Pointer to the message that was signed (UTF-8).
+    /// </summary>
+    public IntPtr MessageToSign;
 
     /// <summary>
     /// Pointer to error message string (UTF-8) if operation failed, otherwise IntPtr.Zero.

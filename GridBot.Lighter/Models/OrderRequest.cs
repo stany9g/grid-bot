@@ -213,11 +213,6 @@ public class ModifyOrderRequest
     public required long OrderId { get; init; }
 
     /// <summary>
-    /// New client order index (if changing).
-    /// </summary>
-    public required long NewClientOrderIndex { get; init; }
-
-    /// <summary>
     /// New order size in base asset units.
     /// </summary>
     public required long NewBaseAmount { get; init; }
@@ -226,6 +221,11 @@ public class ModifyOrderRequest
     /// New order price.
     /// </summary>
     public required long NewPrice { get; init; }
+
+    /// <summary>
+    /// New trigger price for stop/take-profit orders (0 if not applicable).
+    /// </summary>
+    public long NewTriggerPrice { get; init; } = 0;
 
     /// <summary>
     /// Validates the modify order request.
@@ -238,9 +238,6 @@ public class ModifyOrderRequest
 
         if (OrderId <= 0)
             return "OrderId must be positive";
-
-        if (NewClientOrderIndex <= 0)
-            return "NewClientOrderIndex must be positive";
 
         if (NewBaseAmount <= 0)
             return "NewBaseAmount must be positive";
@@ -263,14 +260,15 @@ public class UpdateLeverageRequest
     public required int MarketIndex { get; init; }
 
     /// <summary>
+    /// Initial margin fraction (determines leverage).
+    /// Higher values mean lower leverage. E.g., 1000 = 10% initial margin = 10x max leverage.
+    /// </summary>
+    public required int InitialMarginFraction { get; init; }
+
+    /// <summary>
     /// Margin mode (cross or isolated).
     /// </summary>
     public required MarginMode MarginMode { get; init; }
-
-    /// <summary>
-    /// Leverage multiplier (e.g., 10 for 10x leverage).
-    /// </summary>
-    public required int Leverage { get; init; }
 
     /// <summary>
     /// Validates the leverage update request.
@@ -281,8 +279,8 @@ public class UpdateLeverageRequest
         if (MarketIndex < 0)
             return "MarketIndex must be non-negative";
 
-        if (Leverage <= 0 || Leverage > 100)
-            return "Leverage must be between 1 and 100";
+        if (InitialMarginFraction <= 0)
+            return "InitialMarginFraction must be positive";
 
         return null;
     }

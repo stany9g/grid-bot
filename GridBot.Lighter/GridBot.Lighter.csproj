@@ -7,6 +7,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <ItemGroup>
+    <None Remove="Native\signer-amd64.dll" />
+  </ItemGroup>
+
 
   <ItemGroup>
     <!-- Dependencies for configuration and dependency injection -->
@@ -20,14 +24,14 @@
 
   <ItemGroup>
     <!-- Copy native libraries to output directory -->
-    <None Include="Native\signer-amd64.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Native\signer-amd64.dll</Link>
-    </None>
     <None Include="Native\signer-arm64.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>Native\signer-arm64.so</Link>
     </None>
+	  <None Include="Native\lighter-signer-windows-amd64.dll">
+		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		  <Link>Native\lighter-signer-windows-amd64.dll</Link>
+	  </None>
   </ItemGroup>
 
 </Project>

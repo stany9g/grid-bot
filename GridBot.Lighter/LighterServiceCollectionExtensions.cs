@@ -58,6 +58,15 @@ public static class LighterServiceCollectionExtensions
         if (validationError != null)
             throw new InvalidOperationException($"Lighter configuration is invalid: {validationError}");
 
+        // Validate native library early to catch platform/architecture issues
+        Console.WriteLine("[LighterClient] Validating native signing library...");
+        var nativeError = SignerClient.ValidateNativeLibrary();
+        if (nativeError != null)
+        {
+            throw new InvalidOperationException($"Native library validation failed: {nativeError}");
+        }
+        Console.WriteLine("[LighterClient] Native library validated successfully");
+
         // Register query client with HttpClientFactory
         services.AddHttpClient<ILighterQueryClient, LighterQueryClient>((serviceProvider, client) =>
         {
@@ -97,6 +106,7 @@ public static class LighterServiceCollectionExtensions
                 initialNonce = options.InitialNonce;
             }
 
+            Console.WriteLine("[LighterClient] Initializing SignerClient...");
             var signer = new SignerClient();
             var error = signer.InitializeAsync(
                 options.ApiUrl,
@@ -110,6 +120,7 @@ public static class LighterServiceCollectionExtensions
             if (error != null)
                 throw new InvalidOperationException($"Failed to initialize SignerClient: {error}");
 
+            Console.WriteLine("[LighterClient] SignerClient initialized successfully");
             return new LighterCommandClient(queryClient, writeClient, signer);
         });
 
