@@ -7,6 +7,7 @@ using GridBot.ApiService.Services.Capacity;
 using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
+using GridBot.ApiService.Services.Realtime;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.ApiService.Services.Telemetry;
@@ -37,6 +38,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     private readonly IMarketDataService _marketDataService;
     private readonly IRecoveryManager _recoveryManager;
     private readonly ILighterQueryClient _lighterClient;
+    private readonly ILighterRealtimeState _realtimeState;
     private readonly IOperationalCapacityService _capacityService;
 
     // Per-market state tracking
@@ -77,6 +79,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         IMarketDataService marketDataService,
         IRecoveryManager recoveryManager,
         ILighterQueryClient lighterClient,
+        ILighterRealtimeState realtimeState,
         IOperationalCapacityService capacityService)
     {
         ArgumentNullException.ThrowIfNull(logger);
@@ -92,6 +95,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         ArgumentNullException.ThrowIfNull(marketDataService);
         ArgumentNullException.ThrowIfNull(recoveryManager);
         ArgumentNullException.ThrowIfNull(lighterClient);
+        ArgumentNullException.ThrowIfNull(realtimeState);
         ArgumentNullException.ThrowIfNull(capacityService);
 
         _logger = logger;
@@ -107,6 +111,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         _marketDataService = marketDataService;
         _recoveryManager = recoveryManager;
         _lighterClient = lighterClient;
+        _realtimeState = realtimeState;
         _capacityService = capacityService;
     }
 
@@ -737,9 +742,43 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         }, ct);
         tasks.Add(priceTask);
 
-        // Position/Account fetch
+        // Position/Account fetch - WebSocket first, REST fallback
         var positionTask = Task.Run(async () =>
         {
+            // Try WebSocket first for account data (no API call needed)
+            var wsAccount = _realtimeState.GetAccount();
+            var isWsDataFresh = _realtimeState.OldestDataAge is null ||
+                                _realtimeState.OldestDataAge.Value < cacheValidity;
+
+            if (wsAccount is not null && _realtimeState.IsConnected && isWsDataFresh)
+            {
+                equity = wsAccount.Collateral;
+
+                // Get position from WebSocket snapshot
+                if (wsAccount.Positions.TryGetValue(marketId, out var wsPosition))
+                {
+                    // WebSocket PositionSnapshot.Size already includes sign (positive=long, negative=short)
+                    position = wsPosition.Size;
+                }
+                else
+                {
+                    position = 0m;
+                }
+
+                _positionCache[marketId] = (position, DateTimeOffset.UtcNow);
+                _logger.LogTrace(
+                    "Account data from WebSocket: equity={Equity:F2}, position={Position:F4}",
+                    equity, position);
+                return;
+            }
+
+            // Fall back to REST if WebSocket not available or data is stale
+            _logger.LogDebug(
+                "Using REST for account data (WS connected={IsConnected}, has data={HasData}, data fresh={IsFresh})",
+                _realtimeState.IsConnected,
+                wsAccount is not null,
+                isWsDataFresh);
+
             try
             {
                 var account = await _lighterClient.GetAccountAsync(_lighterOptions.AccountIndex, timeoutCts.Token)
@@ -755,7 +794,9 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                 var marketPosition = account.Positions?.FirstOrDefault(p => p.MarketId == marketId);
                 if (marketPosition is not null && decimal.TryParse(marketPosition.Positionn, NumberStyles.Number, CultureInfo.InvariantCulture, out var positionSize))
                 {
-                    position = positionSize;
+                    // CRITICAL: Sign indicates direction: 1=Long, -1=Short, 0=None
+                    // Must multiply by Sign to get signed position (positive=long, negative=short)
+                    position = positionSize * marketPosition.Sign;
                 }
                 else
                 {

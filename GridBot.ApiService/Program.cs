@@ -661,6 +661,7 @@ public partial class Program
             GridBot.ApiService.Services.Grid.IGridLifecycleService gridLifecycle,
             GridBot.ApiService.Services.MarketData.IMarketDataService marketDataService,
             GridBot.Lighter.ILighterQueryClient queryClient,
+            ILighterRealtimeState realtimeState,
             Microsoft.Extensions.Options.IOptions<GridBot.Lighter.LighterOptions> lighterOptions,
             IRiskConfiguration riskConfig,
             CancellationToken ct) =>
@@ -682,9 +683,27 @@ public partial class Program
                 var lossTask = lossMonitor.GetCurrentLossStatusAsync(marketId, ct);
                 var flashCrashTask = flashCrashDetector.CheckForFlashCrashAsync(marketId, ct);
                 var priceTask = marketDataService.GetCurrentPriceAsync(marketId, ct);
-                var accountTask = queryClient.GetAccountAsync(accountIndex, ct);
 
-                await Task.WhenAll(gridTask, moonBagTask, lossTask, flashCrashTask, priceTask, accountTask);
+                // Try WebSocket first for account data
+                var wsAccount = realtimeState.GetAccount();
+                var staleThreshold = TimeSpan.FromSeconds(30); // Same as HybridMarketDataService
+                var isWsDataFresh = realtimeState.OldestDataAge is null ||
+                                    realtimeState.OldestDataAge.Value < staleThreshold;
+                var useWebSocket = wsAccount is not null && realtimeState.IsConnected && isWsDataFresh;
+
+                // Only call REST if WebSocket not available or data is stale
+                Task<GridBot.Lighter.Models.Api.Account?>? accountTask = null;
+                if (!useWebSocket)
+                {
+                    accountTask = queryClient.GetAccountAsync(accountIndex, ct)!;
+                }
+
+                var tasksToAwait = new List<Task> { gridTask, moonBagTask, lossTask, flashCrashTask, priceTask };
+                if (accountTask is not null)
+                {
+                    tasksToAwait.Add(accountTask);
+                }
+                await Task.WhenAll(tasksToAwait);
 
                 var stateInfo = await stateTask;
                 var gridState = await gridTask;
@@ -692,7 +711,6 @@ public partial class Program
                 var lossStatus = await lossTask;
                 var flashCrashStatus = await flashCrashTask;
                 var currentPrice = await priceTask;
-                var account = await accountTask;
 
                 // Get decision engine metrics
                 var recoveryPhase = decisionEngine.GetCurrentRecoveryPhase(marketId);
@@ -701,22 +719,47 @@ public partial class Program
                 var consecutiveTimeouts = decisionEngine.GetConsecutiveTimeoutCount(marketId);
                 var lastDecisionResult = decisionEngine.GetLastDecisionResult(marketId);
 
-                // Parse account data
-                decimal.TryParse(account.Collateral, System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var equity);
-                decimal.TryParse(account.AvailableBalance, System.Globalization.NumberStyles.Any,
-                    System.Globalization.CultureInfo.InvariantCulture, out var availableBalance);
-
-                // Get position
-                var position = account.Positions.FirstOrDefault(p => p.MarketId == marketId);
+                // Get account data from WebSocket or REST
+                decimal equity = 0;
+                decimal availableBalance = 0;
                 decimal positionSize = 0;
                 decimal unrealizedPnl = 0;
-                if (position != null)
+
+                if (useWebSocket && wsAccount is not null)
                 {
-                    decimal.TryParse(position.PositionSize, System.Globalization.NumberStyles.Any,
-                        System.Globalization.CultureInfo.InvariantCulture, out positionSize);
-                    decimal.TryParse(position.UnrealizedPnl, System.Globalization.NumberStyles.Any,
-                        System.Globalization.CultureInfo.InvariantCulture, out unrealizedPnl);
+                    // Use WebSocket data
+                    equity = wsAccount.Collateral;
+                    availableBalance = wsAccount.AvailableBalance;
+
+                    if (wsAccount.Positions.TryGetValue(marketId, out var wsPosition))
+                    {
+                        positionSize = wsPosition.Size;
+                        unrealizedPnl = wsPosition.UnrealizedPnl;
+                    }
+                }
+                else if (accountTask is not null)
+                {
+                    // Fall back to REST data
+                    var account = await accountTask;
+                    if (account is not null)
+                    {
+                        decimal.TryParse(account.Collateral, System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out equity);
+                        decimal.TryParse(account.AvailableBalance, System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out availableBalance);
+
+                        var position = account.Positions.FirstOrDefault(p => p.MarketId == marketId);
+                        if (position != null)
+                        {
+                            decimal.TryParse(position.PositionSize, System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var rawPositionSize);
+                            // CRITICAL: Sign indicates direction: 1=Long, -1=Short, 0=None
+                            // Must multiply by Sign to get signed position (positive=long, negative=short)
+                            positionSize = rawPositionSize * position.Sign;
+                            decimal.TryParse(position.UnrealizedPnl, System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out unrealizedPnl);
+                        }
+                    }
                 }
 
                 // Calculate operational capacity

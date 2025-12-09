@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using GridBot.ApiService.Configuration;
 using GridBot.Lighter;
 using GridBot.Lighter.Models.WebSocket;
 using Microsoft.Extensions.Hosting;
@@ -13,6 +14,7 @@ namespace GridBot.ApiService.Services.Realtime;
 public sealed class LighterRealtimeStateService : BackgroundService, ILighterRealtimeState
 {
     private readonly ILighterWebSocketClient _wsClient;
+    private readonly IRiskConfiguration _riskConfig;
     private readonly ILogger<LighterRealtimeStateService> _logger;
 
     // Thread-safe state storage
@@ -41,12 +43,15 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
     /// Initializes a new instance of the <see cref="LighterRealtimeStateService"/> class.
     /// </summary>
     /// <param name="wsClient">WebSocket client for data streaming.</param>
+    /// <param name="riskConfig">Risk configuration for market ID.</param>
     /// <param name="logger">Logger instance.</param>
     public LighterRealtimeStateService(
         ILighterWebSocketClient wsClient,
+        IRiskConfiguration riskConfig,
         ILogger<LighterRealtimeStateService> logger)
     {
         _wsClient = wsClient ?? throw new ArgumentNullException(nameof(wsClient));
+        _riskConfig = riskConfig ?? throw new ArgumentNullException(nameof(riskConfig));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -112,6 +117,13 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
             await _wsClient.SubscribeAccountAsync(stoppingToken);
             await _wsClient.SubscribeOrdersAsync(stoppingToken);
             await _wsClient.SubscribeNotificationsAsync(stoppingToken);
+
+            // Subscribe to market data for the configured trading market
+            var marketId = _riskConfig.MarketId;
+            _logger.LogInformation(
+                "Auto-subscribing to market data for configured trading market {MarketId} ({Symbol})",
+                marketId, _riskConfig.Symbol);
+            await SubscribeMarketAsync(marketId, stoppingToken);
 
             // Start processing channel readers in parallel
             var tasks = new[]
