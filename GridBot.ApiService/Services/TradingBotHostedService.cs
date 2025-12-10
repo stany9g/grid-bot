@@ -1,9 +1,11 @@
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.DecisionEngine;
+using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
+using GridBot.Lighter;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -22,6 +24,8 @@ public sealed class TradingBotHostedService : BackgroundService
     private readonly IRecoveryManager _recoveryManager;
     private readonly IMoonBagManager _moonBagManager;
     private readonly ILossMonitor _lossMonitor;
+    private readonly IMarketResolver _marketResolver;
+    private readonly ILighterRealtimeState _realtimeState;
 
     private DateTimeOffset _lastDecisionLoopTime = DateTimeOffset.MinValue;
     private DecisionResult? _lastDecisionResult;
@@ -36,7 +40,9 @@ public sealed class TradingBotHostedService : BackgroundService
         ITradingDecisionEngine decisionEngine,
         IRecoveryManager recoveryManager,
         IMoonBagManager moonBagManager,
-        ILossMonitor lossMonitor)
+        ILossMonitor lossMonitor,
+        IMarketResolver marketResolver,
+        ILighterRealtimeState realtimeState)
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(stateService);
@@ -45,6 +51,8 @@ public sealed class TradingBotHostedService : BackgroundService
         ArgumentNullException.ThrowIfNull(recoveryManager);
         ArgumentNullException.ThrowIfNull(moonBagManager);
         ArgumentNullException.ThrowIfNull(lossMonitor);
+        ArgumentNullException.ThrowIfNull(marketResolver);
+        ArgumentNullException.ThrowIfNull(realtimeState);
 
         _logger = logger;
         _stateService = stateService;
@@ -53,6 +61,8 @@ public sealed class TradingBotHostedService : BackgroundService
         _recoveryManager = recoveryManager;
         _moonBagManager = moonBagManager;
         _lossMonitor = lossMonitor;
+        _marketResolver = marketResolver;
+        _realtimeState = realtimeState;
     }
 
     /// <summary>
@@ -69,6 +79,28 @@ public sealed class TradingBotHostedService : BackgroundService
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("ALTE Trading Bot starting...");
+
+        // Initialize market resolver first (discovers market ID from configured symbol via REST)
+        _logger.LogInformation("Initializing market resolver...");
+        await _marketResolver.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation(
+            "Market resolved: {Symbol} = MarketId {MarketId}",
+            _marketResolver.Symbol,
+            _marketResolver.MarketId);
+
+        // Initialize realtime state (connects WebSocket, subscribes to account data)
+        _logger.LogInformation("Initializing WebSocket realtime state...");
+        await _realtimeState.InitializeAsync(cancellationToken).ConfigureAwait(false);
+
+        // Subscribe to market-specific data streams
+        await _realtimeState.SubscribeMarketAsync(_marketResolver.MarketId, cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Subscribed to market {MarketId} data streams", _marketResolver.MarketId);
+
+        // Wait for initial market data to arrive before proceeding
+        // This prevents grid initialization from failing due to price being 0
+        await _realtimeState.WaitForMarketDataAsync(_marketResolver.MarketId, TimeSpan.FromSeconds(30), cancellationToken)
+            .ConfigureAwait(false);
+
         _logger.LogInformation(
             "Configuration: MarketId={MarketId}, DecisionLoopInterval={IntervalMs}ms",
             _riskConfig.MarketId,

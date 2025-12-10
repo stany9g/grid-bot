@@ -39,6 +39,9 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     // Subscription tracking
     private readonly ConcurrentDictionary<string, bool> _subscriptions = new();
 
+    // Transaction response tracking
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<object>> _pendingRequests = new();
+
     // Channels - bounded with DropOldest for trading data (stale data is useless)
     private readonly Channel<OrderBookUpdateEvent> _orderBookChannel;
     private readonly Channel<AccountUpdateEvent> _accountChannel;
@@ -246,6 +249,9 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
 
         _receiveCts?.Cancel();
 
+        // CRITICAL: Cancel all pending requests before disposal to prevent caller hangs
+        CancelAllPendingRequests(new ObjectDisposedException(nameof(LighterWebSocketClient)));
+
         // Complete all channels
         _orderBookChannel.Writer.TryComplete();
         _accountChannel.Writer.TryComplete();
@@ -404,14 +410,17 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
-            if (_webSocket?.State == WebSocketState.Open)
+            if (_webSocket?.State != WebSocketState.Open)
             {
-                await _webSocket.SendAsync(
-                    new ArraySegment<byte>(bytes),
-                    WebSocketMessageType.Text,
-                    endOfMessage: true,
-                    cancellationToken);
+                throw new InvalidOperationException(
+                    $"Cannot send message: WebSocket state is {_webSocket?.State ?? WebSocketState.None}");
             }
+
+            await _webSocket.SendAsync(
+                new ArraySegment<byte>(bytes),
+                WebSocketMessageType.Text,
+                endOfMessage: true,
+                cancellationToken);
         }
         finally
         {
@@ -498,6 +507,14 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
                 case "update" when root.TryGetProperty("channel", out var channelProp):
                     var channel = channelProp.GetString() ?? "";
                     await RouteUpdateMessageAsync(channel, json, cancellationToken);
+                    break;
+
+                case "jsonapi/sendtx":
+                    HandleSendTxResponse(json);
+                    break;
+
+                case "jsonapi/sendtxbatch":
+                    HandleSendTxBatchResponse(json);
                     break;
 
                 default:
@@ -815,6 +832,9 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         if (_connectionState == ConnectionState.Reconnecting || _connectionState == ConnectionState.Failed)
             return;
 
+        // CRITICAL: Cancel all pending requests immediately to prevent 30-second stalls
+        CancelAllPendingRequests(new InvalidOperationException($"WebSocket disconnected: {reason}"));
+
         await SetConnectionStateAsync(ConnectionState.Reconnecting, reason, cancellationToken);
 
         while (_reconnectAttempts < _options.MaxReconnectAttempts && !cancellationToken.IsCancellationRequested)
@@ -893,5 +913,200 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     private static string TruncateJson(string json)
     {
         return json.Length > 200 ? json[..200] + "..." : json;
+    }
+
+    /// <summary>
+    /// Cancels all pending transaction requests with the specified exception.
+    /// This is called during disconnect or dispose to prevent callers from hanging.
+    /// </summary>
+    /// <param name="exception">The exception to set on all pending requests.</param>
+    private void CancelAllPendingRequests(Exception exception)
+    {
+        var pendingIds = _pendingRequests.Keys.ToArray();
+        foreach (var id in pendingIds)
+        {
+            if (_pendingRequests.TryRemove(id, out var tcs))
+            {
+                tcs.TrySetException(exception);
+            }
+        }
+
+        if (pendingIds.Length > 0)
+        {
+            _logger.LogWarning("Canceled {Count} pending transaction requests due to: {Reason}",
+                pendingIds.Length, exception.Message);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<SendTxWsResponse> SendTransactionAsync(
+        int txType,
+        string txInfo,
+        bool? priceProtection = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_webSocket?.State != WebSocketState.Open)
+            throw new InvalidOperationException("WebSocket is not connected");
+
+        var requestId = $"tx_{Guid.NewGuid():N}";
+        var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        if (!_pendingRequests.TryAdd(requestId, tcs))
+        {
+            throw new InvalidOperationException($"Duplicate request ID: {requestId}");
+        }
+
+        try
+        {
+            var data = new Dictionary<string, object>
+            {
+                ["id"] = requestId,
+                ["tx_type"] = txType,
+                ["tx_info"] = txInfo
+            };
+
+            if (priceProtection.HasValue)
+                data["price_protection"] = priceProtection.Value;
+
+            var message = new { type = "jsonapi/sendtx", data };
+            await SendMessageAsync(message, cancellationToken);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(_options.TransactionTimeoutMs);
+
+            try
+            {
+                var result = await tcs.Task.WaitAsync(cts.Token);
+                return (SendTxWsResponse)result;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Timeout occurred (not caller cancellation)
+                _logger.LogError(
+                    "Transaction {RequestId} timed out after {Timeout}ms - STATUS UNKNOWN. " +
+                    "Verify transaction state before retrying.",
+                    requestId, _options.TransactionTimeoutMs);
+                throw new TransactionStatusUnknownException(
+                    requestId,
+                    $"Transaction timed out after {_options.TransactionTimeoutMs}ms. Status unknown - verify before retrying.");
+            }
+        }
+        finally
+        {
+            _pendingRequests.TryRemove(requestId, out _);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<SendTxBatchWsResponse> SendTransactionBatchAsync(
+        int[] txTypes,
+        string[] txInfos,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_webSocket?.State != WebSocketState.Open)
+            throw new InvalidOperationException("WebSocket is not connected");
+
+        if (txTypes.Length != txInfos.Length)
+            throw new ArgumentException("txTypes and txInfos must have the same length");
+
+        if (txTypes.Length > 50)
+            throw new ArgumentException("Maximum 50 transactions per batch");
+
+        var requestId = $"txbatch_{Guid.NewGuid():N}";
+        var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        if (!_pendingRequests.TryAdd(requestId, tcs))
+        {
+            throw new InvalidOperationException($"Duplicate request ID: {requestId}");
+        }
+
+        try
+        {
+            // IMPORTANT: tx_types and tx_infos must be JSON stringified strings, not arrays
+            var message = new
+            {
+                type = "jsonapi/sendtxbatch",
+                data = new
+                {
+                    id = requestId,
+                    tx_types = JsonSerializer.Serialize(txTypes),
+                    tx_infos = JsonSerializer.Serialize(txInfos)
+                }
+            };
+
+            await SendMessageAsync(message, cancellationToken);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(_options.BatchTransactionTimeoutMs);
+
+            try
+            {
+                var result = await tcs.Task.WaitAsync(cts.Token);
+                return (SendTxBatchWsResponse)result;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Timeout occurred (not caller cancellation)
+                _logger.LogError(
+                    "Batch transaction {RequestId} timed out after {Timeout}ms - STATUS UNKNOWN. " +
+                    "Verify transaction state before retrying.",
+                    requestId, _options.BatchTransactionTimeoutMs);
+                throw new TransactionStatusUnknownException(
+                    requestId,
+                    $"Batch transaction timed out after {_options.BatchTransactionTimeoutMs}ms. Status unknown - verify before retrying.");
+            }
+        }
+        finally
+        {
+            _pendingRequests.TryRemove(requestId, out _);
+        }
+    }
+
+    private void HandleSendTxResponse(string json)
+    {
+        try
+        {
+            var response = JsonSerializer.Deserialize<SendTxWsResponse>(json, LighterJsonOptions.Default);
+            if (response == null) return;
+
+            if (_pendingRequests.TryGetValue(response.Id, out var tcs))
+            {
+                tcs.TrySetResult(response);
+            }
+            else
+            {
+                _logger.LogWarning("Received SendTx response for unknown request ID: {Id}", response.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to handle SendTx response");
+        }
+    }
+
+    private void HandleSendTxBatchResponse(string json)
+    {
+        try
+        {
+            var response = JsonSerializer.Deserialize<SendTxBatchWsResponse>(json, LighterJsonOptions.Default);
+            if (response == null) return;
+
+            if (_pendingRequests.TryGetValue(response.Id, out var tcs))
+            {
+                tcs.TrySetResult(response);
+            }
+            else
+            {
+                _logger.LogWarning("Received SendTxBatch response for unknown request ID: {Id}", response.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to handle SendTxBatch response");
+        }
     }
 }

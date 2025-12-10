@@ -1,22 +1,24 @@
-using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
 using GridBot.Lighter.Models;
 using GridBot.Lighter.Models.Api;
+using GridBot.Lighter.Models.WebSocket;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.Lighter;
 
 /// <summary>
 /// WebSocket-integrated command client for Lighter operations.
-/// Uses ILighterRealtimeState for market data and HTTP POST for transaction submission.
+/// Uses ILighterRealtimeState for market data and WebSocket for transaction submission.
+/// Optionally uses HTTP client for nonce synchronization when WebSocket nonce retries fail.
 /// </summary>
 public sealed class WsLighterCommandClient : ILighterCommandClient
 {
     private readonly SignerClient _signer;
     private readonly ILighterRealtimeState _state;
-    private readonly HttpClient _httpClient;
+    private readonly ILighterWebSocketClient _wsClient;
     private readonly ILogger<WsLighterCommandClient> _logger;
+    private readonly HttpClient? _httpClient;
     private bool _disposed;
 
     /// <summary>
@@ -30,6 +32,11 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
     private const int MaxNonceRetries = 3;
 
     /// <summary>
+    /// Maximum age in milliseconds for order book data to be considered fresh for market orders.
+    /// </summary>
+    private const int MaxOrderBookAgeMs = 2000;
+
+    /// <summary>
     /// Delay in milliseconds between nonce retry attempts.
     /// </summary>
     private const int NonceRetryDelayMs = 100;
@@ -39,18 +46,21 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
     /// </summary>
     /// <param name="signer">Signer client for signing transactions.</param>
     /// <param name="state">Real-time state for market data access.</param>
-    /// <param name="httpClient">HTTP client for transaction submission.</param>
+    /// <param name="wsClient">WebSocket client for transaction submission.</param>
     /// <param name="logger">Logger instance.</param>
+    /// <param name="httpClient">Optional HTTP client for nonce synchronization. If not provided, SyncNonceAsync will throw NotSupportedException.</param>
     public WsLighterCommandClient(
         SignerClient signer,
         ILighterRealtimeState state,
-        HttpClient httpClient,
-        ILogger<WsLighterCommandClient> logger)
+        ILighterWebSocketClient wsClient,
+        ILogger<WsLighterCommandClient> logger,
+        HttpClient? httpClient = null)
     {
         _signer = signer ?? throw new ArgumentNullException(nameof(signer));
         _state = state ?? throw new ArgumentNullException(nameof(state));
-        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _wsClient = wsClient ?? throw new ArgumentNullException(nameof(wsClient));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _httpClient = httpClient;
     }
 
     /// <inheritdoc />
@@ -88,6 +98,15 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
             throw new LighterApiException(
                 $"Order book not available for market {request.MarketIndex}. " +
                 "Ensure the market is subscribed via WebSocket.");
+        }
+
+        // Validate order book freshness for market orders
+        var ageMs = (DateTimeOffset.UtcNow - orderBook.LastUpdate).TotalMilliseconds;
+        if (ageMs > MaxOrderBookAgeMs)
+        {
+            throw new LighterApiException(
+                $"Order book data is stale ({ageMs:F0}ms old, max {MaxOrderBookAgeMs}ms). " +
+                "Cannot execute market order safely. Wait for fresh data or use limit order.");
         }
 
         // For sell orders: use best bid price
@@ -253,16 +272,57 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
     }
 
     /// <inheritdoc />
-    public Task<long> SyncNonceAsync(
+    public async Task<long> SyncNonceAsync(
         long accountIndex,
         int apiKeyIndex,
         CancellationToken cancellationToken = default)
     {
-        // In pure WebSocket mode, we don't have REST access to sync nonce
-        // The SignerClient tracks nonce locally after initialization
-        throw new NotSupportedException(
-            "SyncNonceAsync is not supported in WebSocket-only mode. " +
-            "Nonce is tracked locally by SignerClient after initialization.");
+        if (_httpClient == null)
+        {
+            throw new NotSupportedException(
+                "SyncNonceAsync requires HTTP client. Configure HttpClient in DI registration.");
+        }
+
+        var url = $"nextNonce?account_index={accountIndex}&api_key_index={apiKeyIndex}";
+
+        try
+        {
+            var response = await _httpClient.GetAsync(url, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new LighterApiException(
+                    $"Failed to sync nonce: {(int)response.StatusCode} - {errorContent}",
+                    (int)response.StatusCode);
+            }
+
+            var nonceResponse = await response.Content.ReadFromJsonAsync<NextNonce>(
+                LighterJsonOptions.Default, cancellationToken);
+
+            if (nonceResponse == null || !nonceResponse.IsSuccess)
+            {
+                throw new LighterApiException(
+                    nonceResponse?.Message ?? "Failed to parse nonce response",
+                    nonceResponse?.Code ?? 0);
+            }
+
+            _signer.SetNonce(nonceResponse.Nonce);
+
+            _logger.LogInformation(
+                "Synced nonce for account {AccountIndex}, API key {ApiKeyIndex}: {Nonce}",
+                accountIndex, apiKeyIndex, nonceResponse.Nonce);
+
+            return nonceResponse.Nonce;
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new LighterApiException($"HTTP request failed during nonce sync: {ex.Message}", ex);
+        }
+        catch (JsonException ex)
+        {
+            throw new LighterApiException($"Failed to parse nonce response: {ex.Message}", ex);
+        }
     }
 
     /// <inheritdoc />
@@ -316,12 +376,24 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
         {
             var response = await SendTransactionBatchAsync(txTypes, txInfos, cancellationToken);
 
+            var txHashes = response.TxHashArray;
+            var partialExecution = response.IsSuccess && txHashes.Length < signedOrders.Length;
+
+            if (partialExecution)
+            {
+                _logger.LogError(
+                    "CRITICAL: Batch partial execution detected! Submitted {Submitted}, Executed {Executed}",
+                    signedOrders.Length, txHashes.Length);
+            }
+
             return new BatchOrderResult
             {
-                IsSuccess = response.IsSuccess,
-                OrdersSubmitted = response.IsSuccess ? signedOrders.Length : 0,
-                TxHashes = response.TxHashArray,
-                ErrorMessage = response.IsSuccess ? null : response.Message,
+                IsSuccess = response.IsSuccess && !partialExecution,
+                OrdersSubmitted = txHashes.Length, // Actual count, not assumed
+                TxHashes = txHashes,
+                ErrorMessage = partialExecution
+                    ? $"Partial execution: {txHashes.Length}/{signedOrders.Length} orders succeeded"
+                    : (response.IsSuccess ? null : response.Message),
                 Code = response.Code
             };
         }
@@ -379,7 +451,7 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
     }
 
     /// <summary>
-    /// Submits a single signed transaction to the Lighter API.
+    /// Submits a single signed transaction via WebSocket.
     /// </summary>
     private async Task<RespSendTx> SendTransactionAsync(
         int txType,
@@ -390,28 +462,24 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
         if (string.IsNullOrWhiteSpace(txInfo))
             throw new ArgumentException("Transaction info cannot be null or empty.", nameof(txInfo));
 
-        using var formContent = new MultipartFormDataContent();
-        formContent.Add(new StringContent(txType.ToString()), "tx_type");
-        formContent.Add(new StringContent(txInfo), "tx_info");
-        if (priceProtection.HasValue)
-            formContent.Add(new StringContent(priceProtection.Value.ToString().ToLowerInvariant()), "price_protection");
+        _logger.LogDebug("WS sendTx: tx_type={TxType}", txType);
 
-        _logger.LogDebug("POST sendTx: tx_type={TxType}", txType);
+        var wsResponse = await _wsClient.SendTransactionAsync(txType, txInfo, priceProtection, cancellationToken);
 
-        var response = await _httpClient.PostAsync("sendTx", formContent, cancellationToken);
-        await EnsureSuccessStatusCodeAsync(response);
+        if (!wsResponse.IsSuccess)
+            throw new LighterApiException(wsResponse.Message ?? "Transaction submission failed", wsResponse.Code);
 
-        var result = await response.Content.ReadFromJsonAsync<RespSendTx>(LighterJsonOptions.Default, cancellationToken)
-            ?? throw new LighterApiException("Failed to deserialize response");
-
-        if (!result.IsSuccess)
-            throw new LighterApiException(result.Message ?? "Transaction submission failed", result.Code);
-
-        return result;
+        return new RespSendTx
+        {
+            Code = wsResponse.Code,
+            Message = wsResponse.Message,
+            TxHash = wsResponse.TxHash,
+            PredictedExecutionTimeMs = wsResponse.PredictedExecutionTimeMs
+        };
     }
 
     /// <summary>
-    /// Submits multiple signed transactions in a batch.
+    /// Submits multiple signed transactions in a batch via WebSocket.
     /// </summary>
     private async Task<RespSendTxBatch> SendTransactionBatchAsync(
         int[] txTypes,
@@ -427,29 +495,25 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
         if (txTypes.Length != txInfos.Length)
             throw new ArgumentException("Transaction types and infos arrays must have the same length.");
 
-        var txTypesJson = JsonSerializer.Serialize(txTypes);
-        var txInfosJson = JsonSerializer.Serialize(txInfos);
+        _logger.LogDebug("WS sendTxBatch: {Count} transactions", txTypes.Length);
 
-        using var formContent = new MultipartFormDataContent();
-        formContent.Add(new StringContent(txTypesJson), "tx_types");
-        formContent.Add(new StringContent(txInfosJson), "tx_infos");
+        var wsResponse = await _wsClient.SendTransactionBatchAsync(txTypes, txInfos, cancellationToken);
 
-        _logger.LogDebug("POST sendTxBatch: {Count} transactions", txTypes.Length);
+        if (!wsResponse.IsSuccess)
+            throw new LighterApiException(wsResponse.Message ?? "Batch transaction submission failed", wsResponse.Code);
 
-        var response = await _httpClient.PostAsync("sendTxBatch", formContent, cancellationToken);
-        await EnsureSuccessStatusCodeAsync(response);
-
-        var result = await response.Content.ReadFromJsonAsync<RespSendTxBatch>(LighterJsonOptions.Default, cancellationToken)
-            ?? throw new LighterApiException("Failed to deserialize batch response");
-
-        if (!result.IsSuccess)
-            throw new LighterApiException(result.Message ?? "Batch transaction submission failed", result.Code);
-
-        return result;
+        return new RespSendTxBatch
+        {
+            Code = wsResponse.Code,
+            Message = wsResponse.Message,
+            TxHashesRaw = JsonSerializer.SerializeToElement(wsResponse.TxHashes),
+            PredictedExecutionTimeMsRaw = JsonSerializer.SerializeToElement(wsResponse.PredictedExecutionTimeMs)
+        };
     }
 
     /// <summary>
     /// Executes an operation with automatic retry on nonce errors.
+    /// When HTTP client is available, attempts to sync nonce from server before retrying.
     /// </summary>
     private async Task<RespSendTx> ExecuteWithNonceRetryAsync(
         Func<Task<RespSendTx>> operation,
@@ -468,24 +532,33 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
             {
                 retryCount++;
                 _logger.LogWarning(
-                    "Nonce error on {Operation} (code {Code}), incrementing local nonce (attempt {Attempt}/{Max})",
+                    "Nonce error on {Operation} (code {Code}), attempt {Attempt}/{Max}",
                     operationName, ex.Code, retryCount, MaxNonceRetries);
 
-                // In WS-only mode, we can't sync from server, so just wait and retry
-                // The SignerClient's nonce will be incremented on the next signing attempt
+                // Try to sync nonce from server if HTTP client is available
+                if (_httpClient != null)
+                {
+                    try
+                    {
+                        await SyncNonceAsync(
+                            _signer.AccountIndex,
+                            _signer.ApiKeyIndex,
+                            cancellationToken);
+                        _logger.LogInformation(
+                            "Successfully synced nonce from server for {Operation}",
+                            operationName);
+                    }
+                    catch (Exception syncEx)
+                    {
+                        _logger.LogWarning(
+                            syncEx,
+                            "Failed to sync nonce from server for {Operation}, will retry with local nonce",
+                            operationName);
+                    }
+                }
+
                 await Task.Delay(NonceRetryDelayMs, cancellationToken);
             }
-        }
-    }
-
-    private static async Task EnsureSuccessStatusCodeAsync(HttpResponseMessage response)
-    {
-        if (!response.IsSuccessStatusCode)
-        {
-            var content = await response.Content.ReadAsStringAsync();
-            throw new LighterApiException(
-                $"API request failed with status {(int)response.StatusCode}: {content}",
-                (int)response.StatusCode);
         }
     }
 

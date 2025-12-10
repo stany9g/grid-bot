@@ -164,3 +164,54 @@ A code review was performed on the WebSocket refactoring. See `.claude/doc/webso
 - LighterServiceCollectionExtensions.cs - Remove obsolete method and Console.WriteLine
 - ILighterRealtimeState.cs - Approved, no changes needed
 - WsMarketDataService.cs - Approved with minor JsonSerializerOptions duplication
+
+---
+
+## WebSocket Transaction Format Research (2025-12-10)
+
+Research was conducted on the exact WebSocket message format for sending transactions on Lighter DEX.
+
+**Full documentation**: `.claude/doc/lighter-websocket-transaction-format.md`
+
+### Key Findings
+
+#### Single Transaction (`jsonapi/sendtx`)
+```json
+{
+    "type": "jsonapi/sendtx",
+    "data": {
+        "id": "my_random_id_{random}",
+        "tx_type": INTEGER,
+        "tx_info": OBJECT  // Parsed JSON, NOT string!
+    }
+}
+```
+
+#### Batch Transactions (`jsonapi/sendtxbatch`)
+```json
+{
+    "type": "jsonapi/sendtxbatch",
+    "data": {
+        "id": "my_random_id_{random}",
+        "tx_types": "[1, 1, ...]",  // Stringified array!
+        "tx_infos": "[{...}, {...}]"  // Stringified array!
+    }
+}
+```
+
+#### Critical Details
+1. **tx_hash is NOT included in requests** - it's computed client-side for verification only
+2. **Single TX**: `tx_info` is a **parsed JSON object**
+3. **Batch TX**: Both `tx_types` and `tx_infos` are **JSON stringified strings**
+4. **Max 50 transactions** per batch
+5. **All batch TX must use same API key**
+6. **id field** required for request/response correlation
+
+#### Current Implementation Status
+- `WsLighterCommandClient.cs` uses HTTP POST for transactions (valid approach)
+- WebSocket-based TX submission is an alternative (not currently implemented)
+- Both approaches have same rate limits and volume quotas
+
+### Sources
+- [Lighter WebSocket Reference](https://apidocs.lighter.xyz/docs/websocket-reference)
+- [Lighter Python SDK utils.py](https://github.com/elliottech/lighter-python/blob/main/examples/utils.py)

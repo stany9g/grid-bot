@@ -38,6 +38,12 @@ public sealed record OrderBookUpdateEvent : ChannelEvent
 public sealed record OrderBookSnapshot
 {
     /// <summary>
+    /// When this order book snapshot was last updated.
+    /// Used for staleness validation before market order execution.
+    /// </summary>
+    public DateTimeOffset LastUpdate { get; init; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
     /// Best bid price.
     /// </summary>
     public required decimal BestBidPrice { get; init; }

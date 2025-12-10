@@ -29,7 +29,7 @@ public sealed class WsMarketDataService : IMarketDataService
         ILogger<WsMarketDataService> logger)
     {
         _realtimeState = realtimeState ?? throw new ArgumentNullException(nameof(realtimeState));
-        _httpClient = httpClientFactory?.CreateClient("LighterCommandClient")
+        _httpClient = httpClientFactory?.CreateClient("LighterRestClient")
             ?? throw new ArgumentNullException(nameof(httpClientFactory));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }

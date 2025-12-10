@@ -74,12 +74,15 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
     }
 
     /// <inheritdoc />
-    public Task<AccountMetadata> GetAccountMetadataAsync(long accountIndex, CancellationToken cancellationToken = default)
+    public async Task<AccountMetadata> GetAccountMetadataAsync(long accountIndex, CancellationToken cancellationToken = default)
     {
-        // AccountMetadata is not available via WebSocket
-        throw new NotSupportedException(
-            "GetAccountMetadataAsync is not supported in WebSocket-only mode. " +
-            "AccountMetadata requires REST API access.");
+        _logger.LogDebug("Fetching account metadata via REST for account {AccountIndex}", accountIndex);
+
+        var response = await _httpClient.GetAsync($"accountMetadata?by=index&value={accountIndex}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<AccountMetadata>(LighterJsonOptions.Default, cancellationToken);
+        return result ?? throw new LighterApiException("Failed to get account metadata - null response");
     }
 
     /// <inheritdoc />
@@ -133,17 +136,35 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
     }
 
     /// <inheritdoc />
-    public Task<OrderBookDetail> GetOrderBookDetailsAsync(
+    public async Task<OrderBookDetail> GetOrderBookDetailsAsync(
         int marketId,
         int? depth = null,
         CancellationToken cancellationToken = default)
     {
-        // OrderBookDetail contains market metadata (fees, margins, etc.) which is not available via WebSocket.
-        // For actual bids/asks, use GetOrderBookOrdersAsync instead.
-        throw new NotSupportedException(
-            "GetOrderBookDetailsAsync is not supported in WebSocket-only mode. " +
-            "Market metadata requires REST API access. " +
-            "Use GetOrderBookOrdersAsync for bid/ask data.");
+        _logger.LogDebug("Fetching order book details via REST for market {MarketId}", marketId);
+
+        var queryParams = $"?market_id={marketId}";
+        if (depth.HasValue)
+            queryParams += $"&depth={depth.Value}";
+
+        var response = await _httpClient.GetAsync($"orderBookDetails{queryParams}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<OrderBookDetailResponse>(LighterJsonOptions.Default, cancellationToken);
+
+        if (result == null || !result.IsSuccess)
+        {
+            throw new LighterApiException(
+                result?.Message ?? "Failed to get order book details - null response",
+                result?.Code ?? 0);
+        }
+
+        // Try to get data from either Data property (legacy) or OrderBookDetails array (actual API)
+        if (result.Data != null)
+            return result.Data;
+
+        var detail = result.OrderBookDetails?.FirstOrDefault(d => d.MarketId == marketId);
+        return detail ?? throw new LighterApiException($"Order book data for market {marketId} is null");
     }
 
     /// <inheritdoc />
@@ -190,29 +211,47 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
     }
 
     /// <inheritdoc />
-    public Task<Tx> GetTransactionAsync(string hashOrIndex, CancellationToken cancellationToken = default)
+    public async Task<Tx> GetTransactionAsync(string hashOrIndex, CancellationToken cancellationToken = default)
     {
-        // Transaction lookup is not available via WebSocket
-        throw new NotSupportedException(
-            "GetTransactionAsync is not supported in WebSocket-only mode. " +
-            "Transaction lookup requires REST API access.");
+        if (string.IsNullOrWhiteSpace(hashOrIndex))
+            throw new ArgumentException("Hash or index cannot be null or empty.", nameof(hashOrIndex));
+
+        _logger.LogDebug("Fetching transaction via REST: {HashOrIndex}", hashOrIndex);
+
+        var response = await _httpClient.GetAsync($"tx?hash_or_index={hashOrIndex}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<Tx>(LighterJsonOptions.Default, cancellationToken);
+        return result ?? throw new LighterApiException("Failed to get transaction - null response");
     }
 
     /// <inheritdoc />
-    public Task<NextNonce> GetNextNonceAsync(
+    public async Task<NextNonce> GetNextNonceAsync(
         long accountIndex,
         int apiKeyIndex,
         CancellationToken cancellationToken = default)
     {
-        // Nonce is not available via WebSocket
-        throw new NotSupportedException(
-            "GetNextNonceAsync is not supported in WebSocket-only mode. " +
-            "Nonce synchronization requires REST API access. " +
-            "Use SignerClient's local nonce tracking instead.");
+        _logger.LogDebug("Fetching next nonce via REST for account {AccountIndex}, apiKeyIndex {ApiKeyIndex}",
+            accountIndex, apiKeyIndex);
+
+        var queryParams = $"?account_index={accountIndex}&api_key_index={apiKeyIndex}";
+        var response = await _httpClient.GetAsync($"nextNonce{queryParams}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<NextNonce>(LighterJsonOptions.Default, cancellationToken);
+
+        if (result == null || !result.IsSuccess)
+        {
+            throw new LighterApiException(
+                result?.Message ?? "Failed to get next nonce - null response",
+                result?.Code ?? 0);
+        }
+
+        return result;
     }
 
     /// <inheritdoc />
-    public Task<List<Candlestick>> GetCandlesticksAsync(
+    public async Task<List<Candlestick>> GetCandlesticksAsync(
         int marketId,
         long startTimestamp,
         long endTimestamp,
@@ -221,45 +260,95 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
         bool setTimestampToEnd = false,
         CancellationToken cancellationToken = default)
     {
-        // Historical candlestick data is not available via WebSocket
-        throw new NotSupportedException(
-            "GetCandlesticksAsync is not supported in WebSocket-only mode. " +
-            "Historical candlestick data requires REST API access.");
+        _logger.LogDebug("Fetching candlesticks via REST for market {MarketId}, resolution {Resolution}",
+            marketId, resolution);
+
+        var queryParams = $"?market_id={marketId}&resolution={resolution}&start_timestamp={startTimestamp}&end_timestamp={endTimestamp}&count_back={countBack}";
+        if (setTimestampToEnd)
+            queryParams += "&set_timestamp_to_end=true";
+
+        var response = await _httpClient.GetAsync($"candlesticks{queryParams}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<CandlesticksResponse>(LighterJsonOptions.Default, cancellationToken);
+
+        if (result == null || !result.IsSuccess)
+        {
+            throw new LighterApiException(
+                result?.Message ?? "Failed to get candlesticks - null response",
+                result?.Code ?? 0);
+        }
+
+        return result.Candlesticks;
     }
 
     /// <inheritdoc />
-    public Task<List<Candlestick>> GetCandlesticksAsync(
+    public async Task<List<Candlestick>> GetCandlesticksAsync(
         int marketId,
         string resolution = "1h",
         int countBack = 20,
         CancellationToken cancellationToken = default)
     {
-        // Historical candlestick data is not available via WebSocket
-        throw new NotSupportedException(
-            "GetCandlesticksAsync is not supported in WebSocket-only mode. " +
-            "Historical candlestick data requires REST API access.");
+        var endTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Calculate start timestamp based on resolution
+        var periodMs = resolution switch
+        {
+            "1m" => 60_000L,
+            "5m" => 300_000L,
+            "15m" => 900_000L,
+            "1h" => 3_600_000L,
+            "4h" => 14_400_000L,
+            "1d" => 86_400_000L,
+            _ => 3_600_000L
+        };
+
+        var startTimestamp = endTimestamp - (periodMs * countBack);
+
+        return await GetCandlesticksAsync(marketId, startTimestamp, endTimestamp, resolution, countBack, false, cancellationToken);
     }
 
     /// <inheritdoc />
-    public Task<List<FundingRate>> GetFundingRatesAsync(CancellationToken cancellationToken = default)
+    public async Task<List<FundingRate>> GetFundingRatesAsync(CancellationToken cancellationToken = default)
     {
-        // Full funding rates list is not available via WebSocket
-        // We could return current funding rate from subscribed markets but not the full list
-        throw new NotSupportedException(
-            "GetFundingRatesAsync is not supported in WebSocket-only mode. " +
-            "Full funding rates list requires REST API access. " +
-            "Use GetMarketStats for current funding rate of subscribed markets.");
+        _logger.LogDebug("Fetching funding rates via REST");
+
+        var response = await _httpClient.GetAsync("funding-rates", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<FundingRatesResponse>(LighterJsonOptions.Default, cancellationToken);
+
+        if (result == null || !result.IsSuccess)
+        {
+            throw new LighterApiException(
+                result?.Message ?? "Failed to get funding rates - null response",
+                result?.Code ?? 0);
+        }
+
+        return result.Data;
     }
 
     /// <inheritdoc />
-    public Task<List<Trade>> GetRecentTradesAsync(
+    public async Task<List<Trade>> GetRecentTradesAsync(
         int marketId,
         int limit = 100,
         CancellationToken cancellationToken = default)
     {
-        // Recent trades are not available via WebSocket
-        throw new NotSupportedException(
-            "GetRecentTradesAsync is not supported in WebSocket-only mode. " +
-            "Recent trades require REST API access.");
+        _logger.LogDebug("Fetching recent trades via REST for market {MarketId}", marketId);
+
+        var queryParams = $"?market_id={marketId}&limit={limit}";
+        var response = await _httpClient.GetAsync($"recentTrades{queryParams}", cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<TradesResponse>(LighterJsonOptions.Default, cancellationToken);
+
+        if (result == null || !result.IsSuccess)
+        {
+            throw new LighterApiException(
+                result?.Message ?? "Failed to get recent trades - null response",
+                result?.Code ?? 0);
+        }
+
+        return result.Data;
     }
 }

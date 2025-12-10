@@ -53,4 +53,14 @@ public sealed class WebSocketOptions
     /// Ping timeout in seconds. Connection considered dead if no pong received.
     /// </summary>
     public int PingTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Default timeout for single transaction operations in milliseconds.
+    /// </summary>
+    public int TransactionTimeoutMs { get; set; } = 30000;
+
+    /// <summary>
+    /// Timeout for batch transaction operations in milliseconds.
+    /// </summary>
+    public int BatchTransactionTimeoutMs { get; set; } = 60000;
 }

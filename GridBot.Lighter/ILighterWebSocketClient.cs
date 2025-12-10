@@ -100,4 +100,30 @@ public interface ILighterWebSocketClient : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
     Task DisconnectAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends a single transaction via WebSocket.
+    /// </summary>
+    /// <param name="txType">Transaction type (from TransactionTypes).</param>
+    /// <param name="txInfo">Signed transaction info string.</param>
+    /// <param name="priceProtection">Optional price protection flag.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Transaction response with tx_hash.</returns>
+    Task<SendTxWsResponse> SendTransactionAsync(
+        int txType,
+        string txInfo,
+        bool? priceProtection = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends multiple transactions as a batch via WebSocket.
+    /// </summary>
+    /// <param name="txTypes">Array of transaction types.</param>
+    /// <param name="txInfos">Array of signed transaction info strings.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Batch response with tx_hashes.</returns>
+    Task<SendTxBatchWsResponse> SendTransactionBatchAsync(
+        int[] txTypes,
+        string[] txInfos,
+        CancellationToken cancellationToken = default);
 }

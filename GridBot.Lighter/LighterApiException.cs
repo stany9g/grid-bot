@@ -3,7 +3,7 @@ namespace GridBot.Lighter;
 /// <summary>
 /// Exception thrown when Lighter API operations fail.
 /// </summary>
-public sealed class LighterApiException : Exception
+public class LighterApiException : Exception
 {
     /// <summary>
     /// Gets the HTTP status code associated with the error, if available.

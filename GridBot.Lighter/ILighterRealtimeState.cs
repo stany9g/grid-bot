@@ -6,8 +6,14 @@ namespace GridBot.Lighter;
 /// Thread-safe snapshot access to real-time WebSocket data.
 /// Provides latest state for trading decisions.
 /// </summary>
-public interface ILighterRealtimeState
+public interface ILighterRealtimeState : IAsyncDisposable
 {
+    /// <summary>
+    /// Initializes the service by connecting to WebSocket and subscribing to account data.
+    /// Must be called before any other operations.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task InitializeAsync(CancellationToken cancellationToken = default);
     /// <summary>
     /// Gets the latest order book snapshot for a market.
     /// Returns null if no data received yet.
@@ -66,6 +72,25 @@ public interface ILighterRealtimeState
     /// Used to determine if we should fall back to REST.
     /// </summary>
     TimeSpan? OldestDataAge { get; }
+
+    /// <summary>
+    /// Checks if market data is available for a specific market.
+    /// Returns true when we have received at least one price update (order book or market stats).
+    /// </summary>
+    /// <param name="marketId">Market identifier.</param>
+    /// <returns>True if price data is available, false otherwise.</returns>
+    bool IsMarketDataReady(int marketId);
+
+    /// <summary>
+    /// Waits until market data is available for a specific market.
+    /// Use this after subscribing to market data to ensure WebSocket has received initial data.
+    /// </summary>
+    /// <param name="marketId">Market identifier.</param>
+    /// <param name="timeout">Maximum time to wait. Defaults to 30 seconds if not specified.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Task that completes when market data is available.</returns>
+    /// <exception cref="TimeoutException">Thrown if data is not received within the timeout period.</exception>
+    Task WaitForMarketDataAsync(int marketId, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Subscribes to data updates for a specific market.

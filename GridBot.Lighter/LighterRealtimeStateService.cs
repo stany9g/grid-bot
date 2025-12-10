@@ -1,16 +1,15 @@
 using System.Collections.Concurrent;
 using GridBot.Lighter.Models.WebSocket;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.Lighter;
 
 /// <summary>
-/// Background service that processes WebSocket channel events and maintains thread-safe state snapshots.
+/// Service that processes WebSocket channel events and maintains thread-safe state snapshots.
 /// Implements ILighterRealtimeState for read access to latest data.
 /// Market subscriptions must be triggered explicitly via SubscribeMarketAsync after market discovery.
 /// </summary>
-public sealed class LighterRealtimeStateService : BackgroundService, ILighterRealtimeState
+public sealed class LighterRealtimeStateService : ILighterRealtimeState
 {
     private readonly ILighterWebSocketClient _wsClient;
     private readonly ILogger<LighterRealtimeStateService> _logger;
@@ -21,6 +20,12 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
     private readonly ConcurrentDictionary<int, MarketStatsSnapshot> _marketStats = new();
     private volatile AccountSnapshot? _account;
     private long _lastUpdateTimeTicks;
+
+    // Background processing
+    private CancellationTokenSource? _processingCts;
+    private Task? _processingTask;
+    private bool _initialized;
+    private bool _disposed;
 
     /// <inheritdoc />
     public bool IsConnected => _wsClient.IsConnected;
@@ -80,6 +85,50 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
     }
 
     /// <inheritdoc />
+    public bool IsMarketDataReady(int marketId)
+    {
+        var price = GetCurrentPrice(marketId);
+        return price.HasValue && price.Value > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task WaitForMarketDataAsync(int marketId, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(30);
+        var pollInterval = TimeSpan.FromMilliseconds(100);
+        var deadline = DateTimeOffset.UtcNow + effectiveTimeout;
+
+        _logger.LogInformation(
+            "Waiting for market {MarketId} data (timeout: {Timeout}s)...",
+            marketId, effectiveTimeout.TotalSeconds);
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (IsMarketDataReady(marketId))
+            {
+                var price = GetCurrentPrice(marketId);
+                _logger.LogInformation(
+                    "Market {MarketId} data ready. Price: {Price:F2}",
+                    marketId, price);
+                return;
+            }
+
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"Timed out waiting for market {marketId} data after {effectiveTimeout.TotalSeconds}s. " +
+                    $"WebSocket connected: {IsConnected}");
+            }
+
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    /// <inheritdoc />
     public decimal? GetPositionSize(int marketId)
     {
         var account = _account;
@@ -90,8 +139,46 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
     }
 
     /// <inheritdoc />
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_initialized)
+        {
+            _logger.LogWarning("LighterRealtimeStateService already initialized");
+            return;
+        }
+
+        _logger.LogInformation("Initializing realtime state service");
+
+        // Connect to WebSocket
+        await _wsClient.ConnectAsync(cancellationToken);
+
+        // Subscribe to account data (always needed)
+        await _wsClient.SubscribeAccountAsync(cancellationToken);
+        await _wsClient.SubscribeOrdersAsync(cancellationToken);
+        await _wsClient.SubscribeNotificationsAsync(cancellationToken);
+
+        _logger.LogInformation("WebSocket connected. Starting channel processing...");
+
+        // Start processing channel readers in background
+        _processingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _processingTask = ProcessAllChannelsAsync(_processingCts.Token);
+
+        _initialized = true;
+        _logger.LogInformation("Realtime state service initialized");
+    }
+
+    /// <inheritdoc />
     public async Task SubscribeMarketAsync(int marketId, CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (!_initialized)
+        {
+            throw new InvalidOperationException("Service not initialized. Call InitializeAsync first.");
+        }
+
         _logger.LogInformation("Subscribing to market {MarketId} data streams", marketId);
 
         await _wsClient.SubscribeOrderBookAsync(marketId, cancellationToken);
@@ -99,45 +186,55 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
     }
 
     /// <inheritdoc />
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async ValueTask DisposeAsync()
     {
-        _logger.LogInformation("Starting realtime state service");
+        if (_disposed)
+            return;
+
+        _disposed = true;
+
+        _processingCts?.Cancel();
+
+        if (_processingTask != null)
+        {
+            try
+            {
+                await _processingTask.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+            {
+                // Expected during shutdown
+            }
+        }
+
+        _processingCts?.Dispose();
+
+        _logger.LogInformation("Realtime state service disposed");
+    }
+
+    private async Task ProcessAllChannelsAsync(CancellationToken cancellationToken)
+    {
+        var tasks = new[]
+        {
+            ProcessOrderBookUpdatesAsync(cancellationToken),
+            ProcessAccountUpdatesAsync(cancellationToken),
+            ProcessOrderUpdatesAsync(cancellationToken),
+            ProcessMarketStatsUpdatesAsync(cancellationToken),
+            ProcessConnectionStateAsync(cancellationToken),
+            ProcessNotificationsAsync(cancellationToken)
+        };
 
         try
         {
-            // Connect to WebSocket
-            await _wsClient.ConnectAsync(stoppingToken);
-
-            // Subscribe to account data (always needed)
-            await _wsClient.SubscribeAccountAsync(stoppingToken);
-            await _wsClient.SubscribeOrdersAsync(stoppingToken);
-            await _wsClient.SubscribeNotificationsAsync(stoppingToken);
-
-            // Note: Market data subscriptions (order book, market stats) are triggered
-            // via SubscribeMarketAsync AFTER MarketResolver discovers the market ID from symbol.
-            _logger.LogInformation("WebSocket connected. Waiting for market subscription via SubscribeMarketAsync...");
-
-            // Start processing channel readers in parallel
-            var tasks = new[]
-            {
-                ProcessOrderBookUpdatesAsync(stoppingToken),
-                ProcessAccountUpdatesAsync(stoppingToken),
-                ProcessOrderUpdatesAsync(stoppingToken),
-                ProcessMarketStatsUpdatesAsync(stoppingToken),
-                ProcessConnectionStateAsync(stoppingToken),
-                ProcessNotificationsAsync(stoppingToken)
-            };
-
             await Task.WhenAll(tasks);
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogInformation("Realtime state service stopping");
+            _logger.LogInformation("Channel processing stopped");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error in realtime state service");
-            throw;
+            _logger.LogError(ex, "Error in channel processing");
         }
     }
 

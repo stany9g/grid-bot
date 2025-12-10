@@ -1090,14 +1090,6 @@ public partial class Program
         app.MapRazorComponents<App>()
             .AddInteractiveServerRenderMode();
 
-        // Initialize market resolver (discovers market ID from configured symbol via REST)
-        var marketResolver = app.Services.GetRequiredService<IMarketResolver>();
-        await marketResolver.InitializeAsync();
-
-        // Subscribe to WebSocket market data for the resolved market
-        var realtimeState = app.Services.GetRequiredService<ILighterRealtimeState>();
-        await realtimeState.SubscribeMarketAsync(marketResolver.MarketId);
-
         await app.RunAsync();
     }
 }

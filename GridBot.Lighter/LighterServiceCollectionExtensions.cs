@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -77,41 +76,41 @@ public static class LighterServiceCollectionExtensions
         });
 
         // Register real-time state service as singleton (implements ILighterRealtimeState)
+        // Note: NOT a hosted service - InitializeAsync must be called explicitly
         services.AddSingleton<LighterRealtimeStateService>();
         services.AddSingleton<ILighterRealtimeState>(sp => sp.GetRequiredService<LighterRealtimeStateService>());
-
-        // Register as hosted service to start WebSocket processing
-        services.AddHostedService(sp => sp.GetRequiredService<LighterRealtimeStateService>());
 
         // Register WebSocket-based query client (uses REST for market list and candlesticks)
         services.AddSingleton<ILighterQueryClient>(serviceProvider =>
         {
             var state = serviceProvider.GetRequiredService<ILighterRealtimeState>();
             var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
-            var httpClient = httpClientFactory.CreateClient("LighterCommandClient");
+            var httpClient = httpClientFactory.CreateClient("LighterRestClient");
             var logger = serviceProvider.GetRequiredService<ILogger<WsLighterQueryClient>>();
 
             return new WsLighterQueryClient(state, httpClient, logger);
         });
 
-        // Register HTTP client for command submission (commands require HTTP POST)
-        services.AddHttpClient("LighterCommandClient", client =>
+        // Register HTTP client for REST operations (markets list, candlesticks)
+        services.AddHttpClient("LighterRestClient", client =>
         {
             client.BaseAddress = new Uri($"{options.ApiUrl}/api/v1/");
             client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.Add("Accept", "application/json");
         });
 
-        // Register WebSocket-based command client
+        // Register WebSocket-based command client (uses WebSocket for transaction submission)
+        // HTTP client is provided for nonce synchronization fallback
         services.AddSingleton<ILighterCommandClient>(serviceProvider =>
         {
             var signer = serviceProvider.GetRequiredService<SignerClient>();
             var state = serviceProvider.GetRequiredService<ILighterRealtimeState>();
-            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
-            var httpClient = httpClientFactory.CreateClient("LighterCommandClient");
+            var wsClient = serviceProvider.GetRequiredService<ILighterWebSocketClient>();
             var logger = serviceProvider.GetRequiredService<ILogger<WsLighterCommandClient>>();
+            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("LighterRestClient");
 
-            return new WsLighterCommandClient(signer, state, httpClient, logger);
+            return new WsLighterCommandClient(signer, state, wsClient, logger, httpClient);
         });
 
         return services;
