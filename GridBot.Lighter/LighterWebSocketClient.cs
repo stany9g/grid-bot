@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using GridBot.Lighter.Models.WebSocket;
 using Microsoft.Extensions.Logging;
@@ -21,7 +20,6 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     private readonly ILogger<LighterWebSocketClient> _logger;
     private readonly WebSocketOptions _options;
     private readonly LighterOptions _lighterOptions;
-    private readonly JsonSerializerOptions _jsonOptions;
 
     // Connection state
     private ClientWebSocket? _webSocket;
@@ -92,13 +90,6 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _lighterOptions = lighterOptions?.Value ?? throw new ArgumentNullException(nameof(lighterOptions));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-
-        _jsonOptions = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            PropertyNameCaseInsensitive = true
-        };
 
         // Create bounded channels with configured capacity
         var channelOptions = new BoundedChannelOptions(_options.ChannelCapacity)
@@ -407,7 +398,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
 
     private async Task SendMessageAsync(object message, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.Serialize(message, _jsonOptions);
+        var json = JsonSerializer.Serialize(message, LighterJsonOptions.Default);
         var bytes = Encoding.UTF8.GetBytes(json);
 
         await _sendLock.WaitAsync(cancellationToken);
@@ -596,7 +587,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     {
         try
         {
-            var msg = JsonSerializer.Deserialize<OrderBookMessage>(json, _jsonOptions);
+            var msg = JsonSerializer.Deserialize<OrderBookMessage>(json, LighterJsonOptions.Default);
             if (msg?.OrderBook == null) return;
 
             var marketId = ExtractMarketIdFromChannel(msg.Channel, "order_book/");
@@ -621,7 +612,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     {
         try
         {
-            var msg = JsonSerializer.Deserialize<AccountAllMessage>(json, _jsonOptions);
+            var msg = JsonSerializer.Deserialize<AccountAllMessage>(json, LighterJsonOptions.Default);
             if (msg == null) return;
 
             // Calculate collateral from USDC asset balance (asset_id 3)
@@ -674,7 +665,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     {
         try
         {
-            var msg = JsonSerializer.Deserialize<OrdersMessage>(json, _jsonOptions);
+            var msg = JsonSerializer.Deserialize<OrdersMessage>(json, LighterJsonOptions.Default);
             if (msg?.Orders == null) return;
 
             foreach (var (marketIdStr, orders) in msg.Orders)
@@ -708,7 +699,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     {
         try
         {
-            var msg = JsonSerializer.Deserialize<MarketStatsMessage>(json, _jsonOptions);
+            var msg = JsonSerializer.Deserialize<MarketStatsMessage>(json, LighterJsonOptions.Default);
             if (msg?.MarketStats == null) return;
 
             var evt = new MarketStatsUpdateEvent
@@ -732,7 +723,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     {
         try
         {
-            var msg = JsonSerializer.Deserialize<NotificationMessage>(json, _jsonOptions);
+            var msg = JsonSerializer.Deserialize<NotificationMessage>(json, LighterJsonOptions.Default);
             if (msg?.Notifs == null || msg.Notifs.Count == 0) return;
 
             foreach (var notif in msg.Notifs)

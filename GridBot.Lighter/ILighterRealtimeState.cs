@@ -1,6 +1,6 @@
 using GridBot.Lighter.Models.WebSocket;
 
-namespace GridBot.ApiService.Services.Realtime;
+namespace GridBot.Lighter;
 
 /// <summary>
 /// Thread-safe snapshot access to real-time WebSocket data.

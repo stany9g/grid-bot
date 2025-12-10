@@ -7,7 +7,6 @@ using GridBot.ApiService.Services.Capacity;
 using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
-using GridBot.ApiService.Services.Realtime;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.ApiService.Services.Telemetry;

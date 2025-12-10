@@ -1,20 +1,18 @@
 using System.Collections.Concurrent;
-using GridBot.ApiService.Configuration;
-using GridBot.Lighter;
 using GridBot.Lighter.Models.WebSocket;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace GridBot.ApiService.Services.Realtime;
+namespace GridBot.Lighter;
 
 /// <summary>
 /// Background service that processes WebSocket channel events and maintains thread-safe state snapshots.
 /// Implements ILighterRealtimeState for read access to latest data.
+/// Market subscriptions must be triggered explicitly via SubscribeMarketAsync after market discovery.
 /// </summary>
 public sealed class LighterRealtimeStateService : BackgroundService, ILighterRealtimeState
 {
     private readonly ILighterWebSocketClient _wsClient;
-    private readonly IRiskConfiguration _riskConfig;
     private readonly ILogger<LighterRealtimeStateService> _logger;
 
     // Thread-safe state storage
@@ -43,15 +41,12 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
     /// Initializes a new instance of the <see cref="LighterRealtimeStateService"/> class.
     /// </summary>
     /// <param name="wsClient">WebSocket client for data streaming.</param>
-    /// <param name="riskConfig">Risk configuration for market ID.</param>
     /// <param name="logger">Logger instance.</param>
     public LighterRealtimeStateService(
         ILighterWebSocketClient wsClient,
-        IRiskConfiguration riskConfig,
         ILogger<LighterRealtimeStateService> logger)
     {
         _wsClient = wsClient ?? throw new ArgumentNullException(nameof(wsClient));
-        _riskConfig = riskConfig ?? throw new ArgumentNullException(nameof(riskConfig));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -113,17 +108,14 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
             // Connect to WebSocket
             await _wsClient.ConnectAsync(stoppingToken);
 
-            // Subscribe to account data
+            // Subscribe to account data (always needed)
             await _wsClient.SubscribeAccountAsync(stoppingToken);
             await _wsClient.SubscribeOrdersAsync(stoppingToken);
             await _wsClient.SubscribeNotificationsAsync(stoppingToken);
 
-            // Subscribe to market data for the configured trading market
-            var marketId = _riskConfig.MarketId;
-            _logger.LogInformation(
-                "Auto-subscribing to market data for configured trading market {MarketId} ({Symbol})",
-                marketId, _riskConfig.Symbol);
-            await SubscribeMarketAsync(marketId, stoppingToken);
+            // Note: Market data subscriptions (order book, market stats) are triggered
+            // via SubscribeMarketAsync AFTER MarketResolver discovers the market ID from symbol.
+            _logger.LogInformation("WebSocket connected. Waiting for market subscription via SubscribeMarketAsync...");
 
             // Start processing channel readers in parallel
             var tasks = new[]
@@ -158,12 +150,15 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
                 _orderBooks[update.MarketId] = update.Snapshot;
                 Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
 
-                _logger.LogTrace(
-                    "Order book update for market {MarketId}: bid={BestBid:F2} ask={BestAsk:F2} spread={Spread:F4}%",
-                    update.MarketId,
-                    update.Snapshot.BestBidPrice,
-                    update.Snapshot.BestAskPrice,
-                    update.Snapshot.SpreadPercent);
+                if (_logger.IsEnabled(LogLevel.Trace))
+                {
+                    _logger.LogTrace(
+                        "Order book update for market {MarketId}: bid={BestBid:F2} ask={BestAsk:F2} spread={Spread:F4}%",
+                        update.MarketId,
+                        update.Snapshot.BestBidPrice,
+                        update.Snapshot.BestAskPrice,
+                        update.Snapshot.SpreadPercent);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -193,11 +188,14 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
                 };
                 Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
 
-                _logger.LogTrace(
-                    "Account update: collateral={Collateral:F2} available={Available:F2} positions={PositionCount}",
-                    update.Collateral,
-                    update.AvailableBalance,
-                    update.Positions.Count);
+                if (_logger.IsEnabled(LogLevel.Trace))
+                {
+                    _logger.LogTrace(
+                        "Account update: collateral={Collateral:F2} available={Available:F2} positions={PositionCount}",
+                        update.Collateral,
+                        update.AvailableBalance,
+                        update.Positions.Count);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -219,10 +217,13 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
                 _orders[update.MarketId] = update.Orders;
                 Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
 
-                _logger.LogTrace(
-                    "Order update for market {MarketId}: {OrderCount} orders",
-                    update.MarketId,
-                    update.Orders.Count);
+                if (_logger.IsEnabled(LogLevel.Trace))
+                {
+                    _logger.LogTrace(
+                        "Order update for market {MarketId}: {OrderCount} orders",
+                        update.MarketId,
+                        update.Orders.Count);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -252,11 +253,14 @@ public sealed class LighterRealtimeStateService : BackgroundService, ILighterRea
                 };
                 Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
 
-                _logger.LogTrace(
-                    "Market stats update for market {MarketId}: mark={MarkPrice:F2} funding={FundingRate:F6}",
-                    update.MarketId,
-                    update.MarkPrice,
-                    update.FundingRate);
+                if (_logger.IsEnabled(LogLevel.Trace))
+                {
+                    _logger.LogTrace(
+                        "Market stats update for market {MarketId}: mark={MarkPrice:F2} funding={FundingRate:F6}",
+                        update.MarketId,
+                        update.MarkPrice,
+                        update.FundingRate);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

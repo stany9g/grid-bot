@@ -1,25 +1,30 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace GridBot.Lighter;
 
 /// <summary>
 /// Extension methods for registering Lighter services with dependency injection.
+/// Uses WebSocket-first architecture with no REST fallback for queries.
 /// </summary>
 public static class LighterServiceCollectionExtensions
 {
     /// <summary>
     /// Adds the Lighter client to the service collection using configuration from appsettings.json.
+    /// Configures WebSocket-based query and command clients.
     /// </summary>
     /// <param name="services">The service collection.</param>
-    /// <param name="configuration">Configuration containing the "Lighter" section.</param>
+    /// <param name="configuration">Configuration containing the "Lighter" and "LighterWebSocket" sections.</param>
     /// <returns>The service collection for chaining.</returns>
     /// <exception cref="InvalidOperationException">Thrown if configuration is invalid.</exception>
     public static IServiceCollection AddLighterClient(
         this IServiceCollection services,
         IConfiguration configuration)
     {
+        // Bind and validate Lighter options
         var options = new LighterOptions();
         configuration.GetSection(LighterOptions.SectionName).Bind(options);
 
@@ -30,84 +35,20 @@ public static class LighterServiceCollectionExtensions
         if (validationError != null)
             throw new InvalidOperationException($"Lighter configuration is invalid: {validationError}");
 
-        return services.AddLighterClient(opts =>
-        {
-            opts.ApiUrl = options.ApiUrl;
-            opts.PrivateKey = options.PrivateKey;
-            opts.ChainId = options.ChainId;
-            opts.ApiKeyIndex = options.ApiKeyIndex;
-            opts.AccountIndex = options.AccountIndex;
-            opts.InitialNonce = options.InitialNonce;
-        });
-    }
-
-    /// <summary>
-    /// Adds the Lighter client to the service collection using a configuration action.
-    /// </summary>
-    /// <param name="services">The service collection.</param>
-    /// <param name="configureOptions">Action to configure options.</param>
-    /// <returns>The service collection for chaining.</returns>
-    /// <exception cref="InvalidOperationException">Thrown if configuration is invalid or SignerClient initialization fails.</exception>
-    public static IServiceCollection AddLighterClient(
-        this IServiceCollection services,
-        Action<LighterOptions> configureOptions)
-    {
-        var options = new LighterOptions();
-        configureOptions(options);
-
-        var validationError = options.Validate();
-        if (validationError != null)
-            throw new InvalidOperationException($"Lighter configuration is invalid: {validationError}");
+        // Bind WebSocket options
+        services.AddOptions<WebSocketOptions>()
+            .Bind(configuration.GetSection(WebSocketOptions.SectionName));
 
         // Validate native library early to catch platform/architecture issues
-        Console.WriteLine("[LighterClient] Validating native signing library...");
         var nativeError = SignerClient.ValidateNativeLibrary();
         if (nativeError != null)
         {
             throw new InvalidOperationException($"Native library validation failed: {nativeError}");
         }
-        Console.WriteLine("[LighterClient] Native library validated successfully");
 
-        // Register query client with HttpClientFactory
-        services.AddHttpClient<ILighterQueryClient, LighterQueryClient>((serviceProvider, client) =>
+        // Register SignerClient as singleton (shared by WebSocket and command clients)
+        services.AddSingleton(serviceProvider =>
         {
-            client.BaseAddress = new Uri($"{options.ApiUrl}/api/v1/");
-            client.Timeout = TimeSpan.FromSeconds(30);
-            client.DefaultRequestHeaders.Add("Accept", "application/json");
-        });
-
-        // Register write HttpClient separately
-        services.AddHttpClient("LighterWriteClient", client =>
-        {
-            client.BaseAddress = new Uri($"{options.ApiUrl}/api/v1/");
-            client.Timeout = TimeSpan.FromSeconds(30);
-            client.DefaultRequestHeaders.Add("Accept", "application/json");
-        });
-
-        // Register command client as singleton
-        services.AddSingleton<ILighterCommandClient>(serviceProvider =>
-        {
-            var queryClient = serviceProvider.GetRequiredService<ILighterQueryClient>();
-            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
-            var writeClient = httpClientFactory.CreateClient("LighterWriteClient");
-
-            // Fetch the correct nonce from the server at startup
-            long initialNonce;
-            try
-            {
-                var nonceResponse = queryClient.GetNextNonceAsync(options.AccountIndex, options.ApiKeyIndex)
-                    .GetAwaiter().GetResult();
-                // Subtract 1 because GetNextNonce() does ++_currentNonce before returning
-                initialNonce = nonceResponse.Nonce - 1;
-                Console.WriteLine($"[LighterClient] Fetched nonce from server: {nonceResponse.Nonce}, setting initial nonce to {initialNonce}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[LighterClient] Failed to fetch nonce from server, using config value {options.InitialNonce}: {ex.Message}");
-                initialNonce = options.InitialNonce;
-            }
-
-            Console.WriteLine("[LighterClient] Initializing SignerClient...");
             var signer = new SignerClient();
             var error = signer.InitializeAsync(
                 options.ApiUrl,
@@ -115,50 +56,62 @@ public static class LighterServiceCollectionExtensions
                 options.ChainId,
                 options.ApiKeyIndex,
                 options.AccountIndex,
-                initialNonce
+                options.InitialNonce
             ).GetAwaiter().GetResult();
 
             if (error != null)
                 throw new InvalidOperationException($"Failed to initialize SignerClient: {error}");
 
-            Console.WriteLine("[LighterClient] SignerClient initialized successfully");
-            return new LighterCommandClient(queryClient, writeClient, signer);
+            return signer;
         });
-
-        // Register SignerClient as singleton for WebSocket auth token generation
-        services.AddSingleton(serviceProvider =>
-        {
-            // Get the signer from the command client (they share the same instance)
-            var commandClient = serviceProvider.GetRequiredService<ILighterCommandClient>();
-            return ((LighterCommandClient)commandClient).Signer;
-        });
-
-        return services;
-    }
-
-    /// <summary>
-    /// Adds the Lighter WebSocket client to the service collection.
-    /// Call this after AddLighterClient to ensure SignerClient is available.
-    /// </summary>
-    /// <param name="services">The service collection.</param>
-    /// <param name="configuration">Configuration containing the "LighterWebSocket" section.</param>
-    /// <returns>The service collection for chaining.</returns>
-    public static IServiceCollection AddLighterWebSocket(
-        this IServiceCollection services,
-        IConfiguration configuration)
-    {
-        services.AddOptions<WebSocketOptions>()
-            .Bind(configuration.GetSection(WebSocketOptions.SectionName));
 
         // Register WebSocket client as singleton
         services.AddSingleton<ILighterWebSocketClient>(serviceProvider =>
         {
             var signerClient = serviceProvider.GetRequiredService<SignerClient>();
-            var wsOptions = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<WebSocketOptions>>();
-            var lighterOptions = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<LighterOptions>>();
+            var wsOptions = serviceProvider.GetRequiredService<IOptions<WebSocketOptions>>();
+            var lighterOptions = serviceProvider.GetRequiredService<IOptions<LighterOptions>>();
             var logger = serviceProvider.GetRequiredService<ILogger<LighterWebSocketClient>>();
 
             return new LighterWebSocketClient(signerClient, wsOptions, lighterOptions, logger);
+        });
+
+        // Register real-time state service as singleton (implements ILighterRealtimeState)
+        services.AddSingleton<LighterRealtimeStateService>();
+        services.AddSingleton<ILighterRealtimeState>(sp => sp.GetRequiredService<LighterRealtimeStateService>());
+
+        // Register as hosted service to start WebSocket processing
+        services.AddHostedService(sp => sp.GetRequiredService<LighterRealtimeStateService>());
+
+        // Register WebSocket-based query client (uses REST for market list and candlesticks)
+        services.AddSingleton<ILighterQueryClient>(serviceProvider =>
+        {
+            var state = serviceProvider.GetRequiredService<ILighterRealtimeState>();
+            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("LighterCommandClient");
+            var logger = serviceProvider.GetRequiredService<ILogger<WsLighterQueryClient>>();
+
+            return new WsLighterQueryClient(state, httpClient, logger);
+        });
+
+        // Register HTTP client for command submission (commands require HTTP POST)
+        services.AddHttpClient("LighterCommandClient", client =>
+        {
+            client.BaseAddress = new Uri($"{options.ApiUrl}/api/v1/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.Add("Accept", "application/json");
+        });
+
+        // Register WebSocket-based command client
+        services.AddSingleton<ILighterCommandClient>(serviceProvider =>
+        {
+            var signer = serviceProvider.GetRequiredService<SignerClient>();
+            var state = serviceProvider.GetRequiredService<ILighterRealtimeState>();
+            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("LighterCommandClient");
+            var logger = serviceProvider.GetRequiredService<ILogger<WsLighterCommandClient>>();
+
+            return new WsLighterCommandClient(signer, state, httpClient, logger);
         });
 
         return services;

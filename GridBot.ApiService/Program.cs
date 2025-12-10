@@ -7,7 +7,6 @@ using GridBot.ApiService.Services.Dashboard;
 using GridBot.ApiService.Services.DecisionEngine;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
-using GridBot.ApiService.Services.Realtime;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.Lighter;
@@ -29,16 +28,8 @@ public partial class Program
         // Add Redis distributed cache from Aspire
         builder.AddRedisDistributedCache("cache");
 
-        // Add Lighter client from configuration
+        // Add Lighter client from configuration (includes WebSocket, realtime state, query and command clients)
         builder.Services.AddLighterClient(builder.Configuration);
-
-        // Add Lighter WebSocket client for real-time data streaming
-        builder.Services.AddLighterWebSocket(builder.Configuration);
-
-        // Register real-time state service (processes WebSocket channel events)
-        builder.Services.AddSingleton<ILighterRealtimeState, LighterRealtimeStateService>();
-        builder.Services.AddHostedService(sp =>
-            (LighterRealtimeStateService)sp.GetRequiredService<ILighterRealtimeState>());
 
         // Add state persistence services
         builder.Services.AddPersistence();
@@ -46,9 +37,9 @@ public partial class Program
         // Add ALTE trading bot services
         builder.Services.AddTradingBot(builder.Configuration);
 
-        // Override IMarketDataService with HybridMarketDataService (WebSocket-first with REST fallback)
+        // Override IMarketDataService with WsMarketDataService (pure WebSocket, no REST)
         // This must come after AddTradingBot which registers the default MarketDataService
-        builder.Services.AddSingleton<IMarketDataService, HybridMarketDataService>();
+        builder.Services.AddSingleton<IMarketDataService, WsMarketDataService>();
 
         // Add services to the container.
         builder.Services.AddProblemDetails();
@@ -1099,9 +1090,13 @@ public partial class Program
         app.MapRazorComponents<App>()
             .AddInteractiveServerRenderMode();
 
-        // Initialize market resolver before starting the application
+        // Initialize market resolver (discovers market ID from configured symbol via REST)
         var marketResolver = app.Services.GetRequiredService<IMarketResolver>();
         await marketResolver.InitializeAsync();
+
+        // Subscribe to WebSocket market data for the resolved market
+        var realtimeState = app.Services.GetRequiredService<ILighterRealtimeState>();
+        await realtimeState.SubscribeMarketAsync(marketResolver.MarketId);
 
         await app.RunAsync();
     }
