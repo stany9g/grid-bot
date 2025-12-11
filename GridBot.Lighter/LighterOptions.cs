@@ -43,6 +43,12 @@ public sealed class LighterOptions
     public long InitialNonce { get; set; } = 0;
 
     /// <summary>
+    /// When true, disables all order creation/modification/cancellation operations.
+    /// Commands are logged but not executed. Useful for testing WebSocket data feeds.
+    /// </summary>
+    public bool DryRun { get; set; } = false;
+
+    /// <summary>
     /// Validates the configuration.
     /// </summary>
     /// <returns>Error message if invalid, null if valid.</returns>

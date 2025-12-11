@@ -101,6 +101,7 @@ public static class LighterServiceCollectionExtensions
 
         // Register WebSocket-based command client (uses WebSocket for transaction submission)
         // HTTP client is provided for nonce synchronization fallback
+        // When DryRun is enabled, wraps with DryRunCommandClient that logs but doesn't execute
         services.AddSingleton<ILighterCommandClient>(serviceProvider =>
         {
             var signer = serviceProvider.GetRequiredService<SignerClient>();
@@ -110,7 +111,15 @@ public static class LighterServiceCollectionExtensions
             var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient("LighterRestClient");
 
-            return new WsLighterCommandClient(signer, state, wsClient, logger, httpClient);
+            ILighterCommandClient commandClient = new WsLighterCommandClient(signer, state, wsClient, logger, httpClient);
+
+            if (options.DryRun)
+            {
+                var dryRunLogger = serviceProvider.GetRequiredService<ILogger<DryRunCommandClient>>();
+                commandClient = new DryRunCommandClient(commandClient, dryRunLogger);
+            }
+
+            return commandClient;
         });
 
         return services;

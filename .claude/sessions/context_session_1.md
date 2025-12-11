@@ -2,6 +2,41 @@
 
 ## Status: ACTIVE
 
+## Recent Change: DryRun Mode (2025-12-11)
+
+### Problem
+Need to test WebSocket data feeds on mainnet without creating real orders.
+
+### Solution
+Added `DryRun` configuration option that disables all write operations while preserving read operations.
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `LighterOptions.cs` | Added `DryRun` property (default: false) |
+| `DryRunCommandClient.cs` | New decorator that logs commands instead of executing |
+| `LighterServiceCollectionExtensions.cs` | Conditionally wraps command client with decorator |
+
+### Usage
+
+```json
+{
+  "Lighter": {
+    "DryRun": true
+  }
+}
+```
+
+When enabled:
+- All order create/modify/cancel operations are logged but NOT executed
+- WebSocket data feeds (order book, account, etc.) work normally
+- Auth token creation and nonce sync still work (read operations)
+- Log messages prefixed with `[DRY RUN]`
+- Startup shows warning: "DRY RUN MODE ENABLED"
+
+---
+
 ## Recent Change: Order Book Data Waiting Mechanism (2025-12-11)
 
 ### Problem
