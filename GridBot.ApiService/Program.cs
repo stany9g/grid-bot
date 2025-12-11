@@ -37,10 +37,6 @@ public partial class Program
         // Add ALTE trading bot services
         builder.Services.AddTradingBot(builder.Configuration);
 
-        // Override IMarketDataService with WsMarketDataService (pure WebSocket, no REST)
-        // This must come after AddTradingBot which registers the default MarketDataService
-        builder.Services.AddSingleton<IMarketDataService, WsMarketDataService>();
-
         // Add services to the container.
         builder.Services.AddProblemDetails();
 
