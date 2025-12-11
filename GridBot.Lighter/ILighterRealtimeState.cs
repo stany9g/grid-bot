@@ -82,6 +82,14 @@ public interface ILighterRealtimeState : IAsyncDisposable
     bool IsMarketDataReady(int marketId);
 
     /// <summary>
+    /// Checks if order book data is available for a specific market.
+    /// Returns true when we have received at least one order book update with bids and asks.
+    /// </summary>
+    /// <param name="marketId">Market identifier.</param>
+    /// <returns>True if order book data is available, false otherwise.</returns>
+    bool IsOrderBookReady(int marketId);
+
+    /// <summary>
     /// Waits until market data is available for a specific market.
     /// Use this after subscribing to market data to ensure WebSocket has received initial data.
     /// </summary>
@@ -91,6 +99,17 @@ public interface ILighterRealtimeState : IAsyncDisposable
     /// <returns>Task that completes when market data is available.</returns>
     /// <exception cref="TimeoutException">Thrown if data is not received within the timeout period.</exception>
     Task WaitForMarketDataAsync(int marketId, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Waits until order book data is available for a specific market.
+    /// Use this when order book data is required (e.g., for order placement).
+    /// </summary>
+    /// <param name="marketId">Market identifier.</param>
+    /// <param name="timeout">Maximum time to wait. Defaults to 30 seconds if not specified.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Task that completes when order book data is available.</returns>
+    /// <exception cref="TimeoutException">Thrown if data is not received within the timeout period.</exception>
+    Task WaitForOrderBookAsync(int marketId, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Subscribes to data updates for a specific market.

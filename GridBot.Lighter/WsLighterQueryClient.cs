@@ -168,11 +168,18 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
     }
 
     /// <inheritdoc />
-    public Task<OrderBookOrdersResponse> GetOrderBookOrdersAsync(
+    public async Task<OrderBookOrdersResponse> GetOrderBookOrdersAsync(
         int marketId,
         int? limit = null,
         CancellationToken cancellationToken = default)
     {
+        // Wait for order book data if not yet available (e.g., WebSocket just connected)
+        if (!_state.IsOrderBookReady(marketId))
+        {
+            _logger.LogDebug("Order book not ready for market {MarketId}, waiting...", marketId);
+            await _state.WaitForOrderBookAsync(marketId, TimeSpan.FromSeconds(10), cancellationToken);
+        }
+
         var snapshot = _state.GetOrderBook(marketId);
         if (snapshot == null)
         {
@@ -207,7 +214,7 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
             TotalAsks = snapshot.Asks.Count
         };
 
-        return Task.FromResult(response);
+        return response;
     }
 
     /// <inheritdoc />

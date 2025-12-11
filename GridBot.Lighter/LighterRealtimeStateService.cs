@@ -92,6 +92,16 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     }
 
     /// <inheritdoc />
+    public bool IsOrderBookReady(int marketId)
+    {
+        if (!_orderBooks.TryGetValue(marketId, out var book))
+            return false;
+
+        // Ensure we have actual bid/ask data
+        return book.Bids.Count > 0 && book.Asks.Count > 0;
+    }
+
+    /// <inheritdoc />
     public async Task WaitForMarketDataAsync(int marketId, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -119,6 +129,43 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             {
                 throw new TimeoutException(
                     $"Timed out waiting for market {marketId} data after {effectiveTimeout.TotalSeconds}s. " +
+                    $"WebSocket connected: {IsConnected}");
+            }
+
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    /// <inheritdoc />
+    public async Task WaitForOrderBookAsync(int marketId, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(30);
+        var pollInterval = TimeSpan.FromMilliseconds(100);
+        var deadline = DateTimeOffset.UtcNow + effectiveTimeout;
+
+        _logger.LogInformation(
+            "Waiting for order book data for market {MarketId} (timeout: {Timeout}s)...",
+            marketId, effectiveTimeout.TotalSeconds);
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (IsOrderBookReady(marketId))
+            {
+                var book = GetOrderBook(marketId);
+                _logger.LogInformation(
+                    "Order book ready for market {MarketId}. Bids: {BidCount}, Asks: {AskCount}, MidPrice: {MidPrice:F2}",
+                    marketId, book?.Bids.Count ?? 0, book?.Asks.Count ?? 0, book?.MidPrice ?? 0);
+                return;
+            }
+
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"Timed out waiting for order book data for market {marketId} after {effectiveTimeout.TotalSeconds}s. " +
                     $"WebSocket connected: {IsConnected}");
             }
 
