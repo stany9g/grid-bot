@@ -311,3 +311,45 @@ public sealed record NotificationEvent : ChannelEvent
     /// </summary>
     public int? MarketId { get; init; }
 }
+
+/// <summary>
+/// User statistics update event from user_stats channel.
+/// Contains perps collateral and trading balance information.
+/// </summary>
+public sealed record UserStatsUpdateEvent : ChannelEvent
+{
+    /// <summary>
+    /// Account identifier.
+    /// </summary>
+    public required long AccountId { get; init; }
+
+    /// <summary>
+    /// Total perps collateral deposited (USDC).
+    /// </summary>
+    public required decimal Collateral { get; init; }
+
+    /// <summary>
+    /// Portfolio value = Collateral + Unrealized PnL.
+    /// </summary>
+    public required decimal PortfolioValue { get; init; }
+
+    /// <summary>
+    /// Balance available for trading/withdrawals (after margin requirements).
+    /// </summary>
+    public required decimal AvailableBalance { get; init; }
+
+    /// <summary>
+    /// Available buying power based on leverage.
+    /// </summary>
+    public required decimal BuyingPower { get; init; }
+
+    /// <summary>
+    /// Current account leverage.
+    /// </summary>
+    public required decimal Leverage { get; init; }
+
+    /// <summary>
+    /// Current margin utilization percentage (0.00-1.00).
+    /// </summary>
+    public required decimal MarginUsage { get; init; }
+}

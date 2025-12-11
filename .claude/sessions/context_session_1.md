@@ -2,6 +2,60 @@
 
 ## Status: ACTIVE
 
+## COMPLETED: user_stats WebSocket Channel for Perps Balance (2025-12-11)
+
+### Problem
+The `account_all` WebSocket channel does NOT include perps collateral/available_balance at root level. Current implementation incorrectly calculated collateral from `assets.3.balance` (USDC spot balance), but this is NOT the perps trading balance.
+
+UI shows:
+- USDC/Spot: $7.50 (matches `assets.3.balance`)
+- USDC/Perps: $4,955.30 (THIS is needed for trading but NOT in `account_all`)
+
+### Root Cause
+Lighter DEX has a **separate `user_stats` channel** that provides perps trading balance:
+
+```json
+{
+  "channel": "user_stats:{ACCOUNT_ID}",
+  "stats": {
+    "collateral": "4955.30",
+    "portfolio_value": "5123.45",
+    "available_balance": "3500.00",
+    "buying_power": "8750.00",
+    "leverage": "2.50",
+    "margin_usage": "0.35",
+    "cross_stats": {...},
+    "total_stats": {...}
+  },
+  "type": "update/user_stats"
+}
+```
+
+### Key Insight: Spot vs Perps Balance
+Two separate balance pools on Lighter:
+1. **Spot Balance** (`assets.3.balance` in `account_all`) - USDC in spot wallet
+2. **Perps Collateral** (`stats.collateral` in `user_stats`) - USDC deposited for perpetual futures trading
+
+### Implementation COMPLETED
+
+| File | Change |
+|------|--------|
+| `Models/WebSocket/ChannelEvents.cs` | Added `UserStatsUpdateEvent` with Collateral, PortfolioValue, AvailableBalance, BuyingPower, Leverage, MarginUsage |
+| `ILighterWebSocketClient.cs` | Added `ChannelReader<UserStatsUpdateEvent> UserStatsUpdates` and `SubscribeUserStatsAsync()` |
+| `LighterWebSocketClient.cs` | Added `_userStatsChannel`, subscription method, message routing, and `HandleUserStatsMessageAsync()` |
+| `LighterRealtimeStateService.cs` | Added `_userStats` field, subscribes to user_stats in `InitializeAsync()`, added `ProcessUserStatsUpdatesAsync()`, updated `ProcessAccountUpdatesAsync()` to use user_stats values for Collateral/AvailableBalance |
+
+### How It Works Now
+1. `LighterRealtimeStateService.InitializeAsync()` subscribes to `user_stats/{ACCOUNT_ID}`
+2. `ProcessUserStatsUpdatesAsync()` stores the latest `UserStatsUpdateEvent` in `_userStats`
+3. `ProcessAccountUpdatesAsync()` uses `_userStats.Collateral` and `_userStats.AvailableBalance` when creating `AccountSnapshot`
+4. The `AccountSnapshot` returned by `GetAccount()` now contains the correct perps collateral ($4,955.30) instead of spot USDC ($7.50)
+
+### Reference Docs
+See full documentation: `.claude/doc/lighter-websocket-user-stats-channel.md`
+
+---
+
 ## Recent Change: DryRun Mode (2025-12-11)
 
 ### Problem
@@ -79,11 +133,13 @@ Task WaitForOrderBookAsync(int marketId, TimeSpan? timeout = null, CancellationT
 ┌─────────────────────────────────────────────────────────────┐
 │                     GridBot.Lighter                          │
 ├─────────────────────────────────────────────────────────────┤
-│  LighterWebSocketClient (existing)                           │
-│  └── Channels: OrderBook, Account, Orders, MarketStats       │
+│  LighterWebSocketClient                                      │
+│  └── Channels: OrderBook, Account, Orders, MarketStats,      │
+│                UserStats, Notifications, Connection          │
 │                           ▼                                  │
 │  LighterRealtimeStateService (BackgroundService)             │
 │  ├── ConcurrentDictionary<marketId, snapshot>                │
+│  ├── _userStats: UserStatsUpdateEvent (perps balance)        │
 │  ├── Implements ILighterRealtimeState                        │
 │  ├── Started automatically as HostedService                  │
 │  ├── IsOrderBookReady() - checks if order book data exists   │
@@ -105,7 +161,7 @@ Program.cs startup:
 1. Services configured (AddLighterClient)
 2. LighterRealtimeStateService starts as HostedService
    └── Connects WebSocket
-   └── Subscribes to account/orders/notifications
+   └── Subscribes to account/orders/notifications/user_stats
    └── Does NOT subscribe to market data yet
 3. MarketResolver.InitializeAsync()
    └── Calls REST GetOrderBooksAsync to get market list
@@ -114,6 +170,7 @@ Program.cs startup:
    └── Subscribes to order book & market stats for the market
 5. App starts running
    └── First GetOrderBookOrdersAsync call waits for WS data
+   └── Account balance shows perps collateral (from user_stats)
 ```
 
 ## Configuration

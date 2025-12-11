@@ -19,6 +19,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     private readonly ConcurrentDictionary<int, IReadOnlyList<OrderSnapshot>> _orders = new();
     private readonly ConcurrentDictionary<int, MarketStatsSnapshot> _marketStats = new();
     private volatile AccountSnapshot? _account;
+    private volatile UserStatsUpdateEvent? _userStats;
     private long _lastUpdateTimeTicks;
 
     // Background processing
@@ -98,7 +99,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             return false;
 
         // Ensure we have actual bid/ask data
-        return book.Bids.Count > 0 && book.Asks.Count > 0;
+        return book.Bids.Count > 0 || book.Asks.Count > 0;
     }
 
     /// <inheritdoc />
@@ -205,6 +206,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         await _wsClient.SubscribeAccountAsync(cancellationToken);
         await _wsClient.SubscribeOrdersAsync(cancellationToken);
         await _wsClient.SubscribeNotificationsAsync(cancellationToken);
+        await _wsClient.SubscribeUserStatsAsync(cancellationToken);
 
         _logger.LogInformation("WebSocket connected. Starting channel processing...");
 
@@ -268,7 +270,8 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             ProcessOrderUpdatesAsync(cancellationToken),
             ProcessMarketStatsUpdatesAsync(cancellationToken),
             ProcessConnectionStateAsync(cancellationToken),
-            ProcessNotificationsAsync(cancellationToken)
+            ProcessNotificationsAsync(cancellationToken),
+            ProcessUserStatsUpdatesAsync(cancellationToken)
         };
 
         try
@@ -321,12 +324,19 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             await foreach (var update in _wsClient.AccountUpdates.ReadAllAsync(cancellationToken))
             {
+                // Use user_stats for collateral and available balance (perps trading balance)
+                // Fall back to account update values if user_stats not yet received
+                var userStats = _userStats;
+                var collateral = userStats?.Collateral ?? update.Collateral;
+                var availableBalance = userStats?.AvailableBalance ?? update.AvailableBalance;
+                var portfolioValue = userStats?.PortfolioValue ?? update.PortfolioValue;
+
                 _account = new AccountSnapshot
                 {
                     AccountId = update.AccountId,
-                    Collateral = update.Collateral,
-                    AvailableBalance = update.AvailableBalance,
-                    PortfolioValue = update.PortfolioValue,
+                    Collateral = collateral,
+                    AvailableBalance = availableBalance,
+                    PortfolioValue = portfolioValue,
                     Positions = update.Positions.ToDictionary(p => p.MarketId),
                     LastUpdated = update.Timestamp
                 };
@@ -336,8 +346,8 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                 {
                     _logger.LogTrace(
                         "Account update: collateral={Collateral:F2} available={Available:F2} positions={PositionCount}",
-                        update.Collateral,
-                        update.AvailableBalance,
+                        collateral,
+                        availableBalance,
                         update.Positions.Count);
                 }
             }
@@ -471,6 +481,48 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing notifications");
+        }
+    }
+
+    private async Task ProcessUserStatsUpdatesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var update in _wsClient.UserStatsUpdates.ReadAllAsync(cancellationToken))
+            {
+                _userStats = update;
+                Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
+
+                // Also update the account snapshot with new user stats values
+                var existingAccount = _account;
+                if (existingAccount != null)
+                {
+                    _account = existingAccount with
+                    {
+                        Collateral = update.Collateral,
+                        AvailableBalance = update.AvailableBalance,
+                        PortfolioValue = update.PortfolioValue,
+                        LastUpdated = update.Timestamp
+                    };
+                }
+
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug(
+                        "User stats update: collateral={Collateral:F2} available={Available:F2} portfolioValue={PortfolioValue:F2}",
+                        update.Collateral,
+                        update.AvailableBalance,
+                        update.PortfolioValue);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected during shutdown
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing user stats updates");
         }
     }
 }

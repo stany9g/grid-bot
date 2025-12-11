@@ -49,6 +49,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     private readonly Channel<MarketStatsUpdateEvent> _marketStatsChannel;
     private readonly Channel<ConnectionStateEvent> _connectionChannel;
     private readonly Channel<NotificationEvent> _notificationChannel;
+    private readonly Channel<UserStatsUpdateEvent> _userStatsChannel;
 
     private bool _disposed;
 
@@ -69,6 +70,9 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
 
     /// <inheritdoc />
     public ChannelReader<NotificationEvent> Notifications => _notificationChannel.Reader;
+
+    /// <inheritdoc />
+    public ChannelReader<UserStatsUpdateEvent> UserStatsUpdates => _userStatsChannel.Reader;
 
     /// <inheritdoc />
     public ConnectionState ConnectionState => _connectionState;
@@ -109,6 +113,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         _marketStatsChannel = Channel.CreateBounded<MarketStatsUpdateEvent>(channelOptions);
         _connectionChannel = Channel.CreateBounded<ConnectionStateEvent>(channelOptions);
         _notificationChannel = Channel.CreateBounded<NotificationEvent>(channelOptions);
+        _userStatsChannel = Channel.CreateBounded<UserStatsUpdateEvent>(channelOptions);
     }
 
     /// <inheritdoc />
@@ -222,6 +227,13 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     }
 
     /// <inheritdoc />
+    public async Task SubscribeUserStatsAsync(CancellationToken cancellationToken = default)
+    {
+        var channel = $"user_stats/{_lighterOptions.AccountIndex}";
+        await SubscribeAsync(channel, requiresAuth: true, cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task UnsubscribeAsync(string channel, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -259,6 +271,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         _marketStatsChannel.Writer.TryComplete();
         _connectionChannel.Writer.TryComplete();
         _notificationChannel.Writer.TryComplete();
+        _userStatsChannel.Writer.TryComplete();
 
         if (_receiveTask != null)
         {
@@ -405,6 +418,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     private async Task SendMessageAsync(object message, CancellationToken cancellationToken)
     {
         var json = JsonSerializer.Serialize(message, LighterJsonOptions.Default);
+        _logger.LogDebug("WS sending: {Json}", json.Length > 200 ? json[..200] + "..." : json);
         var bytes = Encoding.UTF8.GetBytes(json);
 
         await _sendLock.WaitAsync(cancellationToken);
@@ -454,6 +468,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
                 }
 
                 var messageJson = Encoding.UTF8.GetString(ms.ToArray());
+                _logger.LogTrace("WS raw message received, length={Length}", messageJson.Length);
                 await RouteMessageAsync(messageJson, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -477,18 +492,17 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
 
     private async ValueTask RouteMessageAsync(string json, CancellationToken cancellationToken)
     {
+        _logger.LogDebug("WS received: {Json}", TruncateJson(json));
+
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            if (!root.TryGetProperty("type", out var typeElement))
-            {
-                _logger.LogDebug("Message missing type field: {Json}", TruncateJson(json));
-                return;
-            }
-
-            var type = typeElement.GetString();
+            // Some messages don't have a type field - handle them by content
+            var type = root.TryGetProperty("type", out var typeElement)
+                ? typeElement.GetString()
+                : null;
 
             switch (type)
             {
@@ -539,6 +553,10 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
                     {
                         await HandleNotificationMessageAsync(json, cancellationToken);
                     }
+                    else if (root.TryGetProperty("stats", out _))
+                    {
+                        await HandleUserStatsMessageAsync(json, cancellationToken);
+                    }
                     else
                     {
                         _logger.LogDebug("Unknown message type: {Type}, json: {Json}", type, TruncateJson(json));
@@ -554,25 +572,36 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
 
     private async Task RouteUpdateMessageAsync(string channel, string json, CancellationToken cancellationToken)
     {
-        if (channel.StartsWith("order_book/", StringComparison.OrdinalIgnoreCase))
+        // Server may use colon or slash separator (e.g., "order_book:1" or "order_book/1")
+        if (channel.StartsWith("order_book/", StringComparison.OrdinalIgnoreCase) ||
+            channel.StartsWith("order_book:", StringComparison.OrdinalIgnoreCase))
         {
             await HandleOrderBookMessageAsync(json, cancellationToken);
         }
-        else if (channel.StartsWith("account_all/", StringComparison.OrdinalIgnoreCase))
+        else if (channel.StartsWith("account_all/", StringComparison.OrdinalIgnoreCase) ||
+                 channel.StartsWith("account_all:", StringComparison.OrdinalIgnoreCase))
         {
             await HandleAccountMessageAsync(json, cancellationToken);
         }
-        else if (channel.StartsWith("account_all_orders/", StringComparison.OrdinalIgnoreCase))
+        else if (channel.StartsWith("account_all_orders/", StringComparison.OrdinalIgnoreCase) ||
+                 channel.StartsWith("account_all_orders:", StringComparison.OrdinalIgnoreCase))
         {
             await HandleOrdersMessageAsync(json, cancellationToken);
         }
-        else if (channel.StartsWith("market_stats/", StringComparison.OrdinalIgnoreCase))
+        else if (channel.StartsWith("market_stats/", StringComparison.OrdinalIgnoreCase) ||
+                 channel.StartsWith("market_stats:", StringComparison.OrdinalIgnoreCase))
         {
             await HandleMarketStatsMessageAsync(json, cancellationToken);
         }
-        else if (channel.StartsWith("notification/", StringComparison.OrdinalIgnoreCase))
+        else if (channel.StartsWith("notification/", StringComparison.OrdinalIgnoreCase) ||
+                 channel.StartsWith("notification:", StringComparison.OrdinalIgnoreCase))
         {
             await HandleNotificationMessageAsync(json, cancellationToken);
+        }
+        else if (channel.StartsWith("user_stats/", StringComparison.OrdinalIgnoreCase) ||
+                 channel.StartsWith("user_stats:", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleUserStatsMessageAsync(json, cancellationToken);
         }
         else
         {
@@ -605,7 +634,11 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         try
         {
             var msg = JsonSerializer.Deserialize<OrderBookMessage>(json, LighterJsonOptions.Default);
-            if (msg?.OrderBook == null) return;
+            if (msg?.OrderBook == null)
+            {
+                _logger.LogWarning("Order book message deserialized but OrderBook is null. Channel: {Channel}", msg?.Channel);
+                return;
+            }
 
             var marketId = ExtractMarketIdFromChannel(msg.Channel, "order_book/");
             var snapshot = ParseOrderBookSnapshot(msg.OrderBook);
@@ -660,6 +693,8 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
                     });
                 }
             }
+
+                
 
             var evt = new AccountUpdateEvent
             {
@@ -764,6 +799,42 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         }
     }
 
+    private async Task HandleUserStatsMessageAsync(string json, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var msg = JsonSerializer.Deserialize<UserStatsMessage>(json, LighterJsonOptions.Default);
+            if (msg?.Stats == null) return;
+
+            var stats = msg.Stats;
+            var evt = new UserStatsUpdateEvent
+            {
+                AccountId = _lighterOptions.AccountIndex,
+                Collateral = ParseDecimal(stats.Collateral),
+                PortfolioValue = ParseDecimal(stats.PortfolioValue),
+                AvailableBalance = ParseDecimal(stats.AvailableBalance),
+                BuyingPower = ParseDecimal(stats.BuyingPower),
+                Leverage = ParseDecimal(stats.Leverage),
+                MarginUsage = ParseDecimal(stats.MarginUsage)
+            };
+
+            WriteToChannel(_userStatsChannel, evt);
+
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug(
+                    "User stats update: collateral={Collateral:F2} available={Available:F2} buyingPower={BuyingPower:F2}",
+                    evt.Collateral,
+                    evt.AvailableBalance,
+                    evt.BuyingPower);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to handle user stats message: {Json}", json[..Math.Min(200, json.Length)]);
+        }
+    }
+
     private static string BuildNotificationMessage(NotificationItem notif)
     {
         if (notif.Content == null)
@@ -813,7 +884,13 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
     private static int ExtractMarketIdFromChannel(string? channel, string prefix)
     {
         if (string.IsNullOrEmpty(channel)) return 0;
-        var suffix = channel.Replace(prefix, "", StringComparison.OrdinalIgnoreCase);
+
+        // Server may use colon or slash separator (e.g., "order_book:1" or "order_book/1")
+        var prefixWithColon = prefix.Replace("/", ":");
+        var suffix = channel
+            .Replace(prefix, "", StringComparison.OrdinalIgnoreCase)
+            .Replace(prefixWithColon, "", StringComparison.OrdinalIgnoreCase);
+
         return int.TryParse(suffix, out var id) ? id : 0;
     }
 

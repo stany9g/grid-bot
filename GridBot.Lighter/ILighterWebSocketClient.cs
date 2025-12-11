@@ -51,6 +51,11 @@ public interface ILighterWebSocketClient : IAsyncDisposable
     ChannelReader<NotificationEvent> Notifications { get; }
 
     /// <summary>
+    /// Channel reader for user stats updates (perps collateral, available balance).
+    /// </summary>
+    ChannelReader<UserStatsUpdateEvent> UserStatsUpdates { get; }
+
+    /// <summary>
     /// Connects to WebSocket and starts receiving messages.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -87,6 +92,12 @@ public interface ILighterWebSocketClient : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
     Task SubscribeNotificationsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Subscribes to user stats (perps collateral, available balance) (requires auth).
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task SubscribeUserStatsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Unsubscribes from a channel.
