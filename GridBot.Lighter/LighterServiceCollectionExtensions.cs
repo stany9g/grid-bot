@@ -77,7 +77,17 @@ public static class LighterServiceCollectionExtensions
 
         // Register real-time state service as singleton (implements ILighterRealtimeState)
         // Note: NOT a hosted service - InitializeAsync must be called explicitly
-        services.AddSingleton<LighterRealtimeStateService>();
+        services.AddSingleton<LighterRealtimeStateService>(sp =>
+        {
+            var wsClient = sp.GetRequiredService<ILighterWebSocketClient>();
+            var signerClient = sp.GetRequiredService<SignerClient>();
+            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("LighterRestClient");
+            var lighterOptions = sp.GetRequiredService<IOptions<LighterOptions>>();
+            var logger = sp.GetRequiredService<ILogger<LighterRealtimeStateService>>();
+
+            return new LighterRealtimeStateService(wsClient, signerClient, httpClient, lighterOptions, logger);
+        });
         services.AddSingleton<ILighterRealtimeState>(sp => sp.GetRequiredService<LighterRealtimeStateService>());
 
         // Register WebSocket-based query client (uses REST for market list and candlesticks)

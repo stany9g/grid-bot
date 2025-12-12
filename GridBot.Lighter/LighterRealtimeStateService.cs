@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
+using System.Net.Http.Json;
+using GridBot.Lighter.Models.Api;
 using GridBot.Lighter.Models.WebSocket;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace GridBot.Lighter;
 
@@ -12,6 +15,9 @@ namespace GridBot.Lighter;
 public sealed class LighterRealtimeStateService : ILighterRealtimeState
 {
     private readonly ILighterWebSocketClient _wsClient;
+    private readonly SignerClient _signerClient;
+    private readonly HttpClient _httpClient;
+    private readonly LighterOptions _options;
     private readonly ILogger<LighterRealtimeStateService> _logger;
 
     // Thread-safe state storage
@@ -47,12 +53,21 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     /// Initializes a new instance of the <see cref="LighterRealtimeStateService"/> class.
     /// </summary>
     /// <param name="wsClient">WebSocket client for data streaming.</param>
+    /// <param name="signerClient">Signer client for nonce management.</param>
+    /// <param name="httpClient">HTTP client for nonce sync API calls.</param>
+    /// <param name="options">Lighter configuration options.</param>
     /// <param name="logger">Logger instance.</param>
     public LighterRealtimeStateService(
         ILighterWebSocketClient wsClient,
+        SignerClient signerClient,
+        HttpClient httpClient,
+        IOptions<LighterOptions> options,
         ILogger<LighterRealtimeStateService> logger)
     {
         _wsClient = wsClient ?? throw new ArgumentNullException(nameof(wsClient));
+        _signerClient = signerClient ?? throw new ArgumentNullException(nameof(signerClient));
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -199,6 +214,19 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
 
         _logger.LogInformation("Initializing realtime state service");
 
+        // Sync nonce from server if InitialNonce is 0 (default)
+        // This must happen before any transactions are signed
+        if (_options.InitialNonce == 0)
+        {
+            await SyncNonceFromServerAsync(cancellationToken);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Using configured InitialNonce={Nonce} (skipping server sync)",
+                _options.InitialNonce);
+        }
+
         // Connect to WebSocket
         await _wsClient.ConnectAsync(cancellationToken);
 
@@ -216,6 +244,57 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
 
         _initialized = true;
         _logger.LogInformation("Realtime state service initialized");
+    }
+
+    /// <summary>
+    /// Synchronizes the nonce from server before any transactions.
+    /// </summary>
+    private async Task SyncNonceFromServerAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation(
+            "Syncing nonce from server for account {AccountIndex}, apiKeyIndex {ApiKeyIndex}...",
+            _options.AccountIndex, _options.ApiKeyIndex);
+
+        try
+        {
+            var url = $"nextNonce?account_index={_options.AccountIndex}&api_key_index={_options.ApiKeyIndex}";
+            var response = await _httpClient.GetAsync(url, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning(
+                    "Failed to sync nonce from server: {StatusCode} - {Error}. Will rely on retry mechanism.",
+                    (int)response.StatusCode, errorContent);
+                return;
+            }
+
+            var nonceResponse = await response.Content.ReadFromJsonAsync<NextNonce>(
+                LighterJsonOptions.Default, cancellationToken);
+
+            if (nonceResponse == null || !nonceResponse.IsSuccess)
+            {
+                _logger.LogWarning(
+                    "Failed to parse nonce response: {Message}. Will rely on retry mechanism.",
+                    nonceResponse?.Message ?? "null response");
+                return;
+            }
+
+            // SetNonce sets _currentNonce, but GetNextNonce() does pre-increment (++_currentNonce).
+            // So if server says "next nonce is 500", we set _currentNonce = 499,
+            // then GetNextNonce() returns ++499 = 500 (the correct value).
+            _signerClient.SetNonce(nonceResponse.Nonce - 1);
+
+            _logger.LogInformation(
+                "Nonce synced successfully: server nextNonce={ServerNonce}, internal={InternalNonce}",
+                nonceResponse.Nonce, nonceResponse.Nonce - 1);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Error syncing nonce from server. Will rely on retry mechanism for nonce errors.");
+        }
     }
 
     /// <inheritdoc />

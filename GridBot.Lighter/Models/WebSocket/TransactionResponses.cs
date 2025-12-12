@@ -71,16 +71,17 @@ public sealed record SendTxBatchWsResponse : WebSocketMessage
     public string? Message { get; init; }
 
     /// <summary>
-    /// Comma-separated transaction hashes.
+    /// Array of transaction hashes.
     /// </summary>
-    [JsonPropertyName("tx_hashes")]
-    public string TxHashes { get; init; } = string.Empty;
+    [JsonPropertyName("tx_hash")]
+    public string[] TxHashes { get; init; } = [];
 
     /// <summary>
-    /// Comma-separated predicted execution times.
+    /// Predicted execution time in milliseconds (Unix timestamp).
     /// </summary>
     [JsonPropertyName("predicted_execution_time_ms")]
-    public string PredictedExecutionTimeMs { get; init; } = string.Empty;
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public long PredictedExecutionTimeMs { get; init; }
 
     /// <summary>
     /// Gets whether the operation was successful (code == 200 or 0).
@@ -89,10 +90,8 @@ public sealed record SendTxBatchWsResponse : WebSocketMessage
     public bool IsSuccess => Code == 200 || Code == 0;
 
     /// <summary>
-    /// Gets the transaction hashes as an array.
+    /// Gets the transaction hashes as an array (alias for TxHashes).
     /// </summary>
     [JsonIgnore]
-    public string[] TxHashArray => string.IsNullOrEmpty(TxHashes)
-        ? []
-        : TxHashes.Split(',', StringSplitOptions.RemoveEmptyEntries);
+    public string[] TxHashArray => TxHashes;
 }

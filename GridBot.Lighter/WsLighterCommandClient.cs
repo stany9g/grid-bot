@@ -307,11 +307,14 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
                     nonceResponse?.Code ?? 0);
             }
 
-            _signer.SetNonce(nonceResponse.Nonce);
+            // SetNonce sets _currentNonce, but GetNextNonce() does pre-increment (++_currentNonce).
+            // So if server says "next nonce is 500", we set _currentNonce = 499,
+            // then GetNextNonce() returns ++499 = 500 (the correct value).
+            _signer.SetNonce(nonceResponse.Nonce - 1);
 
             _logger.LogInformation(
-                "Synced nonce for account {AccountIndex}, API key {ApiKeyIndex}: {Nonce}",
-                accountIndex, apiKeyIndex, nonceResponse.Nonce);
+                "Synced nonce for account {AccountIndex}, API key {ApiKeyIndex}: next={Nonce}, internal={Internal}",
+                accountIndex, apiKeyIndex, nonceResponse.Nonce, nonceResponse.Nonce - 1);
 
             return nonceResponse.Nonce;
         }
@@ -426,28 +429,68 @@ public sealed class WsLighterCommandClient : ILighterCommandClient
             };
         }
 
-        // Sign all orders sequentially (nonces must be sequential)
-        var signedOrders = new SignedOrderResult[requests.Length];
-        for (var i = 0; i < requests.Length; i++)
+        int retryCount = 0;
+
+        while (true)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            signedOrders[i] = await SignOrderAsync(requests[i]);
-
-            if (signedOrders[i].Error != null)
+            // Sign all orders sequentially (nonces must be sequential)
+            var signedOrders = new SignedOrderResult[requests.Length];
+            for (var i = 0; i < requests.Length; i++)
             {
-                _logger.LogWarning("Batch signing failed at order {Index}: {Error}", i, signedOrders[i].Error);
-                return new BatchOrderResult
-                {
-                    IsSuccess = false,
-                    OrdersSubmitted = 0,
-                    TxHashes = [],
-                    ErrorMessage = $"Failed to sign order {i}: {signedOrders[i].Error}"
-                };
-            }
-        }
+                cancellationToken.ThrowIfCancellationRequested();
+                signedOrders[i] = await SignOrderAsync(requests[i]);
 
-        _logger.LogDebug("Signed {Count} orders, submitting batch...", requests.Length);
-        return await SubmitOrderBatchAsync(signedOrders, cancellationToken);
+                if (signedOrders[i].Error != null)
+                {
+                    _logger.LogWarning("Batch signing failed at order {Index}: {Error}", i, signedOrders[i].Error);
+                    return new BatchOrderResult
+                    {
+                        IsSuccess = false,
+                        OrdersSubmitted = 0,
+                        TxHashes = [],
+                        ErrorMessage = $"Failed to sign order {i}: {signedOrders[i].Error}"
+                    };
+                }
+            }
+
+            _logger.LogDebug("Signed {Count} orders, submitting batch (attempt {Attempt})...",
+                requests.Length, retryCount + 1);
+
+            var result = await SubmitOrderBatchAsync(signedOrders, cancellationToken);
+
+            // Check for nonce error and retry with re-signing
+            if (!result.IsSuccess && result.Code == InvalidNonceErrorCode && retryCount < MaxNonceRetries)
+            {
+                retryCount++;
+                _logger.LogWarning(
+                    "Batch nonce error (code {Code}), syncing nonce and re-signing (attempt {Attempt}/{Max})",
+                    result.Code, retryCount, MaxNonceRetries);
+
+                // Sync nonce from server if HTTP client is available
+                if (_httpClient != null)
+                {
+                    try
+                    {
+                        await SyncNonceAsync(
+                            _signer.AccountIndex,
+                            _signer.ApiKeyIndex,
+                            cancellationToken);
+                        _logger.LogInformation("Successfully synced nonce from server for batch retry");
+                    }
+                    catch (Exception syncEx)
+                    {
+                        _logger.LogWarning(
+                            syncEx,
+                            "Failed to sync nonce from server for batch retry");
+                    }
+                }
+
+                await Task.Delay(NonceRetryDelayMs, cancellationToken);
+                continue; // Re-sign and retry
+            }
+
+            return result;
+        }
     }
 
     /// <summary>

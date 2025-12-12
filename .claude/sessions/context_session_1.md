@@ -2,6 +2,83 @@
 
 ## Status: ACTIVE
 
+## COMPLETED: Batch Transaction Error Handling & Retry (2025-12-11)
+
+### Problem
+1. Error responses from batch transactions weren't being parsed correctly - they have format `{"error":{"code":21104,...},"id":"txbatch_xxx"}` but code expected success format
+2. Batch transactions had no retry logic for nonce errors (unlike single transactions)
+3. `SendTxBatchWsResponse` model didn't match actual API response format
+
+### Fixes Applied
+
+| File | Change |
+|------|--------|
+| `LighterWebSocketClient.cs:502-509` | Added early check for `error` property to route error responses properly |
+| `LighterWebSocketClient.cs:1156-1207` | Added `HandleTransactionErrorResponse()` to complete pending requests with error responses |
+| `WsLighterCommandClient.cs:416-494` | Added retry loop to `CreateOrderBatchAsync` - on nonce error, syncs nonce and RE-SIGNS all orders |
+| `TransactionResponses.cs` | Fixed `SendTxBatchWsResponse`: `tx_hash` is array (not comma-separated), `predicted_execution_time_ms` is long (not string) |
+
+### How Batch Retry Works Now
+```
+CreateOrderBatchAsync([order1, order2, ...]):
+  while (retryCount < 3):
+    1. Sign all orders (consumes nonces)
+    2. Submit batch
+    3. If nonce error (21104):
+       - Sync nonce from server
+       - RE-SIGN all orders with new nonces
+       - Retry
+    4. Return result
+```
+
+---
+
+## COMPLETED: Nonce Management Fixes (2025-12-11)
+
+### Problem
+Batch transactions were failing with error `21104: "invalid nonce"`. Investigation revealed TWO bugs:
+
+1. **Off-by-one error in `SyncNonceAsync`**: When syncing nonce from server, the code was setting `_currentNonce = serverNonce` instead of `serverNonce - 1`. Since `GetNextNonce()` uses pre-increment (`++_currentNonce`), this caused the first transaction after sync to use nonce N+1 instead of N.
+
+2. **No automatic nonce sync at startup**: With `InitialNonce=0` (default), the client started with nonce 0, but server expected nonce N (whatever the actual next nonce was).
+
+### Root Cause Analysis
+```
+Nonce Flow:
+- SignerClient._currentNonce starts at InitialNonce (default: 0)
+- GetNextNonce() does: ++_currentNonce (pre-increment, returns N+1)
+- First transaction sent with nonce=1, but server expects nonce=500
+
+SyncNonceAsync Bug:
+- Server returns: nextNonce = 500 (use nonce 500 for next tx)
+- OLD (wrong): SetNonce(500) → _currentNonce=500 → GetNextNonce returns 501 ❌
+- NEW (fixed): SetNonce(500-1) → _currentNonce=499 → GetNextNonce returns 500 ✅
+```
+
+### Fixes Applied
+
+| File | Change |
+|------|--------|
+| `WsLighterCommandClient.cs:310-317` | Fixed `SetNonce(nonceResponse.Nonce)` → `SetNonce(nonceResponse.Nonce - 1)` with explanatory comment |
+| `LighterRealtimeStateService.cs` | Added `SyncNonceFromServerAsync()` method that syncs nonce during `InitializeAsync()` when `InitialNonce=0` |
+| `LighterRealtimeStateService.cs` | Added dependencies: `SignerClient`, `HttpClient`, `LighterOptions` to constructor |
+| `LighterServiceCollectionExtensions.cs:80-90` | Updated DI registration to inject new dependencies |
+
+### How It Works Now
+1. `LighterRealtimeStateService.InitializeAsync()` is called at startup
+2. If `InitialNonce == 0` (default), calls `SyncNonceFromServerAsync()`
+3. Fetches next nonce via REST: `GET /api/v1/nextNonce?account_index=X&api_key_index=Y`
+4. Sets `_currentNonce = serverNonce - 1` so `GetNextNonce()` returns correct value
+5. WebSocket connects and subscriptions start
+6. First transaction now uses correct nonce
+
+### Retry Mechanism Still Active
+The existing `ExecuteWithNonceRetryAsync` in `WsLighterCommandClient` provides fallback protection:
+- If nonce error (21104) occurs, syncs nonce from server and retries
+- Max 3 retries with 100ms delay between attempts
+
+---
+
 ## COMPLETED: user_stats WebSocket Channel for Perps Balance (2025-12-11)
 
 ### Problem
@@ -191,3 +268,34 @@ Market is discovered from Symbol at startup (no DefaultMarketId):
   }
 }
 ```
+
+---
+
+## Reference: API Limits & Nonce Management (2025-12-11)
+
+Documentation created at: `.claude/doc/lighter-api-limits-nonce-management.md`
+
+### Key Findings Summary
+
+1. **Maximum Open Orders**: NOT explicitly documented. Practical limit constrained by Order Margin system and rate limits.
+
+2. **Batch Transaction Limits**:
+   - **50 transactions maximum per batch** (hard limit in `LighterWebSocketClient.cs:1099`)
+   - Weight: 6 per `sendTxBatch` call
+
+3. **Error Code 21104 (Invalid Nonce)**:
+   - Occurs when nonce is too low, too high, stale, or server hasn't updated yet
+   - Each API_KEY_INDEX has independent nonce stream
+   - Up to 255 API keys available for parallel processing
+   - Current implementation has retry mechanism: 3 retries with 100ms delay
+
+4. **Rate Limits**:
+   - Premium: 24,000 weighted requests/minute
+   - Standard: 60 requests/minute
+   - WebSocket: 100 connections/IP, 100 subscriptions/connection, 200 messages/minute
+
+5. **Volume Quota**:
+   - Starts at 1,000 TX
+   - Max stackable: 5,000,000 TX
+   - $10 volume = 1 additional TX allowance
+   - 1 free TX per 15 seconds

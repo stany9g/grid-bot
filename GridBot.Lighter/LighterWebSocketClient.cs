@@ -499,6 +499,15 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
+            // Check for error responses first - they have "error" property with nested code/message
+            // Format: {"error":{"code":21104,"message":"invalid nonce"},"id":"txbatch_xxx"}
+            if (root.TryGetProperty("error", out var errorElement) &&
+                root.TryGetProperty("id", out var errorIdElement))
+            {
+                HandleTransactionErrorResponse(errorElement, errorIdElement.GetString());
+                return;
+            }
+
             // Some messages don't have a type field - handle them by content
             var type = root.TryGetProperty("type", out var typeElement)
                 ? typeElement.GetString()
@@ -559,7 +568,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
                     }
                     else
                     {
-                        _logger.LogDebug("Unknown message type: {Type}, json: {Json}", type, TruncateJson(json));
+                        _logger.LogWarning("Unknown message type: {Type}, json: {Json}", type, TruncateJson(json));
                     }
                     break;
             }
@@ -605,8 +614,9 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         }
         else
         {
-            _logger.LogDebug("Unknown channel update: {Channel}", channel);
+            _logger.LogWarning("Unknown channel update: {Channel} {Json}", channel, json);
         }
+
     }
 
     private async Task SendPongAsync(CancellationToken cancellationToken)
@@ -1140,6 +1150,59 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         finally
         {
             _pendingRequests.TryRemove(requestId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Handles error responses for transaction requests.
+    /// Error format: {"error":{"code":21104,"message":"invalid nonce"},"id":"txbatch_xxx"}
+    /// </summary>
+    private void HandleTransactionErrorResponse(JsonElement errorElement, string? requestId)
+    {
+        if (string.IsNullOrEmpty(requestId))
+        {
+            _logger.LogWarning("Received transaction error without request ID");
+            return;
+        }
+
+        var code = errorElement.TryGetProperty("code", out var codeElement) ? codeElement.GetInt32() : 0;
+        var message = errorElement.TryGetProperty("message", out var msgElement) ? msgElement.GetString() : "Unknown error";
+
+        _logger.LogWarning(
+            "Transaction error for request {RequestId}: code={Code}, message={Message}",
+            requestId, code, message);
+
+        if (_pendingRequests.TryGetValue(requestId, out var tcs))
+        {
+            // Determine response type based on request ID prefix
+            if (requestId.StartsWith("txbatch_", StringComparison.Ordinal))
+            {
+                var errorResponse = new SendTxBatchWsResponse
+                {
+                    Type = "jsonapi/sendtxbatch",
+                    Id = requestId,
+                    Code = code,
+                    Message = message,
+                    TxHashes = []
+                };
+                tcs.TrySetResult(errorResponse);
+            }
+            else
+            {
+                var errorResponse = new SendTxWsResponse
+                {
+                    Type = "jsonapi/sendtx",
+                    Id = requestId,
+                    Code = code,
+                    Message = message,
+                    TxHash = string.Empty
+                };
+                tcs.TrySetResult(errorResponse);
+            }
+        }
+        else
+        {
+            _logger.LogWarning("Received error for unknown request ID: {Id}", requestId);
         }
     }
 
