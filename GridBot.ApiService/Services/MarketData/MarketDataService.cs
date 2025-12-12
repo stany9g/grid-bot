@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using GridBot.ApiService.Models.Trading;
 using GridBot.Lighter;
@@ -8,21 +9,66 @@ namespace GridBot.ApiService.Services.MarketData;
 /// <summary>
 /// Implementation of market data service using Lighter DEX API.
 /// Thread-safe singleton service.
+/// Uses WebSocket data when available, falls back to REST.
 /// </summary>
 public sealed class MarketDataService : IMarketDataService
 {
     private readonly ILighterQueryClient _queryClient;
+    private readonly ILighterRealtimeState _realtimeState;
     private readonly ILogger<MarketDataService> _logger;
+
+    /// <summary>
+    /// Cache for candlestick data to reduce REST API calls.
+    /// Key: (marketId, resolution, count), Value: (data, cachedAt)
+    /// </summary>
+    private readonly ConcurrentDictionary<(int MarketId, string Resolution, int Count), (List<CandlestickData> Data, DateTimeOffset CachedAt)> _candlestickCache = new();
+
+    /// <summary>
+    /// Candlestick cache TTL in seconds. Default 300 (5 minutes).
+    /// </summary>
+    private const int CandlestickCacheTtlSeconds = 300;
+
+    /// <summary>
+    /// Maximum acceptable age for WebSocket data in seconds.
+    /// Data older than this is considered stale and REST fallback is used.
+    /// Note: In illiquid markets, updates are naturally infrequent, so this is generous.
+    /// </summary>
+    private const int MaxWebSocketDataAgeSeconds = 60;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MarketDataService"/> class.
     /// </summary>
     /// <param name="queryClient">Lighter query client.</param>
+    /// <param name="realtimeState">WebSocket real-time state for order book and price data.</param>
     /// <param name="logger">Logger instance.</param>
-    public MarketDataService(ILighterQueryClient queryClient, ILogger<MarketDataService> logger)
+    public MarketDataService(
+        ILighterQueryClient queryClient,
+        ILighterRealtimeState realtimeState,
+        ILogger<MarketDataService> logger)
     {
         _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _realtimeState = realtimeState ?? throw new ArgumentNullException(nameof(realtimeState));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    /// <summary>
+    /// Checks if WebSocket is connected and has received data.
+    /// </summary>
+    /// <returns>True if WebSocket is connected and ready.</returns>
+    private bool IsWebSocketConnected()
+    {
+        return _realtimeState.IsConnected && _realtimeState.OldestDataAge.HasValue;
+    }
+
+    /// <summary>
+    /// Checks if a specific timestamp is fresh enough to be used for trading decisions.
+    /// </summary>
+    /// <param name="dataTimestamp">The timestamp of the specific data.</param>
+    /// <returns>True if the data is fresh, false if stale.</returns>
+    private bool IsDataFresh(DateTimeOffset dataTimestamp)
+    {
+        var age = DateTimeOffset.UtcNow - dataTimestamp;
+        return age.TotalSeconds < MaxWebSocketDataAgeSeconds;
     }
 
     /// <inheritdoc />
@@ -30,7 +76,44 @@ public sealed class MarketDataService : IMarketDataService
     {
         try
         {
-            // Get market metadata for last trade price
+            // Try WebSocket first - check connection and get order book for timestamp validation
+            if (IsWebSocketConnected())
+            {
+                var wsOrderBook = _realtimeState.GetOrderBook(marketId);
+                if (wsOrderBook != null && wsOrderBook.MidPrice > 0)
+                {
+                    // Check the order book's own timestamp, not global data age
+                    if (IsDataFresh(wsOrderBook.LastUpdate))
+                    {
+                        _logger.LogDebug("Using WebSocket price for market {MarketId}: {Price}", marketId, wsOrderBook.MidPrice);
+                        return wsOrderBook.MidPrice;
+                    }
+
+                    var age = DateTimeOffset.UtcNow - wsOrderBook.LastUpdate;
+                    _logger.LogWarning(
+                        "WebSocket order book is stale ({Age:F1}s old), falling back to REST for market {MarketId}",
+                        age.TotalSeconds,
+                        marketId);
+                }
+                else
+                {
+                    // Try market stats mark price as fallback
+                    var wsStats = _realtimeState.GetMarketStats(marketId);
+                    if (wsStats != null && wsStats.MarkPrice > 0 && IsDataFresh(wsStats.LastUpdated))
+                    {
+                        _logger.LogDebug("Using WebSocket mark price for market {MarketId}: {Price}", marketId, wsStats.MarkPrice);
+                        return wsStats.MarkPrice;
+                    }
+
+                    _logger.LogDebug("WebSocket price not available for market {MarketId}, falling back to REST", marketId);
+                }
+            }
+            else
+            {
+                _logger.LogDebug("WebSocket not connected for market {MarketId}, using REST", marketId);
+            }
+
+            // Fall back to REST - get market metadata for last trade price
             var marketData = await _queryClient.GetOrderBookDetailsAsync(marketId, cancellationToken: cancellationToken);
 
             // Use last trade price if available (now a decimal in the API response)
@@ -70,9 +153,35 @@ public sealed class MarketDataService : IMarketDataService
     {
         try
         {
+            var cacheKey = (marketId, resolution, count);
+
+            // Check cache first
+            if (_candlestickCache.TryGetValue(cacheKey, out var cached))
+            {
+                var age = DateTimeOffset.UtcNow - cached.CachedAt;
+                if (age.TotalSeconds < CandlestickCacheTtlSeconds)
+                {
+                    _logger.LogDebug(
+                        "Cache HIT for candlesticks: market {MarketId}, resolution {Resolution}, count {Count}, age {AgeSeconds:F1}s",
+                        marketId, resolution, count, age.TotalSeconds);
+                    return cached.Data;
+                }
+
+                _logger.LogDebug(
+                    "Cache EXPIRED for candlesticks: market {MarketId}, resolution {Resolution}, count {Count}, age {AgeSeconds:F1}s",
+                    marketId, resolution, count, age.TotalSeconds);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Cache MISS for candlesticks: market {MarketId}, resolution {Resolution}, count {Count}",
+                    marketId, resolution, count);
+            }
+
+            // Fetch from REST API
             var candles = await _queryClient.GetCandlesticksAsync(marketId, resolution, count, cancellationToken);
 
-            return candles.Select(c => new CandlestickData
+            var result = candles.Select(c => new CandlestickData
             {
                 Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(c.Timestamp),
                 Open = c.Open,
@@ -81,6 +190,11 @@ public sealed class MarketDataService : IMarketDataService
                 Close = c.Close,
                 Volume = c.Volume0
             }).ToList();
+
+            // Update cache
+            _candlestickCache[cacheKey] = (result, DateTimeOffset.UtcNow);
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -97,6 +211,36 @@ public sealed class MarketDataService : IMarketDataService
     {
         try
         {
+            // Try WebSocket order book first - check connection and data freshness
+            if (IsWebSocketConnected())
+            {
+                var wsOrderBook = _realtimeState.GetOrderBook(marketId);
+                if (wsOrderBook != null && wsOrderBook.Bids.Count > 0)
+                {
+                    // Check the order book's own timestamp, not global data age
+                    if (IsDataFresh(wsOrderBook.LastUpdate))
+                    {
+                        _logger.LogDebug("Using WebSocket order book for market {MarketId}", marketId);
+                        return ConvertWebSocketOrderBook(marketId, wsOrderBook, depth);
+                    }
+
+                    var age = DateTimeOffset.UtcNow - wsOrderBook.LastUpdate;
+                    _logger.LogWarning(
+                        "WebSocket order book is stale ({Age:F1}s old), falling back to REST for market {MarketId}",
+                        age.TotalSeconds,
+                        marketId);
+                }
+                else
+                {
+                    _logger.LogDebug("WebSocket order book not available for market {MarketId}, falling back to REST", marketId);
+                }
+            }
+            else
+            {
+                _logger.LogDebug("WebSocket not connected for market {MarketId}, using REST for order book", marketId);
+            }
+
+            // Fall back to REST API
             // Get order book orders (bids and asks)
             var orderBookOrders = await _queryClient.GetOrderBookOrdersAsync(marketId, limit: depth, cancellationToken);
 
@@ -153,6 +297,51 @@ public sealed class MarketDataService : IMarketDataService
             _logger.LogError(ex, "Failed to get order book snapshot for market {MarketId}", marketId);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Converts WebSocket order book snapshot to API order book snapshot model.
+    /// </summary>
+    private OrderBookSnapshot ConvertWebSocketOrderBook(
+        int marketId,
+        Lighter.Models.WebSocket.OrderBookSnapshot wsOrderBook,
+        int depth)
+    {
+        // Convert WebSocket bids/asks to API PriceLevel
+        var bids = wsOrderBook.Bids
+            .Take(depth)
+            .Select(b => new PriceLevel { Price = b.Price, Size = b.Size })
+            .ToList();
+
+        var asks = wsOrderBook.Asks
+            .Take(depth)
+            .Select(a => new PriceLevel { Price = a.Price, Size = a.Size })
+            .ToList();
+
+        // For LastPrice, use MidPrice from WebSocket or fall back to market stats MarkPrice
+        var lastPrice = wsOrderBook.MidPrice;
+        if (lastPrice == 0m)
+        {
+            var marketStats = _realtimeState.GetMarketStats(marketId);
+            if (marketStats != null && marketStats.MarkPrice > 0)
+            {
+                lastPrice = marketStats.MarkPrice;
+            }
+        }
+
+        return new OrderBookSnapshot
+        {
+            MarketId = marketId,
+            Timestamp = wsOrderBook.LastUpdate,
+            LastPrice = lastPrice,
+            BestBid = wsOrderBook.BestBidPrice,
+            BestAsk = wsOrderBook.BestAskPrice,
+            Spread = wsOrderBook.Spread,
+            TotalBidDepth = CalculateTotalDepth(bids),
+            TotalAskDepth = CalculateTotalDepth(asks),
+            Bids = bids,
+            Asks = asks
+        };
     }
 
     /// <inheritdoc />
