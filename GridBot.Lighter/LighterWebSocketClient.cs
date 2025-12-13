@@ -740,6 +740,7 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
                     Orders = orders.Select(o => new OrderSnapshot
                     {
                         OrderIndex = o.OrderIndex,
+                        ClientOrderIndex = o.ClientOrderIndex,
                         Price = ParseDecimal(o.Price),
                         Size = ParseDecimal(o.InitialBaseAmount),
                         FilledSize = ParseDecimal(o.FilledBaseAmount),

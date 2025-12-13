@@ -340,6 +340,16 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         return cancelledCount;
     }
 
+    /// <summary>
+    /// Error code for "invalid tx info" - often means no orders to cancel.
+    /// </summary>
+    private const int LighterErrorInvalidTxInfo = 21501;
+
+    /// <summary>
+    /// Error code for "account has queued cancel all request" - previous cancel still pending.
+    /// </summary>
+    private const int LighterErrorQueuedCancelAll = 21712;
+
     /// <inheritdoc />
     public async Task<int> CancelAllGridOrdersAsync(int marketId, CancellationToken ct = default)
     {
@@ -360,6 +370,24 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                 "Failed to cancel all orders for market {MarketId}: {Message}",
                 marketId, response.Message);
             return 0;
+        }
+        catch (LighterApiException ex) when (ex.Code == LighterErrorInvalidTxInfo)
+        {
+            // Error 21501 "invalid tx info" typically means no orders to cancel
+            // This is not a failure state - just means the grid is already clear
+            _logger.LogInformation(
+                "CancelAllOrders returned 21501 for market {MarketId} - treating as no orders to cancel",
+                marketId);
+            return 0;
+        }
+        catch (LighterApiException ex) when (ex.Code == LighterErrorQueuedCancelAll)
+        {
+            // Error 21712 means a previous cancel-all is still pending
+            _logger.LogWarning(
+                "Cancel all orders already queued for market {MarketId} - previous request still processing",
+                marketId);
+            // Return success since cancellation is in progress
+            return -1;
         }
         finally
         {
@@ -393,10 +421,33 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, ct)
                 .ConfigureAwait(false);
 
+            // DIAGNOSTIC: Log order sync details for debugging fill detection issues
+            _logger.LogDebug(
+                "SyncOrderStatus for market {MarketId}: {TotalOrders} active orders from exchange, {LevelsCount} grid levels to sync",
+                marketId, activeOrders.Count, levels.Count);
+
             // Build lookup by client order index for matching
             var orderLookup = activeOrders
                 .Where(o => o.ClientOrderIndex.HasValue)
                 .ToDictionary(o => o.ClientOrderIndex!.Value, o => o);
+
+            // DIAGNOSTIC: Log if there's a mismatch that could indicate problems
+            var ordersWithoutClientIndex = activeOrders.Count - orderLookup.Count;
+            if (ordersWithoutClientIndex > 0)
+            {
+                _logger.LogWarning(
+                    "SyncOrderStatus for market {MarketId}: {Count} orders missing ClientOrderIndex - may cause incorrect fill detection",
+                    marketId, ordersWithoutClientIndex);
+            }
+
+            var activeLevelsCount = levels.Count(l => l.Status == GridLevelStatus.Active && l.ClientOrderIndex.HasValue);
+            if (activeLevelsCount > 0 && orderLookup.Count == 0)
+            {
+                _logger.LogError(
+                    "CRITICAL: Market {MarketId} has {ActiveLevels} active grid levels but exchange returned 0 orders with ClientOrderIndex. " +
+                    "This will incorrectly mark all orders as filled! Check WebSocket orders subscription.",
+                    marketId, activeLevelsCount);
+            }
 
             // FIX CRITICAL: Acquire _orderLock before mutating GridLevel objects
             // This ensures thread-safety with PlaceGridOrdersAsync and ResetFilledLevelsToPendingAsync

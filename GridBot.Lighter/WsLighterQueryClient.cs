@@ -99,6 +99,7 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
             .Select(o => new Order
             {
                 OrderIndex = o.OrderIndex,
+                ClientOrderIndex = o.ClientOrderIndex > 0 ? o.ClientOrderIndex : null,
                 AccountIndex = accountIndex,
                 MarketId = marketId,
                 Price = o.Price.ToString(CultureInfo.InvariantCulture),

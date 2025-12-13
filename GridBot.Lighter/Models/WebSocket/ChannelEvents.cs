@@ -183,6 +183,12 @@ public sealed record OrderSnapshot
     public required long OrderIndex { get; init; }
 
     /// <summary>
+    /// Client order index (provided by client when creating order).
+    /// Used to match grid levels with their orders.
+    /// </summary>
+    public long ClientOrderIndex { get; init; }
+
+    /// <summary>
     /// Order price.
     /// </summary>
     public required decimal Price { get; init; }

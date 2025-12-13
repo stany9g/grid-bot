@@ -2073,3 +2073,93 @@ Added as Row 7 after the Alerts Panel:
 **PASSED** - 0 warnings, 0 errors
 
 ---
+
+## RESEARCH: Error 21501 "invalid tx info" - CancelAllOrders (December 13, 2025)
+
+### Problem
+Error code 21501 with message "invalid tx info" when calling `CancelAllOrdersAsync` on Lighter DEX. This occurs after the bot incorrectly detects all orders as filled and tries to rebuild the grid.
+
+### Research Document
+Full analysis at: `.claude/doc/lighter-error-21501-cancelallorders-fix.md`
+
+### Key Findings
+
+**Error 21501 Definition:**
+- From [Lighter API Docs](https://apidocs.lighter.xyz/docs/data-structures-constants-and-errors)
+- Error Code: `AppErrInvalidTxInfo` = "invalid tx info"
+- Indicates malformed transaction data or no-op operation
+
+**CancelAllOrders TimeInForce Values:**
+| Value | Name | Time Parameter Requirement |
+|-------|------|----------------------------|
+| `0` | `ImmediateCancelAll` | Time MUST equal `0` (NilOrderExpiry) |
+| `1` | `ScheduledCancelAll` | Time MUST be between 1 and MaxInt64 |
+| `2` | `AbortScheduledCancelAll` | Time MUST be exactly `0` |
+
+**Current Implementation is CORRECT:**
+- `timeInForce=0` (ImmediateCancelAll) + `time=0` (NilOrderExpiry) = valid combination
+- The signing succeeds, so parameters are correct
+- Error occurs on SERVER side validation
+
+### Root Cause (Most Likely)
+
+**The bot is trying to cancel orders when no orders exist.**
+
+After incorrectly detecting all orders as filled, the grid rebuild logic calls `CancelAllOrdersAsync`. If there are truly no orders to cancel, Lighter returns 21501 "invalid tx info" as a no-op rejection.
+
+### Related Error Codes
+
+| Code | Message | Use Case |
+|------|---------|----------|
+| 21501 | "invalid tx info" | **Malformed TX or no-op** |
+| 21712 | "account has queued cancel all request" | Previous cancel-all pending |
+| 21713 | "invalid cancel all time in force" | Invalid TimeInForce value |
+| 21714 | "invalid cancel all time" | Time parameter out of range |
+
+### Recommended Fixes
+
+**Fix 1: Pre-Check for Active Orders**
+```csharp
+// Before calling CancelAllOrdersAsync:
+var activeOrders = await _queryClient.GetActiveOrdersAsync(AccountIndex, marketId, authToken, ct);
+if (activeOrders.Count == 0)
+{
+    _logger.LogInformation("No active orders to cancel for market {MarketId}", marketId);
+    return 0;  // Skip cancellation - not an error
+}
+```
+
+**Fix 2: Handle 21501 Gracefully**
+```csharp
+if (response.Code == 21501)
+{
+    _logger.LogInformation(
+        "CancelAllOrders returned 21501 for market {MarketId} - treating as no orders to cancel",
+        marketId);
+    return 0;  // Not a failure state
+}
+```
+
+**Fix 3: Handle 21712 (Queued Request)**
+```csharp
+if (response.Code == 21712)
+{
+    _logger.LogWarning("Cancel all orders already queued - waiting for completion");
+    await Task.Delay(1000, ct);  // Wait for pending request
+    // Re-query to verify status
+}
+```
+
+### Implementation Priority
+
+1. **IMMEDIATE:** Add pre-check for active orders before cancellation
+2. **IMMEDIATE:** Add graceful handling for error 21501
+3. **OPTIONAL:** Add handling for error 21712 (concurrent requests)
+
+### Files to Modify
+
+| File | Change |
+|------|--------|
+| `GridBot.ApiService/Services/Grid/GridOrderManager.cs` | Add pre-check in `CancelAllGridOrdersAsync` and grid rebuild methods |
+
+---
