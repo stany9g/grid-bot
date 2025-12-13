@@ -28,6 +28,11 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     private volatile UserStatsUpdateEvent? _userStats;
     private long _lastUpdateTimeTicks;
 
+    // Mutable order book state for delta accumulation (per market)
+    // Key: price, Value: size. Size = 0 means remove.
+    private readonly ConcurrentDictionary<int, MutableOrderBookState> _mutableOrderBooks = new();
+    private readonly object _orderBookLock = new();
+
     // Health monitoring state
     private long _lastMessageReceivedTicks;
     private readonly List<DateTimeOffset> _disconnectEvents = new();
@@ -416,17 +421,23 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             await foreach (var update in _wsClient.OrderBookUpdates.ReadAllAsync(cancellationToken))
             {
-                _orderBooks[update.MarketId] = update.Snapshot;
+                // CRITICAL FIX: Lighter WebSocket sends full snapshot on first subscribe,
+                // then only DELTAS afterward. We must MERGE deltas, not REPLACE.
+                // Size = 0 means remove the price level.
+                var snapshot = ApplyOrderBookDelta(update.MarketId, update.Snapshot);
+                _orderBooks[update.MarketId] = snapshot;
                 RecordMessageReceived(update.Timestamp);
 
                 if (_logger.IsEnabled(LogLevel.Trace))
                 {
                     _logger.LogTrace(
-                        "Order book update for market {MarketId}: bid={BestBid:F2} ask={BestAsk:F2} spread={Spread:F4}%",
+                        "Order book update for market {MarketId}: bid={BestBid:F2} ask={BestAsk:F2} spread={Spread:F4}% (bids={BidCount}, asks={AskCount})",
                         update.MarketId,
-                        update.Snapshot.BestBidPrice,
-                        update.Snapshot.BestAskPrice,
-                        update.Snapshot.SpreadPercent);
+                        snapshot.BestBidPrice,
+                        snapshot.BestAskPrice,
+                        snapshot.SpreadPercent,
+                        snapshot.Bids.Count,
+                        snapshot.Asks.Count);
                 }
             }
         }
@@ -437,6 +448,169 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing order book updates");
+        }
+    }
+
+    /// <summary>
+    /// Applies an order book delta to the accumulated state and returns a new snapshot.
+    /// Handles both initial snapshots (many levels) and incremental deltas (few levels).
+    /// Size = 0 means remove the price level.
+    /// </summary>
+    private OrderBookSnapshot ApplyOrderBookDelta(int marketId, OrderBookSnapshot delta)
+    {
+        // Get or create mutable state for this market
+        var mutableState = _mutableOrderBooks.GetOrAdd(marketId, _ => new MutableOrderBookState());
+
+        lock (_orderBookLock)
+        {
+            // Determine if this is a full snapshot or incremental delta
+            // Heuristic: If delta has many levels (>50), treat as full snapshot and replace
+            var isFullSnapshot = delta.Bids.Count > 500 || delta.Asks.Count > 500;
+
+            if (isFullSnapshot)
+            {
+                // Full snapshot: replace all state
+                mutableState.Bids.Clear();
+                mutableState.Asks.Clear();
+
+                foreach (var (price, size) in delta.Bids)
+                {
+                    if (size > 0)
+                        mutableState.Bids[price] = size;
+                }
+
+                foreach (var (price, size) in delta.Asks)
+                {
+                    if (size > 0)
+                        mutableState.Asks[price] = size;
+                }
+
+                _logger.LogDebug(
+                    "Order book full snapshot for market {MarketId}: {BidCount} bids, {AskCount} asks",
+                    marketId, mutableState.Bids.Count, mutableState.Asks.Count);
+            }
+            else
+            {
+                // Incremental delta: merge changes
+                // Size = 0 means remove, Size > 0 means add/update
+                foreach (var (price, size) in delta.Bids)
+                {
+                    if (size <= 0)
+                        mutableState.Bids.Remove(price);
+                    else
+                        mutableState.Bids[price] = size;
+                }
+
+                foreach (var (price, size) in delta.Asks)
+                {
+                    if (size <= 0)
+                        mutableState.Asks.Remove(price);
+                    else
+                        mutableState.Asks[price] = size;
+                }
+            }
+
+            // Build snapshot from accumulated state
+            return BuildSnapshotFromMutableState(mutableState, delta.LastUpdate);
+        }
+    }
+
+    /// <summary>
+    /// Builds an immutable OrderBookSnapshot from mutable accumulated state.
+    /// </summary>
+    private static OrderBookSnapshot BuildSnapshotFromMutableState(MutableOrderBookState state, DateTimeOffset timestamp)
+    {
+        // Convert to sorted lists
+        // Bids: highest price first (descending)
+        var bids = state.Bids
+            .OrderByDescending(kvp => kvp.Key)
+            .Select(kvp => (kvp.Key, kvp.Value))
+            .ToList();
+
+        // Asks: lowest price first (ascending)
+        var asks = state.Asks
+            .OrderBy(kvp => kvp.Key)
+            .Select(kvp => (kvp.Key, kvp.Value))
+            .ToList();
+
+        // Calculate metrics - GUARD against empty sides
+        var bestBid = bids.Count > 0 ? bids[0] : (0m, 0m);
+        var bestAsk = asks.Count > 0 ? asks[0] : (0m, 0m);
+
+        // Calculate mid price - only if BOTH sides have valid data
+        decimal midPrice;
+        decimal spread;
+        decimal spreadPercent;
+
+        if (bestBid.Item1 > 0 && bestAsk.Item1 > 0)
+        {
+            // Normal case: both sides have data
+            midPrice = (bestBid.Item1 + bestAsk.Item1) / 2m;
+            spread = bestAsk.Item1 - bestBid.Item1;
+            spreadPercent = midPrice > 0 ? spread / midPrice * 100m : 0m;
+        }
+        else if (bestBid.Item1 > 0)
+        {
+            // Only bids available - use bid price as reference
+            midPrice = bestBid.Item1;
+            spread = 0m;
+            spreadPercent = 0m;
+        }
+        else if (bestAsk.Item1 > 0)
+        {
+            // Only asks available - use ask price as reference
+            midPrice = bestAsk.Item1;
+            spread = 0m;
+            spreadPercent = 0m;
+        }
+        else
+        {
+            // No data on either side
+            midPrice = 0m;
+            spread = 0m;
+            spreadPercent = 0m;
+        }
+
+        return new OrderBookSnapshot
+        {
+            BestBidPrice = bestBid.Item1,
+            BestAskPrice = bestAsk.Item1,
+            BestBidSize = bestBid.Item2,
+            BestAskSize = bestAsk.Item2,
+            MidPrice = midPrice,
+            Spread = spread,
+            SpreadPercent = spreadPercent,
+            Bids = bids,
+            Asks = asks,
+            LastUpdate = timestamp
+        };
+    }
+
+    /// <summary>
+    /// Clears the accumulated order book state for a market.
+    /// Called on reconnection to force a fresh snapshot.
+    /// </summary>
+    public void ClearOrderBookState(int marketId)
+    {
+        if (_mutableOrderBooks.TryRemove(marketId, out _))
+        {
+            _logger.LogInformation("Cleared order book state for market {MarketId}", marketId);
+        }
+    }
+
+    /// <summary>
+    /// Clears all accumulated order book state for all markets.
+    /// Called on disconnect to ensure fresh data on reconnect.
+    /// </summary>
+    private void ClearAllOrderBookState()
+    {
+        var count = _mutableOrderBooks.Count;
+        _mutableOrderBooks.Clear();
+        _orderBooks.Clear();
+
+        if (count > 0)
+        {
+            _logger.LogDebug("Cleared order book state for {Count} markets", count);
         }
     }
 
@@ -573,8 +747,11 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                         _disconnectEvents.Add(DateTimeOffset.UtcNow);
                     }
 
+                    // Clear all order book state on disconnect to force fresh snapshot on reconnect
+                    ClearAllOrderBookState();
+
                     _logger.LogWarning(
-                        "WebSocket disconnected. Disconnect count in 24h: {Count}",
+                        "WebSocket disconnected. Disconnect count in 24h: {Count}. Order book state cleared.",
                         DisconnectCount24h);
 
                     // Fire health changed event - disconnected
@@ -723,4 +900,21 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     {
         HealthChanged?.Invoke(this, e);
     }
+}
+
+/// <summary>
+/// Mutable order book state for accumulating WebSocket deltas.
+/// Not thread-safe - must be accessed under lock.
+/// </summary>
+internal sealed class MutableOrderBookState
+{
+    /// <summary>
+    /// Bid levels: Key = price, Value = size.
+    /// </summary>
+    public Dictionary<decimal, decimal> Bids { get; } = new();
+
+    /// <summary>
+    /// Ask levels: Key = price, Value = size.
+    /// </summary>
+    public Dictionary<decimal, decimal> Asks { get; } = new();
 }

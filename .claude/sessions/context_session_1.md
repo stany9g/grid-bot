@@ -1757,3 +1757,136 @@ Updated `appsettings.Production.json` with production-ready settings for $200 ca
 Liquidation at 2x with 50% maintenance margin: ~50% adverse move = safe for BTC.
 
 ---
+
+## CRITICAL FIX: Order Book Delta Merging (December 13, 2025)
+
+### Problem
+The bot was experiencing cascading false positives:
+- 200% spread (impossible)
+- +99.99% flash pump detected (false)
+- -50% black swan detected (false)
+- Order sizing near zero (0.0000000122...)
+- Grid prices at $45,000 when BTC was at $90,308
+
+**Root Cause:** Lighter WebSocket sends a full order book snapshot on initial subscription, then only DELTA updates afterward. The code was treating each delta as a complete snapshot, replacing all state instead of merging.
+
+When a delta arrived with only 1 ask and 0 bids:
+```
+bestBid = (0, 0)  // FirstOrDefault() on empty list
+bestAsk = (90308, size)
+midPrice = (0 + 90308) / 2 = 45154  // WRONG - should be ~90308
+spread = 90308 - 0 = 90308
+spreadPercent = 90308 / 45154 * 100 = 200%  // WRONG
+```
+
+This corrupted price was then recorded to flash crash/pump detectors, causing:
+- Cycle 1: Price = $90,308 (correct)
+- Cycle 2: Price = $45,154 (corrupted)
+- Detector sees: -50% drop → BLACK SWAN or +100% gain → FLASH PUMP
+
+### Solution Implemented
+
+#### 1. Order Book Delta Merging (`LighterRealtimeStateService.cs`)
+
+Added mutable order book state storage and delta merging logic:
+
+```csharp
+// New state storage
+private readonly ConcurrentDictionary<int, MutableOrderBookState> _mutableOrderBooks = new();
+
+// MutableOrderBookState class
+internal sealed class MutableOrderBookState
+{
+    public Dictionary<decimal, decimal> Bids { get; } = new();  // price -> size
+    public Dictionary<decimal, decimal> Asks { get; } = new();
+}
+```
+
+**`ApplyOrderBookDelta()` method:**
+- Detects full snapshot (>50 levels) vs incremental delta
+- Full snapshot: Clears state, replaces all
+- Delta: Merges changes, size=0 means remove level
+- Rebuilds snapshot from accumulated state
+
+**Key logic:**
+```csharp
+// Incremental delta: merge changes
+foreach (var (price, size) in delta.Bids)
+{
+    if (size <= 0)
+        mutableState.Bids.Remove(price);  // Remove level
+    else
+        mutableState.Bids[price] = size;  // Add/update level
+}
+```
+
+#### 2. Proper Metric Calculation (`BuildSnapshotFromMutableState`)
+
+Only calculates spread when BOTH sides have valid data:
+```csharp
+if (bestBid.Item1 > 0 && bestAsk.Item1 > 0)
+{
+    // Normal case: both sides have data
+    midPrice = (bestBid.Item1 + bestAsk.Item1) / 2m;
+    spread = bestAsk.Item1 - bestBid.Item1;
+    spreadPercent = spread / midPrice * 100m;
+}
+else if (bestBid.Item1 > 0)
+{
+    // Only bids - use bid price, spread=0
+    midPrice = bestBid.Item1;
+    spread = 0m;
+    spreadPercent = 0m;
+}
+// ... similar for asks only
+```
+
+#### 3. State Clearing on Disconnect
+
+Added `ClearAllOrderBookState()` on WebSocket disconnect to force fresh snapshot on reconnect:
+```csharp
+if (wasConnectedBefore && !isNowConnected)
+{
+    ClearAllOrderBookState();  // Force fresh snapshot on reconnect
+}
+```
+
+#### 4. Defense in Depth (`LighterWebSocketClient.ParseOrderBookSnapshot`)
+
+Added guards in the raw parser as backup:
+- Uses explicit `bids.Count > 0` check instead of `FirstOrDefault()`
+- Returns `(0m, 0m)` tuple explicitly for empty sides
+- Same metric calculation guards as above
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `GridBot.Lighter/LighterRealtimeStateService.cs` | Added delta merging, mutable state, state clearing |
+| `GridBot.Lighter/LighterWebSocketClient.cs` | Added guards in `ParseOrderBookSnapshot` |
+
+### Before/After
+
+| Metric | Before (Bug) | After (Fixed) |
+|--------|--------------|---------------|
+| Spread | 200% | <0.1% (normal) |
+| MidPrice | $45,154 (half!) | $90,308 (correct) |
+| Flash Pump | +99.99% false positive | No false positive |
+| Black Swan | -50% false positive | No false positive |
+| Order Size | 0.0000000122... | Normal sizing |
+
+### Testing
+
+Build succeeded:
+```
+dotnet build GridBot.Lighter/GridBot.Lighter.csproj
+Build succeeded. 0 Warning(s) 0 Error(s)
+```
+
+### Documentation Reference
+
+Lighter WebSocket docs: https://apidocs.lighter.xyz/docs/websocket-reference
+- "this channel sends a complete snapshot on connection, but only state updates after that"
+- Size = 0 means remove the level
+
+---

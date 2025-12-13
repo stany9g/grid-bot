@@ -871,11 +871,45 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
             .OrderBy(x => x.Item1)
             .ToList();
 
-        var bestBid = bids.FirstOrDefault();
-        var bestAsk = asks.FirstOrDefault();
-        var midPrice = (bestBid.Item1 + bestAsk.Item1) / 2m;
-        var spread = bestAsk.Item1 - bestBid.Item1;
-        var spreadPercent = midPrice > 0 ? spread / midPrice * 100m : 0m;
+        // GUARD: Handle empty or partial order books safely
+        // This is a delta message - may only have one side populated
+        var bestBid = bids.Count > 0 ? bids[0] : (0m, 0m);
+        var bestAsk = asks.Count > 0 ? asks[0] : (0m, 0m);
+
+        // Calculate mid price ONLY if both sides have valid data
+        // Otherwise, use the available side's price as reference
+        decimal midPrice;
+        decimal spread;
+        decimal spreadPercent;
+
+        if (bestBid.Item1 > 0 && bestAsk.Item1 > 0)
+        {
+            // Normal case: both sides have data
+            midPrice = (bestBid.Item1 + bestAsk.Item1) / 2m;
+            spread = bestAsk.Item1 - bestBid.Item1;
+            spreadPercent = midPrice > 0 ? spread / midPrice * 100m : 0m;
+        }
+        else if (bestBid.Item1 > 0)
+        {
+            // Only bids available (delta update)
+            midPrice = bestBid.Item1;
+            spread = 0m;
+            spreadPercent = 0m;
+        }
+        else if (bestAsk.Item1 > 0)
+        {
+            // Only asks available (delta update)
+            midPrice = bestAsk.Item1;
+            spread = 0m;
+            spreadPercent = 0m;
+        }
+        else
+        {
+            // Empty update (removal only)
+            midPrice = 0m;
+            spread = 0m;
+            spreadPercent = 0m;
+        }
 
         return new OrderBookSnapshot
         {
