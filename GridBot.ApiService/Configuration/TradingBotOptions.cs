@@ -1,3 +1,5 @@
+using GridBot.ApiService.Models.Trading;
+
 namespace GridBot.ApiService.Configuration;
 
 /// <summary>
@@ -68,6 +70,12 @@ public sealed class TradingBotOptions
     /// Detects persistent nonce failures that could prevent critical operations.
     /// </summary>
     public NonceOptions Nonce { get; set; } = new();
+
+    /// <summary>
+    /// Webhook notification options.
+    /// Sends alerts to external services (Home Assistant, Discord, etc.).
+    /// </summary>
+    public WebhookOptions Webhook { get; set; } = new();
 
     /// <summary>
     /// Market symbol to trade (e.g., "BTC", "ETH").
@@ -809,6 +817,35 @@ public sealed class PreTradeOptions
     /// Orders are rejected if order book data is older than this.
     /// </summary>
     public int MaxDataAgeSeconds { get; set; } = 5;
+}
+
+/// <summary>
+/// Webhook notification configuration.
+/// Enables sending alerts to external services like Home Assistant, Discord, or Telegram.
+/// </summary>
+public sealed class WebhookOptions
+{
+    /// <summary>
+    /// Whether webhook notifications are enabled (default false).
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// The webhook URL to POST notifications to.
+    /// Example: "http://192.168.1.175:8123/api/webhook/your-webhook-id"
+    /// </summary>
+    public string Url { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Minimum severity level to trigger webhook notifications (default Critical).
+    /// Only events at or above this severity will send webhooks.
+    /// </summary>
+    public AlertSeverity MinimumSeverity { get; set; } = AlertSeverity.Critical;
+
+    /// <summary>
+    /// Request timeout in seconds (default 10).
+    /// </summary>
+    public int TimeoutSeconds { get; set; } = 10;
 }
 
 /// <summary>

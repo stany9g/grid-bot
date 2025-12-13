@@ -1,3 +1,4 @@
+using GridBot.ApiService.Services.Notifications;
 using GridBot.ApiService.Services.Risk;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -17,7 +18,10 @@ public static class RiskServiceExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
 
-        // Register event logger first (dependency of other services)
+        // Register webhook notifier with typed HttpClient
+        services.AddHttpClient<IWebhookNotifier, WebhookNotifier>();
+
+        // Register event logger (depends on webhook notifier)
         services.AddSingleton<IRiskEventLogger, RiskEventLogger>();
 
         // Register individual monitors

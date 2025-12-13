@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
+using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Notifications;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace GridBot.ApiService.Services.Risk;
 
@@ -11,6 +14,8 @@ namespace GridBot.ApiService.Services.Risk;
 public sealed class RiskEventLogger : IRiskEventLogger
 {
     private readonly ILogger<RiskEventLogger> _logger;
+    private readonly IWebhookNotifier _webhookNotifier;
+    private readonly WebhookOptions _webhookOptions;
     private readonly ConcurrentQueue<RiskEvent> _events = new();
     private readonly object _trimLock = new();
 
@@ -19,14 +24,22 @@ public sealed class RiskEventLogger : IRiskEventLogger
     /// <summary>
     /// Creates a new RiskEventLogger instance.
     /// </summary>
-    public RiskEventLogger(ILogger<RiskEventLogger> logger)
+    public RiskEventLogger(
+        ILogger<RiskEventLogger> logger,
+        IWebhookNotifier webhookNotifier,
+        IOptions<TradingBotOptions> options)
     {
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(webhookNotifier);
+        ArgumentNullException.ThrowIfNull(options);
+
         _logger = logger;
+        _webhookNotifier = webhookNotifier;
+        _webhookOptions = options.Value.Webhook;
     }
 
     /// <inheritdoc />
-    public Task LogEventAsync(RiskEvent riskEvent, CancellationToken ct = default)
+    public async Task LogEventAsync(RiskEvent riskEvent, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(riskEvent);
 
@@ -52,10 +65,28 @@ public sealed class RiskEventLogger : IRiskEventLogger
             riskEvent.TriggerValue,
             riskEvent.ThresholdValue);
 
+        // Send webhook notification for events at or above minimum severity
+        if (riskEvent.Severity <= _webhookOptions.MinimumSeverity)
+        {
+            var title = $"[{riskEvent.Severity}] {riskEvent.RuleId}";
+            var message = $"{riskEvent.Description}\n\nAction: {riskEvent.ActionTaken}";
+
+            if (riskEvent.TriggerValue.HasValue)
+            {
+                message += $"\nTrigger: {riskEvent.TriggerValue:F4}";
+            }
+
+            if (riskEvent.ThresholdValue.HasValue)
+            {
+                message += $"\nThreshold: {riskEvent.ThresholdValue:F4}";
+            }
+
+            // Fire-and-forget webhook call - don't block logging
+            _ = _webhookNotifier.SendNotificationAsync(title, message, ct);
+        }
+
         // Trim if needed
         TrimEventsIfNeeded();
-
-        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
