@@ -43,6 +43,11 @@ public interface IRiskConfiguration
     FlashCrashOptions FlashCrash { get; }
 
     /// <summary>
+    /// Gets the flash pump options.
+    /// </summary>
+    FlashPumpOptions FlashPump { get; }
+
+    /// <summary>
     /// Gets the liquidity monitoring options.
     /// </summary>
     LiquidityOptions Liquidity { get; }

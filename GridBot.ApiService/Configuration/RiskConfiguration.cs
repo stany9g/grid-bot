@@ -48,6 +48,9 @@ public sealed class RiskConfiguration : IRiskConfiguration
     public FlashCrashOptions FlashCrash => Options.FlashCrash;
 
     /// <inheritdoc />
+    public FlashPumpOptions FlashPump => Options.FlashPump;
+
+    /// <inheritdoc />
     public LiquidityOptions Liquidity => Options.Liquidity;
 
     /// <inheritdoc />

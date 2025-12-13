@@ -17,6 +17,7 @@ public sealed class RiskSentinel : IRiskSentinel
     private readonly IRiskConfiguration _riskConfig;
     private readonly ILossMonitor _lossMonitor;
     private readonly IFlashCrashDetector _flashCrashDetector;
+    private readonly IFlashPumpDetector _flashPumpDetector;
     private readonly ILiquidityMonitor _liquidityMonitor;
     private readonly IRiskEventLogger _eventLogger;
     private readonly ITradingStateService _tradingState;
@@ -32,6 +33,7 @@ public sealed class RiskSentinel : IRiskSentinel
         IRiskConfiguration riskConfig,
         ILossMonitor lossMonitor,
         IFlashCrashDetector flashCrashDetector,
+        IFlashPumpDetector flashPumpDetector,
         ILiquidityMonitor liquidityMonitor,
         IRiskEventLogger eventLogger,
         ITradingStateService tradingState,
@@ -41,6 +43,7 @@ public sealed class RiskSentinel : IRiskSentinel
         ArgumentNullException.ThrowIfNull(riskConfig);
         ArgumentNullException.ThrowIfNull(lossMonitor);
         ArgumentNullException.ThrowIfNull(flashCrashDetector);
+        ArgumentNullException.ThrowIfNull(flashPumpDetector);
         ArgumentNullException.ThrowIfNull(liquidityMonitor);
         ArgumentNullException.ThrowIfNull(eventLogger);
         ArgumentNullException.ThrowIfNull(tradingState);
@@ -50,6 +53,7 @@ public sealed class RiskSentinel : IRiskSentinel
         _riskConfig = riskConfig;
         _lossMonitor = lossMonitor;
         _flashCrashDetector = flashCrashDetector;
+        _flashPumpDetector = flashPumpDetector;
         _liquidityMonitor = liquidityMonitor;
         _eventLogger = eventLogger;
         _tradingState = tradingState;
@@ -64,13 +68,15 @@ public sealed class RiskSentinel : IRiskSentinel
         // Run all risk checks concurrently
         var lossTask = _lossMonitor.GetCurrentLossStatusAsync(marketId, ct);
         var crashTask = _flashCrashDetector.CheckForFlashCrashAsync(marketId, ct);
+        var pumpTask = _flashPumpDetector.CheckForFlashPumpAsync(marketId, ct);
         var liquidityTask = _liquidityMonitor.CheckLiquidityAsync(marketId, ct);
         var recentEventsTask = _eventLogger.GetRecentEventsAsync(10, ct);
 
-        await Task.WhenAll(lossTask, crashTask, liquidityTask, recentEventsTask).ConfigureAwait(false);
+        await Task.WhenAll(lossTask, crashTask, pumpTask, liquidityTask, recentEventsTask).ConfigureAwait(false);
 
         var lossStatus = lossTask.Result;
         var crashStatus = crashTask.Result;
+        var pumpStatus = pumpTask.Result;
         var liquidityStatus = liquidityTask.Result;
         var recentEvents = recentEventsTask.Result;
 
@@ -118,6 +124,32 @@ public sealed class RiskSentinel : IRiskSentinel
             }
         }
 
+        // Flash pump checks (symmetric protection for SHORT positions)
+        if (pumpStatus.PumpDetected || pumpStatus.IsInProtection)
+        {
+            switch (pumpStatus.RequiredAction)
+            {
+                case FlashPumpAction.PauseSells:
+                    sellsBlocked = true;
+                    if (overallSeverity > AlertSeverity.High) overallSeverity = AlertSeverity.High;
+                    warnings.Add("Flash pump: SELLs paused");
+                    break;
+
+                case FlashPumpAction.PauseAll:
+                    tradingAllowed = false;
+                    if (overallSeverity > AlertSeverity.High) overallSeverity = AlertSeverity.High;
+                    warnings.Add("Flash pump: All orders paused");
+                    break;
+
+                case FlashPumpAction.CancelAndCoverHalf:
+                case FlashPumpAction.FullHalt:
+                    tradingAllowed = false;
+                    overallSeverity = AlertSeverity.Critical;
+                    warnings.Add($"Flash pump: {pumpStatus.RequiredAction}");
+                    break;
+            }
+        }
+
         // Liquidity checks
         if (!liquidityStatus.TradingAllowed)
         {
@@ -143,7 +175,7 @@ public sealed class RiskSentinel : IRiskSentinel
         }
 
         // Calculate position size multiplier
-        var positionMultiplier = CalculatePositionMultiplier(lossStatus, crashStatus, liquidityStatus);
+        var positionMultiplier = CalculatePositionMultiplier(lossStatus, crashStatus, pumpStatus, liquidityStatus);
 
         // Update state
         state.LastAssessment = DateTimeOffset.UtcNow;
@@ -159,6 +191,7 @@ public sealed class RiskSentinel : IRiskSentinel
             SellsBlocked = sellsBlocked,
             LossStatus = lossStatus,
             FlashCrashStatus = crashStatus,
+            FlashPumpStatus = pumpStatus,
             LiquidityStatus = liquidityStatus,
             OverallSeverity = overallSeverity,
             ActiveWarnings = warnings,
@@ -202,6 +235,16 @@ public sealed class RiskSentinel : IRiskSentinel
         {
             var action = _flashCrashDetector.GetCurrentAction(marketId);
             if (action is FlashCrashAction.PauseAll or FlashCrashAction.CancelAndReduceHalf or FlashCrashAction.FullHalt)
+            {
+                return false;
+            }
+        }
+
+        // Check flash pump protection (fast)
+        if (_flashPumpDetector.IsInPumpProtection(marketId))
+        {
+            var action = _flashPumpDetector.GetCurrentAction(marketId);
+            if (action is FlashPumpAction.PauseAll or FlashPumpAction.CancelAndCoverHalf or FlashPumpAction.FullHalt)
             {
                 return false;
             }
@@ -255,7 +298,10 @@ public sealed class RiskSentinel : IRiskSentinel
     /// <inheritdoc />
     public async Task RecordPriceUpdateAsync(int marketId, decimal price, CancellationToken ct = default)
     {
-        await _flashCrashDetector.RecordPriceAsync(marketId, price, ct).ConfigureAwait(false);
+        // Record price to both detectors in parallel
+        await Task.WhenAll(
+            _flashCrashDetector.RecordPriceAsync(marketId, price, ct),
+            _flashPumpDetector.RecordPriceAsync(marketId, price, ct)).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -287,7 +333,7 @@ public sealed class RiskSentinel : IRiskSentinel
         return _marketStates.GetOrAdd(marketId, _ => new MarketRiskState());
     }
 
-    private decimal CalculatePositionMultiplier(RollingLossStatus lossStatus, FlashCrashStatus crashStatus, LiquidityStatus liquidityStatus)
+    private decimal CalculatePositionMultiplier(RollingLossStatus lossStatus, FlashCrashStatus crashStatus, FlashPumpStatus pumpStatus, LiquidityStatus liquidityStatus)
     {
         var multiplier = 1.0m;
 
@@ -303,6 +349,16 @@ public sealed class RiskSentinel : IRiskSentinel
             multiplier = Math.Min(multiplier, 0.5m);
         }
         else if (crashStatus.RequiredAction == FlashCrashAction.FullHalt)
+        {
+            multiplier = Math.Min(multiplier, 0.5m);
+        }
+
+        // Flash pump reductions (symmetric with flash crash)
+        if (pumpStatus.RequiredAction == FlashPumpAction.CancelAndCoverHalf)
+        {
+            multiplier = Math.Min(multiplier, 0.5m);
+        }
+        else if (pumpStatus.RequiredAction == FlashPumpAction.FullHalt)
         {
             multiplier = Math.Min(multiplier, 0.5m);
         }

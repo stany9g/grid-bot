@@ -4,6 +4,7 @@ using System.Globalization;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.Capacity;
+using GridBot.ApiService.Services.Connectivity;
 using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.MoonBag;
@@ -39,6 +40,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     private readonly ILighterQueryClient _lighterClient;
     private readonly ILighterRealtimeState _realtimeState;
     private readonly IOperationalCapacityService _capacityService;
+    private readonly IWebSocketHealthMonitor _wsHealthMonitor;
 
     // Per-market state tracking
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _marketLocks = new();
@@ -79,7 +81,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         IRecoveryManager recoveryManager,
         ILighterQueryClient lighterClient,
         ILighterRealtimeState realtimeState,
-        IOperationalCapacityService capacityService)
+        IOperationalCapacityService capacityService,
+        IWebSocketHealthMonitor wsHealthMonitor)
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(options);
@@ -96,6 +99,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         ArgumentNullException.ThrowIfNull(lighterClient);
         ArgumentNullException.ThrowIfNull(realtimeState);
         ArgumentNullException.ThrowIfNull(capacityService);
+        ArgumentNullException.ThrowIfNull(wsHealthMonitor);
 
         _logger = logger;
         _options = options.Value;
@@ -112,6 +116,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         _lighterClient = lighterClient;
         _realtimeState = realtimeState;
         _capacityService = capacityService;
+        _wsHealthMonitor = wsHealthMonitor;
     }
 
     /// <inheritdoc />
@@ -143,6 +148,43 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
 
             // NEVER SKIP - the loop ALWAYS runs, regardless of state
             // State affects behavior, not whether we run
+
+            // STEP 0: WEBSOCKET HEALTH CHECK (H.2 CRITICAL)
+            // Check WebSocket health at the start of each decision cycle
+            var wsHealth = _wsHealthMonitor.CheckHealth();
+
+            if (wsHealth.ShouldEnterProtectiveMode)
+            {
+                _logger.LogWarning(
+                    "WS-HEALTH: Extended outage detected. Transitioning to protective mode. Reason: {Reason}",
+                    wsHealth.UnhealthyReason);
+
+                await _stateService.TransitionToAsync(
+                    TradingState.Degraded_ProtectiveMode,
+                    $"WebSocket extended outage: {wsHealth.UnhealthyReason}")
+                    .ConfigureAwait(false);
+
+                actionsBlocked.Add($"Protective mode triggered: {wsHealth.UnhealthyReason}");
+            }
+
+            if (!wsHealth.IsHealthy)
+            {
+                warnings.Add($"WebSocket unhealthy: {wsHealth.UnhealthyReason}");
+
+                // Log periodic status for monitoring
+                if (wsHealth.TimeSinceLastMessage.HasValue)
+                {
+                    _logger.LogWarning(
+                        "WS-HEALTH: Unhealthy state. Connected={Connected}, " +
+                        "TimeSinceMsg={TimeSinceMsg}s, DataAge={DataAge}s, " +
+                        "ReconnectCycles={Cycles}/5min, Reason={Reason}",
+                        wsHealth.IsConnected,
+                        wsHealth.TimeSinceLastMessage?.TotalSeconds.ToString("F1") ?? "N/A",
+                        wsHealth.DataAge?.TotalSeconds.ToString("F1") ?? "N/A",
+                        wsHealth.RecentReconnectCycles,
+                        wsHealth.UnhealthyReason);
+                }
+            }
 
             // STEP 1: DATA COLLECTION (Parallel with timeout)
             var context = await CollectDataAsync(marketId, ct).ConfigureAwait(false);
@@ -306,6 +348,29 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
                         "Exiting bootstrap mode for market {MarketId}. Position built: {CryptoAlloc:F1}%",
                         marketId, inventoryAnalysis.CryptoAllocation);
                     _wasInBootstrapMode[marketId] = false;
+                }
+            }
+
+            // H.4 CRITICAL: Check for moon bag auto-release conditions
+            // Check only when in HOLD_MODE and we have trend data
+            if (moonBagStatus is not null && moonBagStatus.State == MoonBagState.HoldMode && trendResult.Success)
+            {
+                var autoReleased = await _moonBagManager.CheckAndPerformAutoReleaseAsync(
+                    marketId, context.CurrentPrice, _stateService.CurrentTrendState, ct).ConfigureAwait(false);
+
+                if (autoReleased)
+                {
+                    _logger.LogCritical(
+                        "Moon bag auto-released for market {MarketId}. Trading will now sell the position.",
+                        marketId);
+
+                    // Refresh moon bag status after auto-release
+                    moonBagStatus = await _moonBagManager.GetMoonBagStatusAsync(marketId, ct).ConfigureAwait(false);
+
+                    // Unblock sells since moon bag is now released
+                    _sellsBlocked[marketId] = false;
+
+                    warnings.Add("Moon bag AUTO-RELEASED due to extended bear conditions");
                 }
             }
 
@@ -1063,6 +1128,11 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     {
         // At very low capacity (protective mode), only allow monitoring
         if (capacity < 10)
+            return false;
+
+        // H.2 CRITICAL: WebSocket must be healthy for trading
+        // Rule 1: IF websocket_disconnected THEN pause_grid_immediately
+        if (_wsHealthMonitor.ShouldPauseGrid)
             return false;
 
         // In protective mode, only allow position reduction

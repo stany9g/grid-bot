@@ -185,6 +185,24 @@ public sealed record MoonBagEvent
         Description = "Moon bag released for sale",
         Details = reason
     };
+
+    /// <summary>
+    /// Creates an auto-release event.
+    /// </summary>
+    public static MoonBagEvent AutoReleased(
+        int marketId,
+        decimal quantity,
+        string reason,
+        decimal unrealizedLossPercent) => new()
+    {
+        EventId = NewEventId(),
+        EventType = MoonBagEventType.AutoReleased,
+        MarketId = marketId,
+        LockedQuantity = quantity,
+        ProfitPercent = unrealizedLossPercent,
+        Description = "Moon bag AUTO-RELEASED due to extended bear conditions",
+        Details = reason
+    };
 }
 
 /// <summary>
@@ -270,5 +288,10 @@ public enum MoonBagEventType
     /// <summary>
     /// Operator approved moon bag release.
     /// </summary>
-    OperatorApprovedRelease
+    OperatorApprovedRelease,
+
+    /// <summary>
+    /// Moon bag automatically released due to extended bear market conditions.
+    /// </summary>
+    AutoReleased
 }

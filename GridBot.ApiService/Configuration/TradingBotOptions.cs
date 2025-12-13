@@ -42,6 +42,12 @@ public sealed class TradingBotOptions
     public FlashCrashOptions FlashCrash { get; set; } = new();
 
     /// <summary>
+    /// Flash pump detection and protection options.
+    /// Provides symmetric protection for SHORT positions.
+    /// </summary>
+    public FlashPumpOptions FlashPump { get; set; } = new();
+
+    /// <summary>
     /// Liquidity monitoring options.
     /// </summary>
     public LiquidityOptions Liquidity { get; set; } = new();
@@ -50,6 +56,12 @@ public sealed class TradingBotOptions
     /// Decision engine options.
     /// </summary>
     public DecisionEngineOptions DecisionEngine { get; set; } = new();
+
+    /// <summary>
+    /// Pre-trade depth validation options.
+    /// Prevents order submission to thin order books.
+    /// </summary>
+    public PreTradeOptions PreTrade { get; set; } = new();
 
     /// <summary>
     /// Market symbol to trade (e.g., "BTC", "ETH").
@@ -420,6 +432,28 @@ public sealed class MoonBagOptions
     /// High watermark update threshold - only update if price increased by this percentage (default 0.5%).
     /// </summary>
     public decimal HighWatermarkUpdateThreshold { get; set; } = 0.005m;
+
+    /// <summary>
+    /// Whether automatic moon bag release is enabled (default true).
+    /// When disabled, operator approval is always required.
+    /// </summary>
+    public bool AutoReleaseEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Hours of confirmed StrongBear trend before auto-release (default 4).
+    /// </summary>
+    public int AutoReleaseConfirmationHours { get; set; } = 4;
+
+    /// <summary>
+    /// Unrealized loss percentage threshold for immediate auto-release (default -20%).
+    /// If moon bag unrealized loss exceeds this, release immediately.
+    /// </summary>
+    public decimal AutoReleaseUnrealizedLossPercent { get; set; } = -0.20m;
+
+    /// <summary>
+    /// Whether operator can override and disable auto-release for specific markets (default true).
+    /// </summary>
+    public bool AllowOperatorOverride { get; set; } = true;
 }
 
 /// <summary>
@@ -469,6 +503,68 @@ public sealed class FlashCrashOptions
 
     /// <summary>
     /// Maximum flash crash events in 24 hours before extended halt (default 2).
+    /// </summary>
+    public int MaxEventsIn24Hours { get; set; } = 2;
+
+    /// <summary>
+    /// Recovery stabilization period in minutes (default 10).
+    /// </summary>
+    public int RecoveryStabilizationMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Recovery capacity increment per period as percentage (default 25%).
+    /// </summary>
+    public decimal RecoveryCapacityIncrementPercent { get; set; } = 25m;
+}
+
+/// <summary>
+/// Flash pump detection and protection configuration.
+/// Provides symmetric protection for SHORT positions (mirrors FlashCrashOptions for LONG positions).
+/// </summary>
+public sealed class FlashPumpOptions
+{
+    /// <summary>
+    /// 1-minute price gain threshold for selling pause (default +3%).
+    /// </summary>
+    public decimal OneMinuteGainPercent { get; set; } = 3m;
+
+    /// <summary>
+    /// 5-minute price gain threshold for all order pause (default +5%).
+    /// </summary>
+    public decimal FiveMinuteGainPercent { get; set; } = 5m;
+
+    /// <summary>
+    /// 15-minute price gain threshold for position covering (default +10%).
+    /// </summary>
+    public decimal FifteenMinuteGainPercent { get; set; } = 10m;
+
+    /// <summary>
+    /// 1-hour price gain threshold for full halt (default +15%).
+    /// </summary>
+    public decimal OneHourGainPercent { get; set; } = 15m;
+
+    /// <summary>
+    /// Pause duration after 1-minute gain in minutes (default 5).
+    /// </summary>
+    public int OneMinutePauseDurationMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// Pause duration after 5-minute gain in minutes (default 15).
+    /// </summary>
+    public int FiveMinutePauseDurationMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Pause duration after 15-minute gain in minutes (default 60).
+    /// </summary>
+    public int FifteenMinutePauseDurationMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// Pause duration after 1-hour gain in minutes (default 240).
+    /// </summary>
+    public int OneHourPauseDurationMinutes { get; set; } = 240;
+
+    /// <summary>
+    /// Maximum flash pump events in 24 hours before extended halt (default 2).
     /// </summary>
     public int MaxEventsIn24Hours { get; set; } = 2;
 
@@ -610,4 +706,71 @@ public sealed class DecisionEngineOptions
     /// Maximum spread multiplier ceiling after all additions (default 3.0x).
     /// </summary>
     public decimal SpreadMultiplierCeiling { get; set; } = 3.0m;
+
+    /// <summary>
+    /// Maximum WebSocket data age in seconds before considering data stale (default 10s).
+    /// </summary>
+    public int MaxWebSocketDataAgeSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// Silence detection threshold in seconds - no messages = treat as disconnect (default 30s).
+    /// </summary>
+    public int SilenceDetectionSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Extended outage threshold in minutes - triggers protective mode (default 5 min).
+    /// </summary>
+    public int ExtendedOutageMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// Maximum reconnect cycles allowed in 5 minutes before triggering pause (default 3).
+    /// </summary>
+    public int MaxReconnectCyclesIn5Min { get; set; } = 3;
+
+    /// <summary>
+    /// Pause duration in minutes after hitting reconnect cycle limit (default 10 min).
+    /// </summary>
+    public int ReconnectCyclePauseMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Reconnection grace period in seconds - time allowed for data to refresh after reconnect (default 30s).
+    /// </summary>
+    public int ReconnectionGracePeriodSeconds { get; set; } = 30;
+}
+
+/// <summary>
+/// Pre-trade depth validation configuration.
+/// Prevents order submission to thin order books that could result in excessive slippage.
+/// </summary>
+public sealed class PreTradeOptions
+{
+    /// <summary>
+    /// Minimum order book depth in USD for normal orders (default $25,000).
+    /// Orders below this threshold trigger a warning but are not rejected.
+    /// </summary>
+    public decimal MinOrderBookDepthUsd { get; set; } = 25_000m;
+
+    /// <summary>
+    /// Critical depth threshold - reject ALL orders below this (default $10,000).
+    /// This is a hard stop to prevent trading in illiquid conditions.
+    /// </summary>
+    public decimal CriticalDepthThresholdUsd { get; set; } = 10_000m;
+
+    /// <summary>
+    /// Maximum order size as ratio of total depth (default 10%).
+    /// Orders exceeding this ratio are rejected with a recommended size.
+    /// </summary>
+    public decimal MaxOrderToDepthRatio { get; set; } = 0.10m;
+
+    /// <summary>
+    /// Maximum acceptable bid-ask spread percentage (default 1%).
+    /// Orders are rejected when spread exceeds this threshold.
+    /// </summary>
+    public decimal MaxAcceptableSpreadPercent { get; set; } = 1.0m;
+
+    /// <summary>
+    /// Maximum age of depth data in seconds (default 5).
+    /// Orders are rejected if order book data is older than this.
+    /// </summary>
+    public int MaxDataAgeSeconds { get; set; } = 5;
 }

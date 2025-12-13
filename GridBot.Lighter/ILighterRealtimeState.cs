@@ -3,6 +3,43 @@ using GridBot.Lighter.Models.WebSocket;
 namespace GridBot.Lighter;
 
 /// <summary>
+/// Event arguments for WebSocket health status changes.
+/// </summary>
+public sealed class WebSocketHealthChangedEventArgs : EventArgs
+{
+    /// <summary>
+    /// Whether the WebSocket connection is considered healthy for trading.
+    /// </summary>
+    public required bool IsHealthy { get; init; }
+
+    /// <summary>
+    /// Whether the WebSocket is currently connected.
+    /// </summary>
+    public required bool IsConnected { get; init; }
+
+    /// <summary>
+    /// Age of the most recent data received.
+    /// Null if no data has been received.
+    /// </summary>
+    public TimeSpan? DataAge { get; init; }
+
+    /// <summary>
+    /// Human-readable reason for the health state.
+    /// </summary>
+    public required string Reason { get; init; }
+
+    /// <summary>
+    /// When this health change occurred.
+    /// </summary>
+    public required DateTimeOffset Timestamp { get; init; }
+
+    /// <summary>
+    /// Whether this is a connection event (connect/disconnect).
+    /// </summary>
+    public required bool IsConnectionEvent { get; init; }
+}
+
+/// <summary>
 /// Thread-safe snapshot access to real-time WebSocket data.
 /// Provides latest state for trading decisions.
 /// </summary>
@@ -117,6 +154,30 @@ public interface ILighterRealtimeState : IAsyncDisposable
     /// <param name="marketId">Market identifier.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     Task SubscribeMarketAsync(int marketId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// When the last WebSocket message was received.
+    /// Null if no messages have been received yet.
+    /// </summary>
+    DateTimeOffset? LastMessageReceived { get; }
+
+    /// <summary>
+    /// Time elapsed since the last message was received.
+    /// Null if no messages have been received yet.
+    /// </summary>
+    TimeSpan? TimeSinceLastMessage { get; }
+
+    /// <summary>
+    /// Number of disconnect events in the last 24 hours.
+    /// Used to detect connection instability patterns.
+    /// </summary>
+    int DisconnectCount24h { get; }
+
+    /// <summary>
+    /// Event fired when WebSocket health status changes.
+    /// Allows subscribers to react to connection changes immediately.
+    /// </summary>
+    event EventHandler<WebSocketHealthChangedEventArgs>? HealthChanged;
 }
 
 /// <summary>

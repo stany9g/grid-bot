@@ -2,11 +2,13 @@ using System.Collections.Concurrent;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.Capacity;
+using GridBot.ApiService.Services.Connectivity;
 using GridBot.ApiService.Services.Indicators;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.OrderBook;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
+using GridBot.ApiService.Services.Validation;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.ApiService.Services.Grid;
@@ -27,6 +29,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     private readonly ITradingStateService _stateService;
     private readonly IOperationalCapacityService _capacityService;
     private readonly ILossMonitor _lossMonitor;
+    private readonly IWebSocketHealthMonitor _wsHealthMonitor;
+    private readonly IPreTradeValidator _preTradeValidator;
     private readonly ILogger<GridLifecycleService> _logger;
 
     private readonly ConcurrentDictionary<int, GridState> _gridStates = new();
@@ -53,6 +57,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         ITradingStateService stateService,
         IOperationalCapacityService capacityService,
         ILossMonitor lossMonitor,
+        IWebSocketHealthMonitor wsHealthMonitor,
+        IPreTradeValidator preTradeValidator,
         ILogger<GridLifecycleService> logger)
     {
         ArgumentNullException.ThrowIfNull(gridCalculator);
@@ -64,6 +70,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         ArgumentNullException.ThrowIfNull(stateService);
         ArgumentNullException.ThrowIfNull(capacityService);
         ArgumentNullException.ThrowIfNull(lossMonitor);
+        ArgumentNullException.ThrowIfNull(wsHealthMonitor);
+        ArgumentNullException.ThrowIfNull(preTradeValidator);
         ArgumentNullException.ThrowIfNull(logger);
 
         _gridCalculator = gridCalculator;
@@ -75,6 +83,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         _stateService = stateService;
         _capacityService = capacityService;
         _lossMonitor = lossMonitor;
+        _wsHealthMonitor = wsHealthMonitor;
+        _preTradeValidator = preTradeValidator;
         _logger = logger;
     }
 
@@ -168,8 +178,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                 Levels = levels
             };
 
-            // Place orders
-            var result = await _orderManager.PlaceGridOrdersAsync(marketId, levels, ct)
+            // H.3 CRITICAL: Validate against market depth and place orders
+            var result = await ValidateAndPlaceOrdersAsync(marketId, levels, ct)
                 .ConfigureAwait(false);
 
             if (result.OrdersFailed > 0)
@@ -213,6 +223,20 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         if (gridState.Status == GridStatus.Paused)
         {
             return new GridUpdateResult { Message = "Grid is paused" };
+        }
+
+        // H.2 CRITICAL: Check WebSocket health before grid operations
+        // Rule 1: IF websocket_disconnected THEN pause_grid_immediately
+        if (_wsHealthMonitor.ShouldPauseGrid)
+        {
+            _logger.LogWarning(
+                "Grid update blocked for market {MarketId}: WebSocket unhealthy - {Reason}",
+                marketId, _wsHealthMonitor.UnhealthyReason);
+
+            return new GridUpdateResult
+            {
+                Message = $"Grid paused: WebSocket unhealthy - {_wsHealthMonitor.UnhealthyReason}"
+            };
         }
 
         // NEVER HALT: Allow updates in all states, including protective mode
@@ -340,7 +364,8 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
                 await UpdateOrderSizesAsync(marketId, newLevels, newLevels.Count, ct).ConfigureAwait(false);
 
-                var result = await _orderManager.PlaceGridOrdersAsync(marketId, newLevels, ct)
+                // H.3 CRITICAL: Validate against market depth and place orders
+                var result = await ValidateAndPlaceOrdersAsync(marketId, newLevels, ct)
                     .ConfigureAwait(false);
 
                 gridState.Parameters = newParams;
@@ -380,7 +405,9 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
                     // Use total grid level count for capital allocation, not just the filled subset
                     await UpdateOrderSizesAsync(marketId, filledLevels, gridState.Levels.Count, ct).ConfigureAwait(false);
-                    var result = await _orderManager.PlaceGridOrdersAsync(marketId, filledLevels, ct)
+
+                    // H.3 CRITICAL: Validate against market depth and place orders
+                    var result = await ValidateAndPlaceOrdersAsync(marketId, filledLevels, ct)
                         .ConfigureAwait(false);
                     ordersAdded = result.OrdersPlaced;
                 }
@@ -565,7 +592,9 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
         {
             // Use total new grid level count for capital allocation, not just the pending subset
             await UpdateOrderSizesAsync(gridState.MarketId, pendingLevels, newLevels.Count, ct).ConfigureAwait(false);
-            await _orderManager.PlaceGridOrdersAsync(gridState.MarketId, pendingLevels, ct)
+
+            // H.3 CRITICAL: Validate against market depth and place orders
+            await ValidateAndPlaceOrdersAsync(gridState.MarketId, pendingLevels, ct)
                 .ConfigureAwait(false);
         }
 
@@ -736,6 +765,119 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                 "EstEntry: {Entry:F2}, Exit: {Exit:F2}, Qty: {Qty:F4}, Fees: {Fees:F4}",
                 marketId, pnlPercent, netPnlUsd, estimatedEntryPrice, exitPrice, quantity, totalFees);
         }
+    }
+
+    /// <summary>
+    /// Validates orders against market depth and places them.
+    /// H.3 CRITICAL: Pre-Trade Depth Check
+    /// - If validation fails with RecommendedSizeUsd, adjusts order size
+    /// - If validation fails without recommendation, skips the order
+    /// - Fail closed: If validation throws, reject the order
+    /// </summary>
+    /// <param name="marketId">Market identifier.</param>
+    /// <param name="levels">Grid levels to place orders for.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Placement result with orders placed and failed counts.</returns>
+    private async Task<GridPlacementResult> ValidateAndPlaceOrdersAsync(
+        int marketId,
+        List<GridLevel> levels,
+        CancellationToken ct)
+    {
+        if (levels.Count == 0)
+        {
+            return new GridPlacementResult { OrdersPlaced = 0, OrdersFailed = 0 };
+        }
+
+        var validatedLevels = new List<GridLevel>();
+        var rejectedCount = 0;
+
+        foreach (var level in levels)
+        {
+            // Calculate order value in USD
+            var orderSizeUsd = level.Price * level.Size;
+
+            try
+            {
+                var validation = await _preTradeValidator.ValidateOrderAsync(
+                    marketId,
+                    level.IsBid,
+                    orderSizeUsd,
+                    ct).ConfigureAwait(false);
+
+                if (validation.IsValid)
+                {
+                    validatedLevels.Add(level);
+                }
+                else if (validation.RecommendedSizeUsd.HasValue && validation.RecommendedSizeUsd.Value > 0)
+                {
+                    // Adjust order size to recommended
+                    var adjustedSize = validation.RecommendedSizeUsd.Value / level.Price;
+
+                    _logger.LogWarning(
+                        "PRE-TRADE: Adjusting {Side} order at {Price:F2} from {OriginalSize:F4} to {AdjustedSize:F4} (${OriginalUsd:F0} -> ${AdjustedUsd:F0})",
+                        level.IsBid ? "BUY" : "SELL",
+                        level.Price,
+                        level.Size,
+                        adjustedSize,
+                        orderSizeUsd,
+                        validation.RecommendedSizeUsd.Value);
+
+                    level.Size = adjustedSize;
+                    validatedLevels.Add(level);
+                }
+                else
+                {
+                    // Reject order entirely
+                    _logger.LogWarning(
+                        "PRE-TRADE: Rejecting {Side} order at {Price:F2} (${SizeUsd:F0}): {Reason}",
+                        level.IsBid ? "BUY" : "SELL",
+                        level.Price,
+                        orderSizeUsd,
+                        validation.Reason);
+
+                    level.Status = GridLevelStatus.Cancelled;
+                    rejectedCount++;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Fail closed: If validation throws, reject the order
+                _logger.LogError(
+                    ex,
+                    "PRE-TRADE: Exception validating {Side} order at {Price:F2}. Rejecting order (fail closed).",
+                    level.IsBid ? "BUY" : "SELL",
+                    level.Price);
+
+                level.Status = GridLevelStatus.Cancelled;
+                rejectedCount++;
+            }
+        }
+
+        if (validatedLevels.Count == 0)
+        {
+            _logger.LogWarning(
+                "PRE-TRADE: All {Count} orders rejected for market {MarketId}. No orders will be placed.",
+                levels.Count, marketId);
+
+            return new GridPlacementResult { OrdersPlaced = 0, OrdersFailed = rejectedCount };
+        }
+
+        if (rejectedCount > 0)
+        {
+            _logger.LogInformation(
+                "PRE-TRADE: {Validated}/{Total} orders passed validation for market {MarketId}",
+                validatedLevels.Count, levels.Count, marketId);
+        }
+
+        // Place validated orders
+        var result = await _orderManager.PlaceGridOrdersAsync(marketId, validatedLevels, ct)
+            .ConfigureAwait(false);
+
+        return new GridPlacementResult
+        {
+            OrdersPlaced = result.OrdersPlaced,
+            OrdersFailed = result.OrdersFailed + rejectedCount
+        };
     }
 
     /// <summary>

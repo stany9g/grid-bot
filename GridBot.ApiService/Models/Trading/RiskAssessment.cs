@@ -36,6 +36,11 @@ public sealed class RiskAssessment
     public required FlashCrashStatus FlashCrashStatus { get; init; }
 
     /// <summary>
+    /// Current flash pump status.
+    /// </summary>
+    public required FlashPumpStatus FlashPumpStatus { get; init; }
+
+    /// <summary>
     /// Current liquidity status.
     /// </summary>
     public required LiquidityStatus LiquidityStatus { get; init; }
@@ -79,7 +84,8 @@ public sealed class RiskAssessment
         OverallSeverity == AlertSeverity.Critical ||
         !TradingAllowed ||
         LossStatus.AnyLimitBreached ||
-        FlashCrashStatus.CrashDetected;
+        FlashCrashStatus.CrashDetected ||
+        FlashPumpStatus.PumpDetected;
 
     /// <summary>
     /// Creates an assessment indicating all systems are normal.
@@ -92,6 +98,7 @@ public sealed class RiskAssessment
         SellsBlocked = false,
         LossStatus = lossStatus,
         FlashCrashStatus = FlashCrashStatus.NoCrash(),
+        FlashPumpStatus = FlashPumpStatus.NoPump(),
         LiquidityStatus = liquidityStatus,
         OverallSeverity = AlertSeverity.Low,
         ActiveWarnings = [],

@@ -28,6 +28,12 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     private volatile UserStatsUpdateEvent? _userStats;
     private long _lastUpdateTimeTicks;
 
+    // Health monitoring state
+    private long _lastMessageReceivedTicks;
+    private readonly List<DateTimeOffset> _disconnectEvents = new();
+    private readonly object _disconnectLock = new();
+    private volatile bool _wasConnected;
+
     // Background processing
     private CancellationTokenSource? _processingCts;
     private Task? _processingTask;
@@ -48,6 +54,43 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             return DateTimeOffset.UtcNow - lastUpdate;
         }
     }
+
+    /// <inheritdoc />
+    public DateTimeOffset? LastMessageReceived
+    {
+        get
+        {
+            var ticks = Interlocked.Read(ref _lastMessageReceivedTicks);
+            return ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+    }
+
+    /// <inheritdoc />
+    public TimeSpan? TimeSinceLastMessage
+    {
+        get
+        {
+            var lastMsg = LastMessageReceived;
+            return lastMsg.HasValue ? DateTimeOffset.UtcNow - lastMsg.Value : null;
+        }
+    }
+
+    /// <inheritdoc />
+    public int DisconnectCount24h
+    {
+        get
+        {
+            lock (_disconnectLock)
+            {
+                var cutoff = DateTimeOffset.UtcNow.AddHours(-24);
+                _disconnectEvents.RemoveAll(e => e < cutoff);
+                return _disconnectEvents.Count;
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public event EventHandler<WebSocketHealthChangedEventArgs>? HealthChanged;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LighterRealtimeStateService"/> class.
@@ -374,7 +417,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             await foreach (var update in _wsClient.OrderBookUpdates.ReadAllAsync(cancellationToken))
             {
                 _orderBooks[update.MarketId] = update.Snapshot;
-                Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
+                RecordMessageReceived(update.Timestamp);
 
                 if (_logger.IsEnabled(LogLevel.Trace))
                 {
@@ -419,7 +462,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                     Positions = update.Positions.ToDictionary(p => p.MarketId),
                     LastUpdated = update.Timestamp
                 };
-                Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
+                RecordMessageReceived(update.Timestamp);
 
                 if (_logger.IsEnabled(LogLevel.Trace))
                 {
@@ -448,7 +491,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             await foreach (var update in _wsClient.OrderUpdates.ReadAllAsync(cancellationToken))
             {
                 _orders[update.MarketId] = update.Orders;
-                Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
+                RecordMessageReceived(update.Timestamp);
 
                 if (_logger.IsEnabled(LogLevel.Trace))
                 {
@@ -484,7 +527,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                     Volume24h = update.Volume24h,
                     LastUpdated = update.Timestamp
                 };
-                Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
+                RecordMessageReceived(update.Timestamp);
 
                 if (_logger.IsEnabled(LogLevel.Trace))
                 {
@@ -517,11 +560,69 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                     update.State,
                     update.Reason);
 
+                // Track disconnect events for health monitoring
+                var isNowConnected = update.State == ConnectionState.Connected;
+                var wasConnectedBefore = _wasConnected;
+                _wasConnected = isNowConnected;
+
+                // Detect disconnect event (was connected, now not)
+                if (wasConnectedBefore && !isNowConnected)
+                {
+                    lock (_disconnectLock)
+                    {
+                        _disconnectEvents.Add(DateTimeOffset.UtcNow);
+                    }
+
+                    _logger.LogWarning(
+                        "WebSocket disconnected. Disconnect count in 24h: {Count}",
+                        DisconnectCount24h);
+
+                    // Fire health changed event - disconnected
+                    OnHealthChanged(new WebSocketHealthChangedEventArgs
+                    {
+                        IsHealthy = false,
+                        IsConnected = false,
+                        DataAge = OldestDataAge,
+                        Reason = update.Reason ?? "Connection lost",
+                        Timestamp = DateTimeOffset.UtcNow,
+                        IsConnectionEvent = true
+                    });
+                }
+                // Detect reconnection (was not connected, now connected)
+                else if (!wasConnectedBefore && isNowConnected)
+                {
+                    _logger.LogInformation(
+                        "WebSocket reconnected. Data age: {DataAge}",
+                        OldestDataAge?.TotalSeconds.ToString("F1") ?? "N/A");
+
+                    // Fire health changed event - reconnected
+                    // Note: Health depends on data age, which will be checked by WebSocketHealthMonitor
+                    OnHealthChanged(new WebSocketHealthChangedEventArgs
+                    {
+                        IsHealthy = true, // Initial optimistic state, monitor will verify
+                        IsConnected = true,
+                        DataAge = OldestDataAge,
+                        Reason = "Connection restored",
+                        Timestamp = DateTimeOffset.UtcNow,
+                        IsConnectionEvent = true
+                    });
+                }
+
                 if (update.State == ConnectionState.Failed)
                 {
                     _logger.LogError(
                         "WebSocket connection failed after {Attempts} reconnection attempts",
                         update.ReconnectAttempt);
+
+                    OnHealthChanged(new WebSocketHealthChangedEventArgs
+                    {
+                        IsHealthy = false,
+                        IsConnected = false,
+                        DataAge = OldestDataAge,
+                        Reason = $"Connection failed after {update.ReconnectAttempt} attempts",
+                        Timestamp = DateTimeOffset.UtcNow,
+                        IsConnectionEvent = true
+                    });
                 }
             }
         }
@@ -570,7 +671,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
             await foreach (var update in _wsClient.UserStatsUpdates.ReadAllAsync(cancellationToken))
             {
                 _userStats = update;
-                Interlocked.Exchange(ref _lastUpdateTimeTicks, update.Timestamp.UtcTicks);
+                RecordMessageReceived(update.Timestamp);
 
                 // Also update the account snapshot with new user stats values
                 var existingAccount = _account;
@@ -603,5 +704,23 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             _logger.LogError(ex, "Error processing user stats updates");
         }
+    }
+
+    /// <summary>
+    /// Records that a message was received and updates both timestamp fields.
+    /// </summary>
+    private void RecordMessageReceived(DateTimeOffset timestamp)
+    {
+        var ticks = timestamp.UtcTicks;
+        Interlocked.Exchange(ref _lastUpdateTimeTicks, ticks);
+        Interlocked.Exchange(ref _lastMessageReceivedTicks, ticks);
+    }
+
+    /// <summary>
+    /// Raises the HealthChanged event.
+    /// </summary>
+    private void OnHealthChanged(WebSocketHealthChangedEventArgs e)
+    {
+        HealthChanged?.Invoke(this, e);
     }
 }

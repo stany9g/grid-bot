@@ -115,6 +115,27 @@ public sealed class MoonBagStatus
     public string? StateReason { get; set; }
 
     /// <summary>
+    /// When StrongBear trend was first detected.
+    /// Null if not in StrongBear trend.
+    /// </summary>
+    public DateTimeOffset? StrongBearStartTime { get; set; }
+
+    /// <summary>
+    /// Whether auto-release conditions are currently met.
+    /// </summary>
+    public bool AutoReleaseEligible { get; set; }
+
+    /// <summary>
+    /// Reason auto-release is blocked, if any.
+    /// </summary>
+    public string? AutoReleaseBlockedReason { get; set; }
+
+    /// <summary>
+    /// Operator has explicitly disabled auto-release for this market.
+    /// </summary>
+    public bool OperatorDisabledAutoRelease { get; set; }
+
+    /// <summary>
     /// Creates a status instance indicating moon bag is inactive.
     /// </summary>
     public static MoonBagStatus Inactive(int marketId) => new()

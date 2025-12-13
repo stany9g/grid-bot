@@ -140,4 +140,35 @@ public interface IMoonBagManager
     /// <param name="ct">Cancellation token.</param>
     /// <returns>True if state was loaded, false if no persisted state exists.</returns>
     Task<bool> LoadPersistedStateAsync(int marketId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Checks if automatic release conditions are met and performs auto-release if so.
+    /// This should be called periodically (e.g., every decision cycle).
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="currentPrice">Current market price.</param>
+    /// <param name="currentTrend">Current trend state.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>True if auto-release was triggered, false otherwise.</returns>
+    Task<bool> CheckAndPerformAutoReleaseAsync(
+        int marketId,
+        decimal currentPrice,
+        TrendState currentTrend,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Allows operator to disable auto-release for a specific market.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <param name="disabled">True to disable auto-release.</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task SetOperatorAutoReleaseOverrideAsync(int marketId, bool disabled, CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets the duration the current trend has been StrongBear.
+    /// Returns null if not in StrongBear or no tracking.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <returns>Duration of StrongBear trend or null.</returns>
+    TimeSpan? GetStrongBearDuration(int marketId);
 }

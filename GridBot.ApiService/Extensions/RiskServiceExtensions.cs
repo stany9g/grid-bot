@@ -23,6 +23,7 @@ public static class RiskServiceExtensions
         // Register individual monitors
         services.AddSingleton<ILossMonitor, LossMonitor>();
         services.AddSingleton<IFlashCrashDetector, FlashCrashDetector>();
+        services.AddSingleton<IFlashPumpDetector, FlashPumpDetector>();
         services.AddSingleton<ILiquidityMonitor, LiquidityMonitor>();
 
         // Register orchestrator

@@ -31,6 +31,12 @@ public static class TradingBotServiceExtensions
         // Register risk configuration service
         services.AddSingleton<IRiskConfiguration, RiskConfiguration>();
 
+        // Register connectivity monitoring services (WebSocket health monitoring)
+        services.AddConnectivityServices();
+
+        // Register validation services (pre-trade depth validation)
+        services.AddValidationServices();
+
         // Register market data services (indicators, analyzers, metrics)
         services.AddMarketDataServices();
 

@@ -791,6 +791,208 @@ public sealed class MoonBagManager : IMoonBagManager, IDisposable
         }
     }
 
+    /// <inheritdoc />
+    public async Task<bool> CheckAndPerformAutoReleaseAsync(
+        int marketId,
+        decimal currentPrice,
+        TrendState currentTrend,
+        CancellationToken ct = default)
+    {
+        var marketLock = GetMarketLock(marketId);
+        await marketLock.WaitAsync(ct).ConfigureAwait(false);
+
+        try
+        {
+            if (!_moonBagStates.TryGetValue(marketId, out var status))
+            {
+                return false;
+            }
+
+            // Only check in HOLD_MODE
+            if (status.State != MoonBagState.HoldMode)
+            {
+                return false;
+            }
+
+            var options = _config.MoonBag;
+
+            // Check if auto-release is enabled
+            if (!options.AutoReleaseEnabled)
+            {
+                status.AutoReleaseBlockedReason = "Auto-release disabled in configuration";
+                return false;
+            }
+
+            // Check operator override
+            if (status.OperatorDisabledAutoRelease && options.AllowOperatorOverride)
+            {
+                status.AutoReleaseBlockedReason = "Operator disabled auto-release for this market";
+                return false;
+            }
+
+            // Track StrongBear duration
+            if (currentTrend == TrendState.StrongBear)
+            {
+                if (!status.StrongBearStartTime.HasValue)
+                {
+                    status.StrongBearStartTime = DateTimeOffset.UtcNow;
+                    _logger.LogInformation(
+                        "StrongBear trend started for market {MarketId}, beginning auto-release countdown",
+                        marketId);
+                }
+            }
+            else
+            {
+                // Reset if trend changes
+                if (status.StrongBearStartTime.HasValue)
+                {
+                    _logger.LogInformation(
+                        "Trend changed from StrongBear for market {MarketId}, resetting auto-release countdown",
+                        marketId);
+                }
+                status.StrongBearStartTime = null;
+                status.AutoReleaseEligible = false;
+                status.AutoReleaseBlockedReason = $"Trend is {currentTrend}, not StrongBear";
+                return false;
+            }
+
+            // Calculate unrealized loss on moon bag
+            decimal unrealizedLossPercent;
+            if (status.EntryPrice <= 0)
+            {
+                status.AutoReleaseBlockedReason = "No entry price available";
+                return false;
+            }
+
+            if (status.IsLongPosition)
+            {
+                unrealizedLossPercent = (currentPrice - status.EntryPrice) / status.EntryPrice;
+            }
+            else
+            {
+                // For short positions, profit when price decreases (loss when price increases)
+                unrealizedLossPercent = (status.EntryPrice - currentPrice) / status.EntryPrice;
+            }
+
+            // Check immediate release due to large loss
+            if (unrealizedLossPercent <= options.AutoReleaseUnrealizedLossPercent)
+            {
+                return await PerformAutoReleaseAsync(
+                    marketId, status,
+                    $"Unrealized loss {unrealizedLossPercent:P1} exceeds threshold {options.AutoReleaseUnrealizedLossPercent:P1}",
+                    unrealizedLossPercent, ct).ConfigureAwait(false);
+            }
+
+            // Check StrongBear duration
+            var strongBearDuration = DateTimeOffset.UtcNow - status.StrongBearStartTime.Value;
+            var requiredDuration = TimeSpan.FromHours(options.AutoReleaseConfirmationHours);
+
+            if (strongBearDuration < requiredDuration)
+            {
+                status.AutoReleaseEligible = false;
+                status.AutoReleaseBlockedReason = $"StrongBear duration {strongBearDuration.TotalHours:F1}h < required {options.AutoReleaseConfirmationHours}h";
+                return false;
+            }
+
+            // Check price vs MAs (must be below both MA50 and MA200)
+            var releaseConditionsMet = await CheckReleaseConditionsInternalAsync(status, marketId, ct).ConfigureAwait(false);
+            if (!releaseConditionsMet)
+            {
+                status.AutoReleaseEligible = false;
+                status.AutoReleaseBlockedReason = "Price not below MA50 and MA200";
+                return false;
+            }
+
+            // All conditions met - perform auto-release
+            status.AutoReleaseEligible = true;
+            return await PerformAutoReleaseAsync(
+                marketId, status,
+                $"StrongBear for {strongBearDuration.TotalHours:F1}h with price below death cross",
+                unrealizedLossPercent, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            marketLock.Release();
+        }
+    }
+
+    private async Task<bool> PerformAutoReleaseAsync(
+        int marketId,
+        MoonBagStatus status,
+        string reason,
+        decimal unrealizedLossPercent,
+        CancellationToken ct)
+    {
+        _logger.LogCritical(
+            "AUTO-RELEASING MOON BAG for market {MarketId}: {Reason}. Quantity: {Quantity:F4}, Loss: {Loss:P1}",
+            marketId, reason, status.LockedQuantity, unrealizedLossPercent);
+
+        // Transition to Released state
+        status.State = MoonBagState.Released;
+        status.IsReleaseApproved = true; // Mark as approved (automatically)
+        status.LastStateTransition = DateTimeOffset.UtcNow;
+        status.StateReason = $"AUTO-RELEASE: {reason}";
+
+        // Log CRITICAL risk event
+        var riskEvent = RiskEvent.Create(
+            "MB-AUTO-REL",
+            AlertSeverity.Critical,
+            $"Moon bag AUTO-RELEASED for market {marketId}",
+            $"Reason: {reason}. Quantity: {status.LockedQuantity:F4}, Unrealized loss: {unrealizedLossPercent:P1}",
+            status.LockedQuantity,
+            unrealizedLossPercent);
+
+        await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
+
+        // Persist state
+        await _stateRepository.SaveMoonBagStatusAsync(marketId, status, ct).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async Task SetOperatorAutoReleaseOverrideAsync(int marketId, bool disabled, CancellationToken ct = default)
+    {
+        var marketLock = GetMarketLock(marketId);
+        await marketLock.WaitAsync(ct).ConfigureAwait(false);
+
+        try
+        {
+            if (!_moonBagStates.TryGetValue(marketId, out var status))
+            {
+                return;
+            }
+
+            status.OperatorDisabledAutoRelease = disabled;
+
+            _logger.LogWarning(
+                "Operator {Action} auto-release for market {MarketId}",
+                disabled ? "DISABLED" : "ENABLED", marketId);
+
+            await _stateRepository.SaveMoonBagStatusAsync(marketId, status, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            marketLock.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public TimeSpan? GetStrongBearDuration(int marketId)
+    {
+        if (!_moonBagStates.TryGetValue(marketId, out var status))
+        {
+            return null;
+        }
+
+        if (!status.StrongBearStartTime.HasValue)
+        {
+            return null;
+        }
+
+        return DateTimeOffset.UtcNow - status.StrongBearStartTime.Value;
+    }
+
     private SemaphoreSlim GetMarketLock(int marketId)
     {
         return _marketLocks.GetOrAdd(marketId, _ => new SemaphoreSlim(1, 1));
