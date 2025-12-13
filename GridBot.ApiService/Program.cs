@@ -10,6 +10,7 @@ using GridBot.ApiService.Services.MoonBag;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.Lighter;
+using Microsoft.AspNetCore.Hosting.StaticWebAssets;
 using MudBlazor.Services;
 using Scalar.AspNetCore;
 
@@ -18,6 +19,12 @@ public partial class Program
     private static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+
+        // Enable static web assets for development (required when running through Aspire)
+        if (builder.Environment.IsDevelopment())
+        {
+            StaticWebAssetsLoader.UseStaticWebAssets(builder.Environment, builder.Configuration);
+        }
 
         // Add service defaults & Aspire client integrations.
         builder.AddServiceDefaults();
@@ -1081,6 +1088,7 @@ public partial class Program
         .WithDescription("Forces immediate return to full active trading. Use with caution - bypasses recovery procedure.");
 
         app.MapDefaultEndpoints();
+
 
         // Map Razor components for Blazor Server dashboard
         app.MapRazorComponents<App>()

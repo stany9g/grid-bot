@@ -92,12 +92,19 @@
     </MudGrid>
 
     @* Row 6: Alerts Panel *@
-    <MudGrid>
+    <MudGrid Class="mb-4">
         <MudItem xs="12">
             <AlertsPanel Alerts="_state.RecentAlerts"
                          OnClearAlerts="ClearAlerts"
                          OnAcknowledgeAlert="AcknowledgeAlert"
                          MaxDisplayed="15" />
+        </MudItem>
+    </MudGrid>
+
+    @* Row 7: Decision Cycle Log *@
+    <MudGrid>
+        <MudItem xs="12">
+            <DecisionLogViewer />
         </MudItem>
     </MudGrid>
 </MudContainer>

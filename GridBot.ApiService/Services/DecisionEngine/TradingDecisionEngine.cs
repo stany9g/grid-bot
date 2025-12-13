@@ -11,6 +11,7 @@ using GridBot.ApiService.Services.MoonBag;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.ApiService.Services.Telemetry;
+using GridBot.ApiService.Services.Logging;
 using GridBot.ApiService.Services.Trend;
 using GridBot.Lighter;
 using Microsoft.Extensions.Logging;
@@ -41,6 +42,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
     private readonly ILighterRealtimeState _realtimeState;
     private readonly IOperationalCapacityService _capacityService;
     private readonly IWebSocketHealthMonitor _wsHealthMonitor;
+    private readonly IDecisionCycleLogService _logService;
 
     // Per-market state tracking
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _marketLocks = new();
@@ -82,7 +84,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         ILighterQueryClient lighterClient,
         ILighterRealtimeState realtimeState,
         IOperationalCapacityService capacityService,
-        IWebSocketHealthMonitor wsHealthMonitor)
+        IWebSocketHealthMonitor wsHealthMonitor,
+        IDecisionCycleLogService logService)
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(options);
@@ -100,6 +103,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         ArgumentNullException.ThrowIfNull(realtimeState);
         ArgumentNullException.ThrowIfNull(capacityService);
         ArgumentNullException.ThrowIfNull(wsHealthMonitor);
+        ArgumentNullException.ThrowIfNull(logService);
 
         _logger = logger;
         _options = options.Value;
@@ -117,6 +121,7 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         _realtimeState = realtimeState;
         _capacityService = capacityService;
         _wsHealthMonitor = wsHealthMonitor;
+        _logService = logService;
     }
 
     /// <inheritdoc />
@@ -490,7 +495,8 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
             // Log decision summary
             LogDecisionSummary(marketId, previousState, _stateService.CurrentState, capacity,
                 GetEffectivePositionMultiplier(marketId), GetEffectiveSpreadMultiplier(marketId),
-                ordersPlaced, ordersCancelled, sw.Elapsed);
+                ordersPlaced, ordersCancelled, sw.Elapsed, context, riskAssessment, trendResult,
+                context.GridState, moonBagStatus, warnings, actionsBlocked);
 
             // Record decision loop duration for successful completion
             sw.Stop();
@@ -1220,27 +1226,161 @@ public sealed class TradingDecisionEngine : ITradingDecisionEngine, IDisposable
         decimal spreadMultiplier,
         int ordersPlaced,
         int ordersCancelled,
-        TimeSpan duration)
+        TimeSpan duration,
+        DecisionContext context,
+        RiskAssessment? riskAssessment,
+        TrendIntelligenceResult? trendResult,
+        GridState? gridState,
+        MoonBagStatus? moonBagStatus,
+        List<string> warnings,
+        List<string> actionsBlocked)
     {
+        // Build position info
+        var positionDirection = "FLAT";
+        decimal? positionSize = null;
+        if (context.Position.HasValue && context.Position.Value != 0)
+        {
+            positionDirection = context.Position.Value >= 0 ? "LONG" : "SHORT";
+            positionSize = Math.Abs(context.Position.Value);
+        }
+        var positionInfo = positionSize.HasValue
+            ? $"{positionDirection} {positionSize.Value:F6}"
+            : "NO_POS";
+
+        // Build trend info
+        var trendState = "N/A";
+        decimal targetSkew = 0;
+        decimal actualSkew = 0;
+        if (trendResult?.Success == true && trendResult.InventoryAnalysis is not null)
+        {
+            trendState = _stateService.CurrentTrendState.ToString();
+            targetSkew = trendResult.InventoryAnalysis.TargetSkew;
+            actualSkew = trendResult.InventoryAnalysis.CurrentSkew;
+        }
+        var trendInfo = trendResult?.Success == true && trendResult.InventoryAnalysis is not null
+            ? $"{trendState} (target:{targetSkew:F0}%, actual:{actualSkew:F0}%)"
+            : "N/A";
+
+        // Build risk info
+        var riskInfo = BuildRiskInfoString(riskAssessment);
+
+        // Build grid info (count active orders by side)
+        var activeBuys = 0;
+        var activeSells = 0;
+        var gridInfo = "NO_GRID";
+        if (gridState is not null && gridState.Levels.Count > 0)
+        {
+            activeBuys = gridState.Levels.Count(l => l.IsBid && l.Status == GridLevelStatus.Active);
+            activeSells = gridState.Levels.Count(l => !l.IsBid && l.Status == GridLevelStatus.Active);
+            gridInfo = $"B:{activeBuys} S:{activeSells}";
+        }
+
+        // Build block info
+        var buysBlocked = _buysBlocked.GetValueOrDefault(marketId, false);
+        var sellsBlocked = _sellsBlocked.GetValueOrDefault(marketId, false);
+        var blockInfo = (buysBlocked, sellsBlocked) switch
+        {
+            (true, true) => "BLOCKED:ALL",
+            (true, false) => "BLOCKED:BUYS",
+            (false, true) => "BLOCKED:SELLS",
+            _ => "OK"
+        };
+
+        // Moon bag info
+        var moonBagStatusStr = moonBagStatus?.State switch
+        {
+            MoonBagState.HoldMode => $"HOLD:{moonBagStatus.LockedQuantity:F4}",
+            MoonBagState.Trailing => $"TRAIL:{moonBagStatus.LockedQuantity:F4}",
+            MoonBagState.Released => "RELEASED",
+            _ => null
+        };
+        var moonInfo = moonBagStatusStr is not null ? $"MOON:{moonBagStatusStr}" : "";
+
+        // Main log line with comprehensive info
         _logger.LogInformation(
-            "Decision cycle complete for market {MarketId}. State: {State}, Capacity: {Capacity}%, " +
-            "PosMultiplier: {PosMult:F2}, SpreadMultiplier: {SpreadMult:F2}, " +
-            "Orders +{Placed}/-{Cancelled}, Duration: {Duration}ms",
+            "CYCLE[{MarketId}] Price:{Price:F2} | Pos:{Position} | Trend:{Trend} | " +
+            "Grid:{Grid} | Risk:{Risk} | {Block} | Cap:{Capacity}% | +{Placed}/-{Cancelled} | {Duration:F0}ms{MoonInfo}",
             marketId,
-            currentState,
+            context.CurrentPrice,
+            positionInfo,
+            trendInfo,
+            gridInfo,
+            riskInfo,
+            blockInfo,
             capacity,
-            positionMultiplier,
-            spreadMultiplier,
             ordersPlaced,
             ordersCancelled,
-            duration.TotalMilliseconds);
+            duration.TotalMilliseconds,
+            string.IsNullOrEmpty(moonInfo) ? "" : $" | {moonInfo}");
 
         if (previousState != currentState)
         {
             _logger.LogInformation(
-                "State transition for market {MarketId}: {Previous} -> {Current}",
+                "STATE CHANGE[{MarketId}]: {Previous} -> {Current}",
                 marketId, previousState, currentState);
         }
+
+        // Create and add log entry to the ring buffer
+        var logEntry = new Models.Logging.DecisionCycleLogEntry
+        {
+            Id = Guid.NewGuid(),
+            Timestamp = context.Timestamp,
+            MarketId = marketId,
+            CurrentPrice = context.CurrentPrice,
+            PositionSize = positionSize,
+            PositionDirection = positionDirection,
+            TrendState = trendState,
+            TargetSkew = targetSkew,
+            ActualSkew = actualSkew,
+            ActiveBuyOrders = activeBuys,
+            ActiveSellOrders = activeSells,
+            RiskStatus = riskInfo,
+            BlockStatus = blockInfo,
+            Capacity = capacity,
+            OrdersPlaced = ordersPlaced,
+            OrdersCancelled = ordersCancelled,
+            DurationMs = duration.TotalMilliseconds,
+            MoonBagStatus = moonBagStatusStr,
+            Warnings = [.. warnings],
+            ActionsBlocked = [.. actionsBlocked]
+        };
+
+        _logService.AddEntry(logEntry);
+    }
+
+    private static string BuildRiskInfoString(RiskAssessment? assessment)
+    {
+        if (assessment is null)
+            return "N/A";
+
+        var parts = new List<string>();
+
+        // Flash crash/pump status
+        if (assessment.FlashCrashStatus.CrashDetected)
+            parts.Add($"CRASH:{assessment.FlashCrashStatus.Severity}");
+        if (assessment.FlashPumpStatus?.PumpDetected == true)
+            parts.Add($"PUMP:{assessment.FlashPumpStatus.Severity}");
+
+        // Loss status
+        if (assessment.LossStatus.AnyLimitBreached)
+            parts.Add("LOSS_LIMIT");
+
+        // Liquidity status
+        if (assessment.LiquidityStatus.Level == LiquidityLevel.Low)
+            parts.Add("LOW_LIQ");
+        else if (assessment.LiquidityStatus.Level == LiquidityLevel.Critical)
+            parts.Add("CRIT_LIQ");
+        else if (assessment.LiquidityStatus.Level == LiquidityLevel.Halted)
+            parts.Add("HALTED");
+
+        // Nonce status
+        if (assessment.NonceStatus?.ShouldPauseTrading == true)
+            parts.Add("NONCE_ERR");
+
+        if (parts.Count == 0)
+            return "OK";
+
+        return string.Join(",", parts);
     }
 
     private SemaphoreSlim GetMarketLock(int marketId)

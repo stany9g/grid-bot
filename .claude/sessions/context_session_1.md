@@ -1890,3 +1890,186 @@ Lighter WebSocket docs: https://apidocs.lighter.xyz/docs/websocket-reference
 - Size = 0 means remove the level
 
 ---
+
+## Enhanced Decision Cycle Logging (December 13, 2025)
+
+### Problem
+The trading bot logs were showing only basic information:
+```
+Decision cycle complete for market 1. State: Active, Capacity: 100%, PosMultiplier: 1.00, SpreadMultiplier: 1.00, Orders +0/-0, Duration: 28ms
+```
+
+This provided no insight into what the bot was actually doing.
+
+### Solution
+Enhanced the `LogDecisionSummary` method to include comprehensive information in a single readable log line.
+
+### New Log Format
+```
+CYCLE[1] Price:90308.50 | Pos:LONG 0.001234 | Trend:Bull (target:80%, actual:65%) | Grid:B:5 S:5 | Risk:OK | OK | Cap:100% | +2/-1 | 28ms
+```
+
+### Log Fields Explained
+
+| Field | Example | Description |
+|-------|---------|-------------|
+| `CYCLE[{MarketId}]` | `CYCLE[1]` | Market being processed |
+| `Price` | `90308.50` | Current market price |
+| `Pos` | `LONG 0.001234` or `SHORT 0.002345` | Position direction and size |
+| `Trend` | `Bull (target:80%, actual:65%)` | Trend state + target vs actual skew |
+| `Grid` | `B:5 S:5` | Active buy and sell orders on grid |
+| `Risk` | `OK` or `CRASH:Moderate` | Risk assessment status |
+| `Block` | `OK` or `BLOCKED:BUYS` | Order blocking status |
+| `Cap` | `100%` | Operational capacity |
+| `+N/-N` | `+2/-1` | Orders placed/cancelled this cycle |
+| Duration | `28ms` | Cycle execution time |
+| `MOON:*` | `MOON:HOLD(0.0010)` | Moon bag status (if active) |
+
+### Risk Status Values
+
+- `OK` - No risk issues
+- `CRASH:{Severity}` - Flash crash detected (Minor/Moderate/Severe/Extreme)
+- `PUMP:{Severity}` - Flash pump detected
+- `LOSS_LIMIT` - Loss limit breached
+- `LOW_LIQ` - Low liquidity
+- `CRIT_LIQ` - Critical liquidity
+- `HALTED` - Market halted
+- `NONCE_ERR` - Nonce failures causing pause
+
+### Block Status Values
+
+- `OK` - No blocking
+- `BLOCKED:BUYS` - Buy orders blocked (flash crash protection)
+- `BLOCKED:SELLS` - Sell orders blocked (moon bag hold mode)
+- `BLOCKED:ALL` - All orders blocked (severe risk)
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `GridBot.ApiService/Services/DecisionEngine/TradingDecisionEngine.cs` | Enhanced `LogDecisionSummary` method, added `BuildRiskInfoString` helper |
+
+### Build Status
+**PASSED** - 0 warnings, 0 errors
+
+---
+
+## COMPLETED: DecisionLogViewer Blazor Component (December 13, 2025)
+
+### Problem Solved
+The dashboard needed a visual component to display decision cycle log entries with the ability to browse historical data using a time slider.
+
+### Prerequisites Found (Already Existed)
+The following prerequisites were already implemented:
+- `DecisionCycleLogEntry` model at `GridBot.ApiService/Models/Logging/DecisionCycleLogEntry.cs`
+- `IDecisionCycleLogService` interface at `GridBot.ApiService/Services/Logging/IDecisionCycleLogService.cs`
+- `DecisionCycleLogService` implementation at `GridBot.ApiService/Services/Logging/DecisionCycleLogService.cs`
+
+### Solution Implemented
+Created `DecisionLogViewer` Blazor component that displays decision cycle entries in a compact table format with two modes:
+1. **Live Mode**: Auto-scrolls to show latest 50 entries, auto-refreshes on `EntryAdded` event
+2. **History Mode**: Time slider to browse historical entries within a 30-second window
+
+### Files Created
+
+| File | Description |
+|------|-------------|
+| `GridBot.ApiService/Components/Dashboard/DecisionLogViewer.razor` | Full Blazor component with table, slider, and expandable row details |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `GridBot.ApiService/Components/Pages/Dashboard.razor` | Added Row 7 with DecisionLogViewer component |
+| `GridBot.ApiService/Components/_Imports.razor` | Added `Models.Logging` and `Services.Logging` namespaces |
+
+### Component Features
+
+#### Layout
+1. **Header** with:
+   - Title "Decision Cycle Log" with history icon
+   - Live/History mode toggle switch
+   - Entry count display
+
+2. **Time Slider** (History mode only):
+   - MudSlider with 5-second step intervals
+   - Shows time range from oldest to newest entry
+   - Displays selected timestamp label
+   - Filters entries within +/- 30 seconds of selected time
+
+3. **Log Table** (MudSimpleTable):
+   - Compact rows with one cycle per row
+   - Fixed header with scrollable body (max 400px height)
+   - Columns: Time | Price | Position | Trend | Grid | Risk | Block | Cap | Orders | Dur
+   - Expandable rows for Warnings and ActionsBlocked
+
+#### Column Formatting
+
+| Column | Format | Notes |
+|--------|--------|-------|
+| Time | `HH:mm:ss` | Local time |
+| Price | `$XX,XXX.XX` | Currency format |
+| Position | Icon + size | Up arrow (green) for LONG, Down arrow (red) for SHORT, Dash for FLAT |
+| Trend | State + skew | Shows target vs actual skew with deviation |
+| Grid | `B:N S:N` | Active buy and sell orders |
+| Risk | Chip | Green=OK, Yellow=warnings, Red=crash/halt |
+| Block | Chip | Green=OK, Orange/Red for blocks |
+| Cap | Percentage | Green >75%, Yellow 25-75%, Red <25% |
+| Orders | `+N/-N` | Green for placed, Red for cancelled |
+| Duration | `XXms` | Cycle execution time |
+
+#### Color Coding
+
+**Risk Status Colors:**
+- Green: OK
+- Yellow: CRASH:Minor, CRASH:Moderate, PUMP:*, LOW_LIQ
+- Red: CRASH:Severe, CRASH:Extreme, LOSS_LIMIT, HALTED, CRIT_LIQ
+
+**Block Status Colors:**
+- Green: OK
+- Warning: BLOCKED:BUYS, BLOCKED:SELLS
+- Red: BLOCKED:ALL
+
+**Capacity Colors:**
+- Green: >75%
+- Yellow: 25-75%
+- Red: <25%
+
+### Behavior Details
+
+1. **Live Mode (Default)**:
+   - Shows latest 50 entries
+   - Auto-refreshes when `EntryAdded` event fires
+   - Uses `InvokeAsync(StateHasChanged)` for thread-safe UI updates
+
+2. **History Mode**:
+   - Slider controls time position
+   - Shows entries within +/- 30 seconds of selected time
+   - Maximum 50 entries displayed
+
+3. **Expandable Rows**:
+   - Click any row to expand/collapse
+   - Shows Warnings list (if any)
+   - Shows ActionsBlocked list (if any)
+   - Shows MoonBag status (if active)
+
+4. **Event Subscription**:
+   - Subscribes to `LogService.EntryAdded` on init
+   - Unsubscribes in `Dispose()` to prevent memory leaks
+
+### Dashboard Integration
+
+Added as Row 7 after the Alerts Panel:
+```razor
+@* Row 7: Decision Cycle Log *@
+<MudGrid>
+    <MudItem xs="12">
+        <DecisionLogViewer />
+    </MudItem>
+</MudGrid>
+```
+
+### Build Status
+**PASSED** - 0 warnings, 0 errors
+
+---

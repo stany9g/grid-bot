@@ -34,6 +34,9 @@ public static class TradingBotServiceExtensions
         // Register connectivity monitoring services (WebSocket health monitoring)
         services.AddConnectivityServices();
 
+        // Register logging services (decision cycle log buffer)
+        services.AddLoggingServices();
+
         // Register validation services (pre-trade depth validation)
         services.AddValidationServices();
 
