@@ -18,6 +18,8 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
     private readonly IRiskEventLogger _eventLogger;
 
     private readonly ConcurrentDictionary<int, MarketCrashState> _marketStates = new();
+    private readonly ConcurrentDictionary<int, List<DateTimeOffset>> _blackSwanEvents = new();
+    private readonly ConcurrentDictionary<int, bool> _manualRestartRequired = new();
     private readonly ReaderWriterLockSlim _rwLock = new();
     private bool _disposed;
 
@@ -98,6 +100,13 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
         var drop60m = CalculateDrop(priceHistorySnapshot, TimeSpan.FromMinutes(60), currentPrice);
 
         // Check thresholds from most severe to least severe
+        // BLACK SWAN CHECK - most severe, check first
+        if (drop60m <= config.BlackSwanThresholdPercent)
+        {
+            return await TriggerBlackSwanProtectionAsync(
+                marketId, state, drop60m, ct).ConfigureAwait(false);
+        }
+
         if (drop60m <= config.OneHourDropPercent)
         {
             return await TriggerCrashProtectionAsync(
@@ -372,8 +381,182 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
             DropTimeframe = dropTimeframe,
             RequiredAction = action,
             ProtectionUntil = state.ProtectionUntil,
-            Reason = $"{severity} crash: {dropPercent:F2}% drop in {dropTimeframe.TotalMinutes} minutes"
+            Reason = $"{severity} crash: {dropPercent:F2}% drop in {dropTimeframe.TotalMinutes} minutes",
+            IsBlackSwan = false,
+            RequiresManualRestart = false,
+            BlackSwanCountInPeriod = 0
         };
+    }
+
+    /// <summary>
+    /// Triggers black swan protection - most severe crash response.
+    /// </summary>
+    private async Task<FlashCrashStatus> TriggerBlackSwanProtectionAsync(
+        int marketId,
+        MarketCrashState state,
+        decimal dropPercent,
+        CancellationToken ct)
+    {
+        var config = _riskConfig.FlashCrash;
+        var now = DateTimeOffset.UtcNow;
+
+        // Record black swan event and get count in tracking period
+        var blackSwanCount = RecordBlackSwanEvent(marketId, config.BlackSwanTrackingDays);
+
+        // Determine halt duration based on repeated events
+        TimeSpan haltDuration;
+        DateTimeOffset protectionUntil;
+        bool requiresManualRestart;
+
+        if (blackSwanCount > 1)
+        {
+            // Second black swan in tracking period - indefinite halt until manual review
+            haltDuration = TimeSpan.MaxValue;
+            protectionUntil = DateTimeOffset.MaxValue;
+            requiresManualRestart = true;
+
+            _logger.LogCritical(
+                "REPEATED BLACK SWAN EVENT for market {MarketId}: {Count} events in {Days} days. INDEFINITE HALT - MANUAL RESTART REQUIRED",
+                marketId, blackSwanCount, config.BlackSwanTrackingDays);
+        }
+        else
+        {
+            // First black swan - standard 24 hour halt
+            haltDuration = TimeSpan.FromHours(config.BlackSwanHaltDurationHours);
+            protectionUntil = now.Add(haltDuration);
+            requiresManualRestart = config.BlackSwanRequiresManualRestart;
+
+            _logger.LogCritical(
+                "BLACK SWAN EVENT detected for market {MarketId}: {Drop:F1}% drop in 60 minutes. Halt until: {Until}. Manual restart required: {ManualRestart}",
+                marketId, dropPercent, protectionUntil, requiresManualRestart);
+        }
+
+        // Set manual restart flag
+        _manualRestartRequired[marketId] = requiresManualRestart;
+
+        // Also record as a regular crash event for the 24h counter
+        _rwLock.EnterWriteLock();
+        try
+        {
+            state.CrashEvents.Add(now);
+        }
+        finally
+        {
+            _rwLock.ExitWriteLock();
+        }
+
+        // Atomically set all protection state properties
+        state.SetProtection(protectionUntil, FlashCrashSeverity.BlackSwan, FlashCrashAction.EmergencyReduceAndHalt);
+
+        // Log CRITICAL risk event
+        var riskEvent = RiskEvent.Create(
+            "FC-BLACKSWAN",
+            AlertSeverity.Critical,
+            $"BLACK SWAN: {dropPercent:F1}% crash in 60 min for market {marketId}",
+            $"Emergency reducing to {config.BlackSwanPositionTargetPercent * 100:F0}%. " +
+            $"Halt for {(haltDuration == TimeSpan.MaxValue ? "INDEFINITE" : $"{config.BlackSwanHaltDurationHours}h")}. " +
+            $"Manual restart: {requiresManualRestart}",
+            Math.Abs(dropPercent),
+            config.BlackSwanThresholdPercent);
+
+        await _eventLogger.LogEventAsync(riskEvent, ct).ConfigureAwait(false);
+
+        // Transition to protective mode
+        await _tradingState.TransitionToAsync(
+            TradingState.Degraded_ProtectiveMode,
+            $"BLACK SWAN: {dropPercent:F1}% crash in 60 minutes").ConfigureAwait(false);
+
+        return FlashCrashStatus.BlackSwanProtection(
+            dropPercent,
+            TimeSpan.FromMinutes(60),
+            protectionUntil,
+            $"BLACK SWAN: {dropPercent:F1}% drop in 60 min. Events in period: {blackSwanCount}",
+            requiresManualRestart,
+            blackSwanCount);
+    }
+
+    /// <summary>
+    /// Records a black swan event and returns the count in the tracking period.
+    /// Thread-safe.
+    /// </summary>
+    private int RecordBlackSwanEvent(int marketId, int trackingDays)
+    {
+        var events = _blackSwanEvents.GetOrAdd(marketId, _ => []);
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-trackingDays);
+
+        lock (events)
+        {
+            // Add new event
+            events.Add(now);
+
+            // Clean old events - keep buffer of 3 days beyond tracking period for safety
+            // This ensures repeated event detection works correctly
+            const int bufferDays = 3;
+            events.RemoveAll(e => e < now.AddDays(-(trackingDays + bufferDays)));
+
+            // Return count in tracking period
+            return events.Count(e => e >= cutoff);
+        }
+    }
+
+    /// <summary>
+    /// Gets the black swan count in the tracking period.
+    /// Thread-safe.
+    /// </summary>
+    private int GetBlackSwanCountInPeriodInternal(int marketId, int trackingDays)
+    {
+        if (!_blackSwanEvents.TryGetValue(marketId, out var events))
+        {
+            return 0;
+        }
+
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-trackingDays);
+        lock (events)
+        {
+            return events.Count(e => e >= cutoff);
+        }
+    }
+
+    /// <inheritdoc />
+    public int GetBlackSwanCountInPeriod(int marketId)
+    {
+        return GetBlackSwanCountInPeriodInternal(marketId, _riskConfig.FlashCrash.BlackSwanTrackingDays);
+    }
+
+    /// <inheritdoc />
+    public void ClearBlackSwanHalt(int marketId, string operatorId)
+    {
+        ArgumentNullException.ThrowIfNull(operatorId);
+
+        if (_marketStates.TryGetValue(marketId, out var state))
+        {
+            var (until, severity, _) = state.GetProtection();
+
+            if (severity == FlashCrashSeverity.BlackSwan)
+            {
+                _logger.LogWarning(
+                    "BLACK SWAN HALT CLEARED by operator {OperatorId} for market {MarketId}. " +
+                    "Previous protection until: {Until}",
+                    operatorId, marketId,
+                    until == DateTimeOffset.MaxValue ? "INDEFINITE" : until?.ToString("u"));
+
+                state.SetProtection(null, FlashCrashSeverity.None, FlashCrashAction.None);
+                _manualRestartRequired[marketId] = false;
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "ClearBlackSwanHalt called by {OperatorId} for market {MarketId} but not in black swan protection (current severity: {Severity})",
+                    operatorId, marketId, severity);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public bool RequiresManualRestart(int marketId)
+    {
+        return _manualRestartRequired.TryGetValue(marketId, out var required) && required;
     }
 
     /// <summary>
@@ -447,5 +630,7 @@ public sealed class FlashCrashDetector : IFlashCrashDetector, IDisposable
         _disposed = true;
         _rwLock.Dispose();
         _marketStates.Clear();
+        _blackSwanEvents.Clear();
+        _manualRestartRequired.Clear();
     }
 }

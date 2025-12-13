@@ -57,4 +57,26 @@ public interface IFlashCrashDetector
     /// <param name="marketId">Lighter DEX market ID.</param>
     /// <returns>Number of crash events.</returns>
     int GetCrashCount24h(int marketId);
+
+    /// <summary>
+    /// Gets the count of black swan events in the tracking period.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <returns>Number of black swan events in the configured tracking period.</returns>
+    int GetBlackSwanCountInPeriod(int marketId);
+
+    /// <summary>
+    /// Clears the black swan halt (manual restart action).
+    /// Only call after thorough manual review.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="operatorId">ID of operator performing manual restart.</param>
+    void ClearBlackSwanHalt(int marketId, string operatorId);
+
+    /// <summary>
+    /// Checks if a market is in black swan protection requiring manual restart.
+    /// </summary>
+    /// <param name="marketId">Lighter DEX market ID.</param>
+    /// <returns>True if market requires manual restart from black swan.</returns>
+    bool RequiresManualRestart(int marketId);
 }

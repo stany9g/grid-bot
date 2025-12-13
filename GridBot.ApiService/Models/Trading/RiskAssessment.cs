@@ -1,3 +1,5 @@
+using GridBot.ApiService.Services.Connectivity;
+
 namespace GridBot.ApiService.Models.Trading;
 
 /// <summary>
@@ -46,6 +48,11 @@ public sealed class RiskAssessment
     public required LiquidityStatus LiquidityStatus { get; init; }
 
     /// <summary>
+    /// Current nonce health status.
+    /// </summary>
+    public required NonceHealthStatus NonceStatus { get; init; }
+
+    /// <summary>
     /// Overall severity level (highest of all active alerts).
     /// </summary>
     public AlertSeverity OverallSeverity { get; init; }
@@ -85,7 +92,8 @@ public sealed class RiskAssessment
         !TradingAllowed ||
         LossStatus.AnyLimitBreached ||
         FlashCrashStatus.CrashDetected ||
-        FlashPumpStatus.PumpDetected;
+        FlashPumpStatus.PumpDetected ||
+        NonceStatus.ShouldPauseTrading;
 
     /// <summary>
     /// Creates an assessment indicating all systems are normal.
@@ -100,6 +108,7 @@ public sealed class RiskAssessment
         FlashCrashStatus = FlashCrashStatus.NoCrash(),
         FlashPumpStatus = FlashPumpStatus.NoPump(),
         LiquidityStatus = liquidityStatus,
+        NonceStatus = NonceHealthStatus.Healthy(),
         OverallSeverity = AlertSeverity.Low,
         ActiveWarnings = [],
         RecentEvents = [],

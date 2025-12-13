@@ -32,7 +32,13 @@ public enum FlashCrashSeverity
     /// Extreme drop (1-hour threshold breached).
     /// Full trading halt for 4+ hours, requires manual intervention.
     /// </summary>
-    Extreme
+    Extreme,
+
+    /// <summary>
+    /// Black swan event - extreme market crash beyond normal parameters (-25% in 60 min).
+    /// Emergency reduce to 50% and halt for 24 hours. Requires manual restart.
+    /// </summary>
+    BlackSwan
 }
 
 /// <summary>
@@ -63,7 +69,13 @@ public enum FlashCrashAction
     /// <summary>
     /// Full trading halt with position reduction.
     /// </summary>
-    FullHalt
+    FullHalt,
+
+    /// <summary>
+    /// Black swan - emergency reduce to 50% and halt for 24 hours.
+    /// Requires manual restart.
+    /// </summary>
+    EmergencyReduceAndHalt
 }
 
 /// <summary>
@@ -113,6 +125,21 @@ public sealed class FlashCrashStatus
     public bool IsInProtection => ProtectionUntil.HasValue && ProtectionUntil.Value > DateTimeOffset.UtcNow;
 
     /// <summary>
+    /// Whether this is a black swan event (extreme crash -25% in 60 min).
+    /// </summary>
+    public bool IsBlackSwan { get; init; }
+
+    /// <summary>
+    /// Whether manual restart is required after black swan.
+    /// </summary>
+    public bool RequiresManualRestart { get; init; }
+
+    /// <summary>
+    /// Number of black swan events in the tracking period (default 7 days).
+    /// </summary>
+    public int BlackSwanCountInPeriod { get; init; }
+
+    /// <summary>
     /// Creates a status indicating no crash detected.
     /// </summary>
     public static FlashCrashStatus NoCrash() => new()
@@ -123,7 +150,10 @@ public sealed class FlashCrashStatus
         DropTimeframe = TimeSpan.Zero,
         RequiredAction = FlashCrashAction.None,
         ProtectionUntil = null,
-        Reason = "No flash crash detected"
+        Reason = "No flash crash detected",
+        IsBlackSwan = false,
+        RequiresManualRestart = false,
+        BlackSwanCountInPeriod = 0
     };
 
     /// <summary>
@@ -141,6 +171,32 @@ public sealed class FlashCrashStatus
         DropTimeframe = TimeSpan.Zero,
         RequiredAction = action,
         ProtectionUntil = protectionUntil,
-        Reason = reason
+        Reason = reason,
+        IsBlackSwan = severity == FlashCrashSeverity.BlackSwan,
+        RequiresManualRestart = severity == FlashCrashSeverity.BlackSwan,
+        BlackSwanCountInPeriod = 0
+    };
+
+    /// <summary>
+    /// Creates a status indicating active protection from a black swan event.
+    /// </summary>
+    public static FlashCrashStatus BlackSwanProtection(
+        decimal dropPercent,
+        TimeSpan dropTimeframe,
+        DateTimeOffset protectionUntil,
+        string reason,
+        bool requiresManualRestart,
+        int blackSwanCountInPeriod) => new()
+    {
+        CrashDetected = true,
+        Severity = FlashCrashSeverity.BlackSwan,
+        DropPercent = dropPercent,
+        DropTimeframe = dropTimeframe,
+        RequiredAction = FlashCrashAction.EmergencyReduceAndHalt,
+        ProtectionUntil = protectionUntil,
+        Reason = reason,
+        IsBlackSwan = true,
+        RequiresManualRestart = requiresManualRestart,
+        BlackSwanCountInPeriod = blackSwanCountInPeriod
     };
 }

@@ -64,6 +64,12 @@ public sealed class TradingBotOptions
     public PreTradeOptions PreTrade { get; set; } = new();
 
     /// <summary>
+    /// Nonce health monitoring options.
+    /// Detects persistent nonce failures that could prevent critical operations.
+    /// </summary>
+    public NonceOptions Nonce { get; set; } = new();
+
+    /// <summary>
     /// Market symbol to trade (e.g., "BTC", "ETH").
     /// The symbol is resolved to a market ID at startup by matching against available order books.
     /// </summary>
@@ -515,6 +521,36 @@ public sealed class FlashCrashOptions
     /// Recovery capacity increment per period as percentage (default 25%).
     /// </summary>
     public decimal RecoveryCapacityIncrementPercent { get; set; } = 25m;
+
+    /// <summary>
+    /// Black swan threshold - 60-minute drop for emergency actions (default -25%).
+    /// This is more severe than OneHourDropPercent and triggers emergency measures.
+    /// </summary>
+    public decimal BlackSwanThresholdPercent { get; set; } = -25m;
+
+    /// <summary>
+    /// Target position after black swan emergency reduction (default 50%).
+    /// The system will reduce positions to this percentage of current holdings.
+    /// </summary>
+    public decimal BlackSwanPositionTargetPercent { get; set; } = 0.50m;
+
+    /// <summary>
+    /// Halt duration after black swan in hours (default 24).
+    /// Trading will be halted for this duration after a black swan event.
+    /// </summary>
+    public int BlackSwanHaltDurationHours { get; set; } = 24;
+
+    /// <summary>
+    /// Days to track black swan events for repeated event detection (default 7).
+    /// If multiple black swan events occur within this period, indefinite halt is triggered.
+    /// </summary>
+    public int BlackSwanTrackingDays { get; set; } = 7;
+
+    /// <summary>
+    /// Whether to require manual restart after black swan (default true).
+    /// When true, the bot will not automatically resume trading after the halt period.
+    /// </summary>
+    public bool BlackSwanRequiresManualRestart { get; set; } = true;
 }
 
 /// <summary>
@@ -773,4 +809,31 @@ public sealed class PreTradeOptions
     /// Orders are rejected if order book data is older than this.
     /// </summary>
     public int MaxDataAgeSeconds { get; set; } = 5;
+}
+
+/// <summary>
+/// Nonce health monitoring configuration.
+/// Implements H.6 HIGH: Nonce Failure Alert specification.
+///
+/// Detects persistent nonce failures that could prevent critical operations.
+/// </summary>
+public sealed class NonceOptions
+{
+    /// <summary>
+    /// Consecutive failures before warning alert (default 2).
+    /// At this threshold, an operator alert is generated.
+    /// </summary>
+    public int WarningThreshold { get; set; } = 2;
+
+    /// <summary>
+    /// Consecutive failures before pausing trading (default 3).
+    /// At this threshold, trading is paused and protective mode is entered.
+    /// </summary>
+    public int HaltThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// Successful operations needed to reset failure count (default 10).
+    /// After this many consecutive successes, the failure count resets to zero.
+    /// </summary>
+    public int RecoverySuccessCount { get; set; } = 10;
 }

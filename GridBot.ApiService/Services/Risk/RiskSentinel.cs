@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Connectivity;
 using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.State;
 using Microsoft.Extensions.Logging;
@@ -19,6 +20,7 @@ public sealed class RiskSentinel : IRiskSentinel
     private readonly IFlashCrashDetector _flashCrashDetector;
     private readonly IFlashPumpDetector _flashPumpDetector;
     private readonly ILiquidityMonitor _liquidityMonitor;
+    private readonly INonceHealthMonitor _nonceHealthMonitor;
     private readonly IRiskEventLogger _eventLogger;
     private readonly ITradingStateService _tradingState;
     private readonly IGridLifecycleService _gridLifecycle;
@@ -35,6 +37,7 @@ public sealed class RiskSentinel : IRiskSentinel
         IFlashCrashDetector flashCrashDetector,
         IFlashPumpDetector flashPumpDetector,
         ILiquidityMonitor liquidityMonitor,
+        INonceHealthMonitor nonceHealthMonitor,
         IRiskEventLogger eventLogger,
         ITradingStateService tradingState,
         IGridLifecycleService gridLifecycle)
@@ -45,6 +48,7 @@ public sealed class RiskSentinel : IRiskSentinel
         ArgumentNullException.ThrowIfNull(flashCrashDetector);
         ArgumentNullException.ThrowIfNull(flashPumpDetector);
         ArgumentNullException.ThrowIfNull(liquidityMonitor);
+        ArgumentNullException.ThrowIfNull(nonceHealthMonitor);
         ArgumentNullException.ThrowIfNull(eventLogger);
         ArgumentNullException.ThrowIfNull(tradingState);
         ArgumentNullException.ThrowIfNull(gridLifecycle);
@@ -55,6 +59,7 @@ public sealed class RiskSentinel : IRiskSentinel
         _flashCrashDetector = flashCrashDetector;
         _flashPumpDetector = flashPumpDetector;
         _liquidityMonitor = liquidityMonitor;
+        _nonceHealthMonitor = nonceHealthMonitor;
         _eventLogger = eventLogger;
         _tradingState = tradingState;
         _gridLifecycle = gridLifecycle;
@@ -121,6 +126,16 @@ public sealed class RiskSentinel : IRiskSentinel
                     overallSeverity = AlertSeverity.Critical;
                     warnings.Add($"Flash crash: {crashStatus.RequiredAction}");
                     break;
+
+                case FlashCrashAction.EmergencyReduceAndHalt:
+                    tradingAllowed = false;
+                    overallSeverity = AlertSeverity.Critical;
+                    warnings.Add($"BLACK SWAN: {crashStatus.RequiredAction}");
+                    if (crashStatus.RequiresManualRestart)
+                    {
+                        warnings.Add("MANUAL RESTART REQUIRED");
+                    }
+                    break;
             }
         }
 
@@ -174,8 +189,22 @@ public sealed class RiskSentinel : IRiskSentinel
             warnings.Add(liquidityStatus.Warning);
         }
 
+        // Nonce health checks (H.6 HIGH)
+        var nonceStatus = _nonceHealthMonitor.GetStatus();
+        if (nonceStatus.ShouldPauseTrading)
+        {
+            tradingAllowed = false;
+            overallSeverity = AlertSeverity.Critical;
+            warnings.Add($"Nonce failures: {nonceStatus.ConsecutiveFailures} consecutive - trading paused");
+        }
+        else if (!nonceStatus.IsHealthy)
+        {
+            if (overallSeverity > AlertSeverity.High) overallSeverity = AlertSeverity.High;
+            warnings.Add($"Nonce warning: {nonceStatus.ConsecutiveFailures} consecutive failures");
+        }
+
         // Calculate position size multiplier
-        var positionMultiplier = CalculatePositionMultiplier(lossStatus, crashStatus, pumpStatus, liquidityStatus);
+        var positionMultiplier = CalculatePositionMultiplier(lossStatus, crashStatus, pumpStatus, liquidityStatus, nonceStatus);
 
         // Update state
         state.LastAssessment = DateTimeOffset.UtcNow;
@@ -193,6 +222,7 @@ public sealed class RiskSentinel : IRiskSentinel
             FlashCrashStatus = crashStatus,
             FlashPumpStatus = pumpStatus,
             LiquidityStatus = liquidityStatus,
+            NonceStatus = nonceStatus,
             OverallSeverity = overallSeverity,
             ActiveWarnings = warnings,
             RecentEvents = recentEvents.ToList(),
@@ -234,10 +264,16 @@ public sealed class RiskSentinel : IRiskSentinel
         if (_flashCrashDetector.IsInCrashProtection(marketId))
         {
             var action = _flashCrashDetector.GetCurrentAction(marketId);
-            if (action is FlashCrashAction.PauseAll or FlashCrashAction.CancelAndReduceHalf or FlashCrashAction.FullHalt)
+            if (action is FlashCrashAction.PauseAll or FlashCrashAction.CancelAndReduceHalf or FlashCrashAction.FullHalt or FlashCrashAction.EmergencyReduceAndHalt)
             {
                 return false;
             }
+        }
+
+        // Check if manual restart is required (black swan protection)
+        if (_flashCrashDetector.RequiresManualRestart(marketId))
+        {
+            return false;
         }
 
         // Check flash pump protection (fast)
@@ -252,6 +288,12 @@ public sealed class RiskSentinel : IRiskSentinel
 
         // Check liquidity (fast)
         if (!_liquidityMonitor.IsTradingAllowed(marketId))
+        {
+            return false;
+        }
+
+        // Check nonce health (fast)
+        if (_nonceHealthMonitor.ShouldPauseTrading)
         {
             return false;
         }
@@ -333,7 +375,12 @@ public sealed class RiskSentinel : IRiskSentinel
         return _marketStates.GetOrAdd(marketId, _ => new MarketRiskState());
     }
 
-    private decimal CalculatePositionMultiplier(RollingLossStatus lossStatus, FlashCrashStatus crashStatus, FlashPumpStatus pumpStatus, LiquidityStatus liquidityStatus)
+    private decimal CalculatePositionMultiplier(
+        RollingLossStatus lossStatus,
+        FlashCrashStatus crashStatus,
+        FlashPumpStatus pumpStatus,
+        LiquidityStatus liquidityStatus,
+        NonceHealthStatus nonceStatus)
     {
         var multiplier = 1.0m;
 
@@ -351,6 +398,11 @@ public sealed class RiskSentinel : IRiskSentinel
         else if (crashStatus.RequiredAction == FlashCrashAction.FullHalt)
         {
             multiplier = Math.Min(multiplier, 0.5m);
+        }
+        else if (crashStatus.RequiredAction == FlashCrashAction.EmergencyReduceAndHalt)
+        {
+            // Black swan - use configured target (default 50%)
+            multiplier = Math.Min(multiplier, _riskConfig.FlashCrash.BlackSwanPositionTargetPercent);
         }
 
         // Flash pump reductions (symmetric with flash crash)
@@ -371,7 +423,7 @@ public sealed class RiskSentinel : IRiskSentinel
         }
 
         // If trading not allowed, set to 0
-        if (!liquidityStatus.TradingAllowed || lossStatus.AnyLimitBreached)
+        if (!liquidityStatus.TradingAllowed || lossStatus.AnyLimitBreached || nonceStatus.ShouldPauseTrading)
         {
             multiplier = 0m;
         }

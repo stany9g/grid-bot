@@ -21,6 +21,11 @@ public static class ConnectivityServiceExtensions
         // Must be singleton to maintain state across decision cycles
         services.AddSingleton<IWebSocketHealthMonitor, WebSocketHealthMonitor>();
 
+        // Register Nonce health monitor as singleton
+        // Tracks nonce operation failures and triggers alerts/pauses
+        // H.6 HIGH: Nonce Failure Alert
+        services.AddSingleton<INonceHealthMonitor, NonceHealthMonitor>();
+
         return services;
     }
 }
