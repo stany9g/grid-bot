@@ -353,18 +353,120 @@ Orders are different because:
 |-----------|--------------|----------------|
 | **Order Book** | ✅ Yes | `ApplyOrderBookDelta` - price level merging |
 | **Orders** | ✅ Yes | `ApplyOrderDelta` - order index merging |
-| **Account/Positions** | ❌ No | Full replacement (sparse data) |
-| **Market Stats** | ❌ No | Full replacement (scalar values) |
-| **User Stats** | ❌ No | Full replacement (scalar values) |
+| **Positions** | ✅ Yes | `ApplyPositionDelta` - market ID merging |
+| **Market Stats** | ✅ Yes | Inline delta merge - non-zero values only |
+| **User Stats** | ✅ Yes | Inline delta merge - non-zero values only |
 | **Notifications** | ❌ No | Events, not state |
+
+---
+
+## Additional Fixes (Session 4 - Part 3.5)
+
+### Fix 11: Position Delta Accumulation (CRITICAL)
+**File:** `GridBot.Lighter/LighterRealtimeStateService.cs`
+
+**Issue:** Same bug as orders. Log showed:
+```
+EC-001: Position closed unexpectedly on market 1. Previous=0.0007, Current=0
+```
+When user confirmed position was still open on exchange.
+
+**Root Cause:** Account update delta with no position data was interpreted as "all positions closed".
+
+**Changes:**
+1. Added `_mutablePositions` ConcurrentDictionary to track position state (keyed by MarketId)
+2. Added `_positionsLock` for thread safety
+3. Added `ApplyPositionDelta` method:
+   - **Empty delta = KEEP existing positions** (key fix!)
+   - **Snapshot heuristic:** Count == 0 (first message) or Count > 3 positions
+   - **Delta behavior:** Size != 0 → ADD/UPDATE, Size == 0 → REMOVE (position closed)
+4. Added `ClearPositionState`/`ClearAllPositionState` methods
+5. Updated disconnect handler to clear position state alongside order book and order state
+
+```csharp
+// Key logic in ApplyPositionDelta:
+if (deltaPositions.Count > 0)
+{
+    // Process delta - merge into existing state
+    foreach (var pos in deltaPositions)
+    {
+        if (pos.Size != 0)
+            _mutablePositions[pos.MarketId] = pos;  // ADD/UPDATE
+        else
+            _mutablePositions.TryRemove(pos.MarketId, out _);  // CLOSE
+    }
+}
+// If delta has NO positions, keep existing state!
+// An empty delta does NOT mean all positions are closed
+
+return new Dictionary<int, PositionSnapshot>(_mutablePositions);
+```
+
+### Fix 12: Market Stats Delta Handling
+**File:** `GridBot.Lighter/LighterRealtimeStateService.cs`
+
+**Change:** Merge non-zero values from update with existing values instead of full replacement.
+
+```csharp
+// DELTA HANDLING: Merge new values with existing, only updating non-zero values
+var existing = _marketStats.TryGetValue(update.MarketId, out var prev) ? prev : null;
+
+_marketStats[update.MarketId] = new MarketStatsSnapshot
+{
+    IndexPrice = update.IndexPrice > 0 ? update.IndexPrice : (existing?.IndexPrice ?? 0),
+    MarkPrice = update.MarkPrice > 0 ? update.MarkPrice : (existing?.MarkPrice ?? 0),
+    FundingRate = update.FundingRate != 0 ? update.FundingRate : (existing?.FundingRate ?? 0),
+    Volume24h = update.Volume24h > 0 ? update.Volume24h : (existing?.Volume24h ?? 0),
+    // ...
+};
+```
+
+### Fix 13: User Stats Delta Handling
+**File:** `GridBot.Lighter/LighterRealtimeStateService.cs`
+
+**Change:** Merge non-zero values from update with existing values.
+
+```csharp
+// DELTA HANDLING: Merge new values with existing, only updating non-zero values
+var existing = _userStats;
+
+var mergedStats = new UserStatsUpdateEvent
+{
+    Collateral = update.Collateral > 0 ? update.Collateral : (existing?.Collateral ?? 0),
+    PortfolioValue = update.PortfolioValue > 0 ? update.PortfolioValue : (existing?.PortfolioValue ?? 0),
+    AvailableBalance = update.AvailableBalance > 0 ? update.AvailableBalance : (existing?.AvailableBalance ?? 0),
+    BuyingPower = update.BuyingPower > 0 ? update.BuyingPower : (existing?.BuyingPower ?? 0),
+    Leverage = update.Leverage > 0 ? update.Leverage : (existing?.Leverage ?? 0),
+    MarginUsage = update.MarginUsage > 0 ? update.MarginUsage : (existing?.MarginUsage ?? 0)
+};
+```
+
+### Fix 14: Clear All State on Disconnect
+**File:** `GridBot.Lighter/LighterRealtimeStateService.cs`
+
+**Change:** Added `ClearAllMarketStatsState()` and `ClearAllUserStatsState()` to disconnect handler.
+
+---
+
+## Build Status
+**Build succeeded** - 0 warnings, 0 errors (Session 4 - Part 3.5)
+
+## Complete WebSocket Delta Handling Summary
+
+All WebSocket data types now properly handle deltas:
+
+| Data Type | Strategy | Zero/Empty Handling |
+|-----------|----------|---------------------|
+| **Order Book** | Mutable state + merge | Size=0 removes level |
+| **Orders** | Mutable state + merge | Status=filled/cancelled removes |
+| **Positions** | Mutable state + merge | Size=0 removes; Empty delta = keep existing |
+| **Market Stats** | Inline merge | Value=0 keeps existing |
+| **User Stats** | Inline merge | Value=0 keeps existing |
 
 ## Next Steps for User
 1. **Rebuild and redeploy** with latest code
-2. **Monitor logs** - should now see proper order delta handling:
-   - `Order full snapshot for market X: N active orders`
-   - `Order delta ADD/UPDATE market X: OrderIndex=...`
-   - `Order delta REMOVE market X: OrderIndex=... (filled/cancelled)`
-3. False fill detection should be eliminated
+2. All phantom state loss issues should now be resolved
+3. Monitor logs for proper delta handling messages
 
 ---
 

@@ -39,6 +39,12 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     private readonly ConcurrentDictionary<int, MutableOrderState> _mutableOrders = new();
     private readonly object _ordersLock = new();
 
+    // Mutable position state for delta accumulation
+    // Key: MarketId, Value: PositionSnapshot
+    // Position with Size = 0 means closed (remove from state).
+    private readonly ConcurrentDictionary<int, PositionSnapshot> _mutablePositions = new();
+    private readonly object _positionsLock = new();
+
     // Health monitoring state
     private long _lastMessageReceivedTicks;
     private readonly List<DateTimeOffset> _disconnectEvents = new();
@@ -737,6 +743,125 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         }
     }
 
+    /// <summary>
+    /// Applies position delta to the accumulated state and returns the current positions.
+    /// Handles both initial snapshots (many positions) and incremental deltas (few/no positions).
+    /// Position with Size = 0 means closed (remove from state).
+    /// </summary>
+    private Dictionary<int, PositionSnapshot> ApplyPositionDelta(IReadOnlyList<PositionSnapshot> deltaPositions)
+    {
+        lock (_positionsLock)
+        {
+            // If delta has positions, process them
+            if (deltaPositions.Count > 0)
+            {
+                // Determine if this is a full snapshot or incremental delta
+                // Heuristic: If we have no existing positions AND delta has positions, treat as snapshot
+                // Also if delta has many positions (>3), treat as full snapshot
+                var isFullSnapshot = _mutablePositions.Count == 0 || deltaPositions.Count > 3;
+
+                if (isFullSnapshot)
+                {
+                    // Full snapshot: replace all positions
+                    _mutablePositions.Clear();
+
+                    foreach (var pos in deltaPositions)
+                    {
+                        if (pos.Size != 0)
+                        {
+                            _mutablePositions[pos.MarketId] = pos;
+                        }
+                    }
+
+                    _logger.LogDebug(
+                        "Position full snapshot: {Count} active positions",
+                        _mutablePositions.Count);
+                }
+                else
+                {
+                    // Incremental delta: merge changes
+                    foreach (var pos in deltaPositions)
+                    {
+                        if (pos.Size != 0)
+                        {
+                            var existed = _mutablePositions.ContainsKey(pos.MarketId);
+                            _mutablePositions[pos.MarketId] = pos;
+                            _logger.LogDebug(
+                                "Position delta {Action} market {MarketId}: Size={Size:F8}, AvgEntry={AvgEntry:F2}",
+                                existed ? "UPDATE" : "ADD",
+                                pos.MarketId, pos.Size, pos.AvgEntryPrice);
+                        }
+                        else
+                        {
+                            // Size = 0 means position closed
+                            if (_mutablePositions.TryRemove(pos.MarketId, out var removed))
+                            {
+                                _logger.LogInformation(
+                                    "Position delta CLOSE market {MarketId}: Previous size={PrevSize:F8}",
+                                    pos.MarketId, removed.Size);
+                            }
+                        }
+                    }
+                }
+            }
+            // If delta has NO positions, keep existing state (this is the key fix!)
+            // An empty delta does NOT mean all positions are closed
+
+            return new Dictionary<int, PositionSnapshot>(_mutablePositions);
+        }
+    }
+
+    /// <summary>
+    /// Clears the accumulated position state for a market.
+    /// </summary>
+    public void ClearPositionState(int marketId)
+    {
+        if (_mutablePositions.TryRemove(marketId, out _))
+        {
+            _logger.LogInformation("Cleared position state for market {MarketId}", marketId);
+        }
+    }
+
+    /// <summary>
+    /// Clears all accumulated position state.
+    /// Called on disconnect to ensure fresh data on reconnect.
+    /// </summary>
+    private void ClearAllPositionState()
+    {
+        var count = _mutablePositions.Count;
+        _mutablePositions.Clear();
+
+        if (count > 0)
+        {
+            _logger.LogDebug("Cleared position state for {Count} markets", count);
+        }
+    }
+
+    /// <summary>
+    /// Clears all accumulated market stats state.
+    /// Called on disconnect to ensure fresh data on reconnect.
+    /// </summary>
+    private void ClearAllMarketStatsState()
+    {
+        var count = _marketStats.Count;
+        _marketStats.Clear();
+
+        if (count > 0)
+        {
+            _logger.LogDebug("Cleared market stats state for {Count} markets", count);
+        }
+    }
+
+    /// <summary>
+    /// Clears all accumulated user stats state.
+    /// Called on disconnect to ensure fresh data on reconnect.
+    /// </summary>
+    private void ClearAllUserStatsState()
+    {
+        _userStats = null;
+        _logger.LogDebug("Cleared user stats state");
+    }
+
     private async Task ProcessAccountUpdatesAsync(CancellationToken cancellationToken)
     {
         try
@@ -750,13 +875,18 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                 var availableBalance = userStats?.AvailableBalance ?? update.AvailableBalance;
                 var portfolioValue = userStats?.PortfolioValue ?? update.PortfolioValue;
 
+                // CRITICAL FIX: Apply position delta instead of full replacement
+                // Lighter WebSocket sends deltas - if a message has no position data,
+                // it doesn't mean positions are closed!
+                var positions = ApplyPositionDelta(update.Positions);
+
                 _account = new AccountSnapshot
                 {
                     AccountId = update.AccountId,
                     Collateral = collateral,
                     AvailableBalance = availableBalance,
                     PortfolioValue = portfolioValue,
-                    Positions = update.Positions.ToDictionary(p => p.MarketId),
+                    Positions = positions,
                     LastUpdated = update.Timestamp
                 };
                 RecordMessageReceived(update.Timestamp);
@@ -767,7 +897,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                         "Account update: collateral={Collateral:F2} available={Available:F2} positions={PositionCount}",
                         collateral,
                         availableBalance,
-                        update.Positions.Count);
+                        positions.Count);
                 }
             }
         }
@@ -831,13 +961,17 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             await foreach (var update in _wsClient.MarketStatsUpdates.ReadAllAsync(cancellationToken))
             {
+                // DELTA HANDLING: Merge new values with existing, only updating non-zero values
+                // This prevents partial updates from wiping out valid data
+                var existing = _marketStats.TryGetValue(update.MarketId, out var prev) ? prev : null;
+
                 _marketStats[update.MarketId] = new MarketStatsSnapshot
                 {
                     MarketId = update.MarketId,
-                    IndexPrice = update.IndexPrice,
-                    MarkPrice = update.MarkPrice,
-                    FundingRate = update.FundingRate,
-                    Volume24h = update.Volume24h,
+                    IndexPrice = update.IndexPrice > 0 ? update.IndexPrice : (existing?.IndexPrice ?? 0),
+                    MarkPrice = update.MarkPrice > 0 ? update.MarkPrice : (existing?.MarkPrice ?? 0),
+                    FundingRate = update.FundingRate != 0 ? update.FundingRate : (existing?.FundingRate ?? 0),
+                    Volume24h = update.Volume24h > 0 ? update.Volume24h : (existing?.Volume24h ?? 0),
                     LastUpdated = update.Timestamp
                 };
                 RecordMessageReceived(update.Timestamp);
@@ -845,10 +979,11 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                 if (_logger.IsEnabled(LogLevel.Trace))
                 {
                     _logger.LogTrace(
-                        "Market stats update for market {MarketId}: mark={MarkPrice:F2} funding={FundingRate:F6}",
+                        "Market stats update for market {MarketId}: mark={MarkPrice:F2} index={IndexPrice:F2} funding={FundingRate:F6}",
                         update.MarketId,
-                        update.MarkPrice,
-                        update.FundingRate);
+                        _marketStats[update.MarketId].MarkPrice,
+                        _marketStats[update.MarketId].IndexPrice,
+                        _marketStats[update.MarketId].FundingRate);
                 }
             }
         }
@@ -889,9 +1024,12 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                     // Clear all accumulated state on disconnect to force fresh snapshots on reconnect
                     ClearAllOrderBookState();
                     ClearAllOrderState();
+                    ClearAllPositionState();
+                    ClearAllMarketStatsState();
+                    ClearAllUserStatsState();
 
                     _logger.LogWarning(
-                        "WebSocket disconnected. Disconnect count in 24h: {Count}. Order book and order state cleared.",
+                        "WebSocket disconnected. Disconnect count in 24h: {Count}. All WebSocket state cleared.",
                         DisconnectCount24h);
 
                     // Fire health changed event - disconnected
@@ -987,7 +1125,22 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             await foreach (var update in _wsClient.UserStatsUpdates.ReadAllAsync(cancellationToken))
             {
-                _userStats = update;
+                // DELTA HANDLING: Merge new values with existing, only updating non-zero values
+                // This prevents partial updates from wiping out valid data
+                var existing = _userStats;
+
+                var mergedStats = new UserStatsUpdateEvent
+                {
+                    AccountId = update.AccountId,
+                    Collateral = update.Collateral > 0 ? update.Collateral : (existing?.Collateral ?? 0),
+                    PortfolioValue = update.PortfolioValue > 0 ? update.PortfolioValue : (existing?.PortfolioValue ?? 0),
+                    AvailableBalance = update.AvailableBalance > 0 ? update.AvailableBalance : (existing?.AvailableBalance ?? 0),
+                    BuyingPower = update.BuyingPower > 0 ? update.BuyingPower : (existing?.BuyingPower ?? 0),
+                    Leverage = update.Leverage > 0 ? update.Leverage : (existing?.Leverage ?? 0),
+                    MarginUsage = update.MarginUsage > 0 ? update.MarginUsage : (existing?.MarginUsage ?? 0)
+                };
+
+                _userStats = mergedStats;
                 RecordMessageReceived(update.Timestamp);
 
                 // Also update the account snapshot with new user stats values
@@ -996,9 +1149,9 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                 {
                     _account = existingAccount with
                     {
-                        Collateral = update.Collateral,
-                        AvailableBalance = update.AvailableBalance,
-                        PortfolioValue = update.PortfolioValue,
+                        Collateral = mergedStats.Collateral,
+                        AvailableBalance = mergedStats.AvailableBalance,
+                        PortfolioValue = mergedStats.PortfolioValue,
                         LastUpdated = update.Timestamp
                     };
                 }
@@ -1006,10 +1159,11 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                 if (_logger.IsEnabled(LogLevel.Debug))
                 {
                     _logger.LogDebug(
-                        "User stats update: collateral={Collateral:F2} available={Available:F2} portfolioValue={PortfolioValue:F2}",
-                        update.Collateral,
-                        update.AvailableBalance,
-                        update.PortfolioValue);
+                        "User stats update: collateral={Collateral:F2} available={Available:F2} portfolioValue={PortfolioValue:F2} leverage={Leverage:F2}",
+                        mergedStats.Collateral,
+                        mergedStats.AvailableBalance,
+                        mergedStats.PortfolioValue,
+                        mergedStats.Leverage);
                 }
             }
         }

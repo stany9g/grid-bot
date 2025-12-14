@@ -2346,3 +2346,82 @@ Missing requirements for 5x:
 Current production configuration with 2x leverage is appropriate for $200 capital. The existing safeguards (FlashCrash, FlashPump, WebSocket health, Pre-trade depth, etc.) are calibrated for this leverage level.
 
 ---
+
+## RESEARCH: UpdateLeverage Error 21501 "invalid tx info" (December 14, 2025)
+
+### Problem
+The bot is getting error code 21501 "invalid tx info" when trying to update leverage:
+- MarketIndex: 1 (ETH)
+- InitialMarginFraction: 5000 (for 2x leverage)
+- MarginMode: Cross (0)
+
+### Research Document
+Full analysis at: `.claude/doc/lighter-update-leverage-research.md`
+
+### Key Findings
+
+**1. Error 21501 Definition**
+From [Lighter API Docs](https://apidocs.lighter.xyz/docs/data-structures-constants-and-errors):
+- `AppErrInvalidTxInfo` = "invalid tx info"
+- Indicates malformed transaction data OR state-based rejection
+
+**2. InitialMarginFraction Calculation is CORRECT**
+```
+Leverage = 10000 / InitialMarginFraction
+2x leverage = 10000 / 5000 = 2x (CORRECT)
+```
+
+| Leverage | InitialMarginFraction | Margin % |
+|----------|----------------------|----------|
+| 50x | 200 | 2% |
+| 10x | 1000 | 10% |
+| 5x | 2000 | 20% |
+| **2x** | **5000** | **50%** |
+
+**3. MarginMode Values**
+| Value | Mode |
+|-------|------|
+| 0 | Cross |
+| 1 | Isolated |
+
+**4. Possible Causes of 21501 for UpdateLeverage**
+1. **Position already has leverage set** - Server may reject no-op updates
+2. **Open position constraint** - Some exchanges prevent leverage changes with open positions
+3. **Order margin impact** - Would cause account to fall below margin requirements
+4. **Transaction info encoding issue** - Native signer produces malformed txInfo
+
+### Recommended Actions
+
+**Immediate: Handle 21501 Gracefully**
+```csharp
+catch (LighterApiException ex) when (ex.Code == 21501)
+{
+    _logger.LogWarning(
+        "UpdateLeverage returned 21501 for market {MarketId} - " +
+        "leverage may already be configured or account state prevents update",
+        marketId);
+    // Continue without failing
+}
+```
+
+**Debug: Add Logging**
+```csharp
+_logger.LogDebug(
+    "UpdateLeverage txInfo for market {MarketId}: IMF={IMF}, Mode={Mode}",
+    request.MarketIndex, request.InitialMarginFraction, request.MarginMode);
+```
+
+**Investigate:**
+1. Check if Lighter allows leverage changes with open positions
+2. Check if there's an API to query current leverage setting
+3. Test on testnet without any position in the market
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| Is 5000 correct for 2x leverage? | **YES** |
+| Is MarginMode 0 (Cross) valid? | **YES** |
+| Why 21501 error? | Likely state-based rejection (position exists, leverage already set, or account state) |
+
+---
