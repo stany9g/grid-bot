@@ -266,13 +266,102 @@ var levelsWithClientOrderIndex = gridState.Levels.Count(l =>
 
 ---
 
+## Additional Fixes (Session 4 - Part 3)
+
+### Root Cause Analysis: Order Delta Handling
+
+**Issue:** Same problem as order book - WebSocket sends initial SNAPSHOT, then DELTA updates. But code was REPLACING entire order list with delta, losing all other orders.
+
+**Flow:**
+1. Subscribe to `account_all_orders/{accountIndex}`
+2. First message: Full snapshot with ALL orders (e.g., 12 orders)
+3. Delta messages: Only CHANGED orders (e.g., 1 order that was partially filled)
+4. **BUG:** `_orders[update.MarketId] = update.Orders` replaced 12 orders with 1 order
+
+### Fix 10: Order Delta Accumulation (CRITICAL)
+**File:** `GridBot.Lighter/LighterRealtimeStateService.cs`
+
+**Changes:**
+1. Added `_mutableOrders` dictionary to track order state (keyed by OrderIndex)
+2. Added `_ordersLock` for thread safety
+3. Added `ApplyOrderDelta` method with snapshot vs delta detection:
+   - **Snapshot heuristic:** Count == 0 (first message) or Count > 10 orders
+   - **Delta behavior:** Merge orders - active orders ADD/UPDATE, completed orders REMOVE
+   - **Status logic:** `open`/`partial` = active (keep), `cancelled`/`filled` = inactive (remove)
+4. Added `ClearOrderState`/`ClearAllOrderState` methods
+5. Updated disconnect handler to clear order state alongside order book state
+
+```csharp
+// New mutable state for order delta accumulation
+private readonly ConcurrentDictionary<int, MutableOrderState> _mutableOrders = new();
+private readonly object _ordersLock = new();
+
+// ApplyOrderDelta method - same pattern as ApplyOrderBookDelta
+private IReadOnlyList<OrderSnapshot> ApplyOrderDelta(int marketId, IReadOnlyList<OrderSnapshot> deltaOrders)
+{
+    var mutableState = _mutableOrders.GetOrAdd(marketId, _ => new MutableOrderState());
+    lock (_ordersLock)
+    {
+        var isFullSnapshot = mutableState.Orders.Count == 0 || deltaOrders.Count > 10;
+        if (isFullSnapshot)
+        {
+            mutableState.Orders.Clear();
+            foreach (var order in deltaOrders)
+                if (IsActiveOrder(order))
+                    mutableState.Orders[order.OrderIndex] = order;
+        }
+        else
+        {
+            foreach (var order in deltaOrders)
+            {
+                if (IsActiveOrder(order))
+                    mutableState.Orders[order.OrderIndex] = order;
+                else
+                    mutableState.Orders.Remove(order.OrderIndex);
+            }
+        }
+        return mutableState.Orders.Values.ToList();
+    }
+}
+
+// MutableOrderState class
+internal sealed class MutableOrderState
+{
+    public Dictionary<long, OrderSnapshot> Orders { get; } = new();
+}
+```
+
+### Analysis: Account/Position Handling
+**No change needed.** Positions are:
+- Sparse (typically 1-2 positions)
+- Sent as full state in `account_all` channel (not deltas)
+- When a position is closed, it's removed from the dictionary entirely
+
+Orders are different because:
+- Numerous (12+ grid orders)
+- Change frequently (fills, cancellations)
+- Sent as deltas for efficiency
+
+---
+
 ## Build Status
-**Build succeeded** - 0 warnings, 0 errors (Session 4 - Part 2)
+**Build succeeded** - 0 warnings, 0 errors (Session 4 - Part 3)
+
+## Summary of WebSocket Delta Handling
+
+| Data Type | Needs Delta? | Implementation |
+|-----------|--------------|----------------|
+| **Order Book** | ✅ Yes | `ApplyOrderBookDelta` - price level merging |
+| **Orders** | ✅ Yes | `ApplyOrderDelta` - order index merging |
+| **Account/Positions** | ❌ No | Full replacement (sparse data) |
+| **Market Stats** | ❌ No | Full replacement (scalar values) |
+| **User Stats** | ❌ No | Full replacement (scalar values) |
+| **Notifications** | ❌ No | Events, not state |
 
 ## Next Steps for User
 1. **Rebuild and redeploy** with latest code
-2. **Monitor the new debug logs** to trace where WebSocket orders are lost
-3. If WebSocket issue persists, investigate:
-   - WebSocket subscription timing
-   - Initial snapshot delivery
-   - Reconnection handling
+2. **Monitor logs** - should now see proper order delta handling:
+   - `Order full snapshot for market X: N active orders`
+   - `Order delta ADD/UPDATE market X: OrderIndex=...`
+   - `Order delta REMOVE market X: OrderIndex=... (filled/cancelled)`
+3. False fill detection should be eliminated

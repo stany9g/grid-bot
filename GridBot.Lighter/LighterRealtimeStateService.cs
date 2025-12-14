@@ -33,6 +33,12 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     private readonly ConcurrentDictionary<int, MutableOrderBookState> _mutableOrderBooks = new();
     private readonly object _orderBookLock = new();
 
+    // Mutable order state for delta accumulation (per market)
+    // Key: OrderIndex, Value: OrderSnapshot
+    // Orders with status "cancelled" or "filled" should be removed.
+    private readonly ConcurrentDictionary<int, MutableOrderState> _mutableOrders = new();
+    private readonly object _ordersLock = new();
+
     // Health monitoring state
     private long _lastMessageReceivedTicks;
     private readonly List<DateTimeOffset> _disconnectEvents = new();
@@ -131,7 +137,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     {
         if (_orders.TryGetValue(marketId, out var orders))
         {
-            _logger.LogDebug(
+            _logger.LogInformation(
                 "GetOrders: Market {MarketId} returning {Count} orders from state",
                 marketId, orders.Count);
             return orders;
@@ -628,6 +634,109 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         }
     }
 
+    /// <summary>
+    /// Applies an order delta to the accumulated state and returns a new snapshot.
+    /// Handles both initial snapshots (many orders) and incremental deltas (few orders).
+    /// Status = "cancelled" or "filled" means remove the order.
+    /// </summary>
+    private IReadOnlyList<OrderSnapshot> ApplyOrderDelta(int marketId, IReadOnlyList<OrderSnapshot> deltaOrders)
+    {
+        // Get or create mutable state for this market
+        var mutableState = _mutableOrders.GetOrAdd(marketId, _ => new MutableOrderState());
+
+        lock (_ordersLock)
+        {
+            // Determine if this is a full snapshot or incremental delta
+            // Heuristic: If delta has many orders (>10), treat as full snapshot
+            // Also treat as snapshot if we have no existing state for this market
+            var isFullSnapshot = mutableState.Orders.Count == 0 || deltaOrders.Count > 10;
+
+            if (isFullSnapshot)
+            {
+                // Full snapshot: replace all state with active orders only
+                mutableState.Orders.Clear();
+
+                foreach (var order in deltaOrders)
+                {
+                    if (IsActiveOrder(order))
+                    {
+                        mutableState.Orders[order.OrderIndex] = order;
+                    }
+                }
+
+                _logger.LogDebug(
+                    "Order full snapshot for market {MarketId}: {ActiveCount} active orders (from {TotalCount} in message)",
+                    marketId, mutableState.Orders.Count, deltaOrders.Count);
+            }
+            else
+            {
+                // Incremental delta: merge changes
+                // Active orders are added/updated, inactive orders are removed
+                foreach (var order in deltaOrders)
+                {
+                    if (IsActiveOrder(order))
+                    {
+                        mutableState.Orders[order.OrderIndex] = order;
+                        _logger.LogDebug(
+                            "Order delta ADD/UPDATE market {MarketId}: OrderIndex={OrderIndex}, Status={Status}, Price={Price}",
+                            marketId, order.OrderIndex, order.Status, order.Price);
+                    }
+                    else
+                    {
+                        if (mutableState.Orders.Remove(order.OrderIndex))
+                        {
+                            _logger.LogDebug(
+                                "Order delta REMOVE market {MarketId}: OrderIndex={OrderIndex}, Status={Status} (filled/cancelled)",
+                                marketId, order.OrderIndex, order.Status);
+                        }
+                    }
+                }
+            }
+
+            // Return as list
+            return mutableState.Orders.Values.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Determines if an order is still active (should be kept in state).
+    /// </summary>
+    private static bool IsActiveOrder(OrderSnapshot order)
+    {
+        // Active statuses: "open", "partial"
+        // Inactive statuses: "filled", "cancelled", "expired"
+        return order.Status is "open" or "partial";
+    }
+
+    /// <summary>
+    /// Clears the accumulated order state for a market.
+    /// Called on reconnection to force a fresh snapshot.
+    /// </summary>
+    public void ClearOrderState(int marketId)
+    {
+        if (_mutableOrders.TryRemove(marketId, out _))
+        {
+            _orders.TryRemove(marketId, out _);
+            _logger.LogInformation("Cleared order state for market {MarketId}", marketId);
+        }
+    }
+
+    /// <summary>
+    /// Clears all accumulated order state for all markets.
+    /// Called on disconnect to ensure fresh data on reconnect.
+    /// </summary>
+    private void ClearAllOrderState()
+    {
+        var count = _mutableOrders.Count;
+        _mutableOrders.Clear();
+        _orders.Clear();
+
+        if (count > 0)
+        {
+            _logger.LogDebug("Cleared order state for {Count} markets", count);
+        }
+    }
+
     private async Task ProcessAccountUpdatesAsync(CancellationToken cancellationToken)
     {
         try
@@ -678,32 +787,31 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             await foreach (var update in _wsClient.OrderUpdates.ReadAllAsync(cancellationToken))
             {
-                // DEBUG: Log order state changes
+                // CRITICAL FIX: Lighter WebSocket sends full snapshot on first subscribe,
+                // then only DELTAS afterward. We must MERGE deltas, not REPLACE.
+                // Status = "cancelled" or "filled" means remove the order.
                 var previousCount = _orders.TryGetValue(update.MarketId, out var prev) ? prev.Count : 0;
-                var newCount = update.Orders.Count;
-                var openCount = update.Orders.Count(o => o.Status == "open");
 
-                _orders[update.MarketId] = update.Orders;
+                var orders = ApplyOrderDelta(update.MarketId, update.Orders);
+                _orders[update.MarketId] = orders;
                 RecordMessageReceived(update.Timestamp);
 
-                // Always log order updates at Debug level for troubleshooting
-                _logger.LogDebug(
-                    "ProcessOrderUpdates: Market {MarketId} orders updated: {PrevCount} -> {NewCount} (open: {OpenCount})",
-                    update.MarketId, previousCount, newCount, openCount);
+                var openCount = orders.Count(o => o.Status == "open");
+                var partialCount = orders.Count(o => o.Status == "partial");
 
-                // Log details if orders changed significantly or became empty
-                if (newCount == 0 && previousCount > 0)
+                // Always log order updates for troubleshooting
+                _logger.LogInformation(
+                    "ProcessOrderUpdates: Market {MarketId} delta applied. " +
+                    "Delta contained {DeltaCount} orders. State: {PrevCount} -> {NewCount} (open={Open}, partial={Partial})",
+                    update.MarketId, update.Orders.Count, previousCount, orders.Count, openCount, partialCount);
+
+                // Log if all orders were removed (potential issue or legitimate)
+                if (orders.Count == 0 && previousCount > 0)
                 {
                     _logger.LogWarning(
-                        "ProcessOrderUpdates: Market {MarketId} order list became EMPTY (was {PrevCount}). " +
-                        "This may cause false fill detection!",
+                        "ProcessOrderUpdates: Market {MarketId} all orders removed (was {PrevCount}). " +
+                        "This could be legitimate (all cancelled/filled) or a WebSocket issue.",
                         update.MarketId, previousCount);
-                }
-                else if (newCount < previousCount && newCount > 0)
-                {
-                    _logger.LogDebug(
-                        "ProcessOrderUpdates: Market {MarketId} order count decreased by {Diff} (possible fills or cancellations)",
-                        update.MarketId, previousCount - newCount);
                 }
             }
         }
@@ -778,11 +886,12 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                         _disconnectEvents.Add(DateTimeOffset.UtcNow);
                     }
 
-                    // Clear all order book state on disconnect to force fresh snapshot on reconnect
+                    // Clear all accumulated state on disconnect to force fresh snapshots on reconnect
                     ClearAllOrderBookState();
+                    ClearAllOrderState();
 
                     _logger.LogWarning(
-                        "WebSocket disconnected. Disconnect count in 24h: {Count}. Order book state cleared.",
+                        "WebSocket disconnected. Disconnect count in 24h: {Count}. Order book and order state cleared.",
                         DisconnectCount24h);
 
                     // Fire health changed event - disconnected
@@ -948,4 +1057,16 @@ internal sealed class MutableOrderBookState
     /// Ask levels: Key = price, Value = size.
     /// </summary>
     public Dictionary<decimal, decimal> Asks { get; } = new();
+}
+
+/// <summary>
+/// Mutable order state for accumulating WebSocket deltas.
+/// Not thread-safe - must be accessed under lock.
+/// </summary>
+internal sealed class MutableOrderState
+{
+    /// <summary>
+    /// Orders: Key = OrderIndex, Value = OrderSnapshot.
+    /// </summary>
+    public Dictionary<long, OrderSnapshot> Orders { get; } = new();
 }
