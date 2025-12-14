@@ -2242,3 +2242,107 @@ The rebalancing subsystem is designed for spot trading inventory management, not
 - Flat positions matching flat targets should not trigger any action
 
 ---
+
+## FIX: Leverage Not Being Applied at Startup (December 14, 2025)
+
+### Problem
+
+The `MaxLeverage` setting from `CapitalOptions` was configured but **never sent to the Lighter exchange**. This resulted in the bot operating at the exchange default leverage (1x) instead of the configured leverage (2x).
+
+### Solution Implemented
+
+Modified `TradingBotHostedService.cs` to:
+
+1. **Inject `ILighterCommandClient`** as a dependency
+2. **Add `SetLeverageAsync()` method** that converts `MaxLeverage` to `InitialMarginFraction` (formula: `10000 / MaxLeverage`)
+3. **Call leverage setting during startup** after market resolution with `MarginMode.Cross`
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `GridBot.ApiService/Services/TradingBotHostedService.cs` | Added `ILighterCommandClient` dependency, `SetLeverageAsync()` method, and call during `StartAsync()` |
+
+---
+
+## Risk Assessment: $200 Capital with 5x Leverage Request (December 14, 2025)
+
+### Analysis Document
+Full comprehensive risk assessment created at: `.claude/doc/risk-assessment-200usd-5x-leverage.md`
+
+### User Request
+User requested analysis of deploying with:
+- Capital: $200 USD collateral
+- Leverage: 5x (user wanted this)
+- Current config: 2x MaxLeverage
+- Asset: BTC perpetual futures
+
+### VERDICT: DO NOT USE 5x LEVERAGE WITH $200 CAPITAL
+
+### Key Findings
+
+#### Liquidation Risk at 5x
+| Leverage | Liquidation Distance | Price Movement to Liquidate |
+|----------|---------------------|----------------------------|
+| 2x | ~50% | $100,000 -> $50,000 |
+| 3x | ~33% | $100,000 -> $66,667 |
+| **5x** | **~20%** | **$100,000 -> $80,000** |
+
+**CRITICAL:** 20% BTC moves occur multiple times per month. At 5x, this causes TOTAL ACCOUNT LIQUIDATION.
+
+#### Loss Comparison at 10% BTC Move
+| Leverage | Dollar Loss | % of Capital |
+|----------|-------------|--------------|
+| 2x | $40 | 20% |
+| 3x | $60 | 30% |
+| **5x** | **$100** | **50%** |
+
+#### Loss Comparison at 15% BTC Move
+| Leverage | Dollar Loss | % of Capital |
+|----------|-------------|--------------|
+| 2x | $60 | 30% |
+| 3x | $90 | 45% |
+| **5x** | **$150** | **75%** |
+
+### System Readiness for 5x
+**Score: 5.5/10 - NOT READY**
+
+Missing requirements for 5x:
+1. No proactive liquidation price monitoring
+2. Flash crash thresholds not calibrated for 5x amplification
+3. Loss limits inadequate (current -10% daily = -50% at 5x)
+4. No funding rate hard stops
+
+### Recommended Configuration for $200
+
+| Setting | Current | Recommended |
+|---------|---------|-------------|
+| MaxLeverage | 2.0x | **2.0x** (keep) |
+| MaxAggregateLeverage | 1.5x | **1.5x** (keep) |
+| MaxPositionSizePercent | 25% | **25%** (keep) |
+| ReserveBalancePercent | 30% | **40%** (increase) |
+| Rolling24HourLossPercent | -10% | **-8%** (tighten) |
+
+### Graduated Leverage Path
+
+| Account Size | Max Leverage | Condition |
+|--------------|--------------|-----------|
+| $100-200 | 1.5x | Starting phase |
+| $200-500 | 2.0x | After 2 profitable weeks |
+| $500-1000 | 2.5x | After 4 profitable weeks |
+| $1000-2000 | 3.0x | After 2 profitable months |
+| $2000-5000 | 4.0x | After 3 profitable months |
+| $5000+ | 5.0x | After 6 profitable months |
+
+### What Would Make 5x Acceptable?
+1. Minimum $2,000+ capital (10x increase)
+2. Proactive liquidation price monitoring implementation
+3. Tighter flash crash thresholds (-1%/-2%/-4%/-6%)
+4. Daily loss limit at -5% instead of -10%
+5. Funding rate hard stops
+6. 6+ months profitable track record at 2x
+
+### Conclusion
+Current production configuration with 2x leverage is appropriate for $200 capital. The existing safeguards (FlashCrash, FlashPump, WebSocket health, Pre-trade depth, etc.) are calibrated for this leverage level.
+
+---

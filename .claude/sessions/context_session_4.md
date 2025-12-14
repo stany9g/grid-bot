@@ -365,3 +365,105 @@ Orders are different because:
    - `Order delta ADD/UPDATE market X: OrderIndex=...`
    - `Order delta REMOVE market X: OrderIndex=... (filled/cancelled)`
 3. False fill detection should be eliminated
+
+---
+
+## Production Deployment Audit (Session 4 - Part 4)
+
+### Audit Date: 2025-12-14
+
+### Audit Request
+User requested production deployment audit for $200 collateral with consideration of 5x leverage.
+
+### Audit Report Location
+**Full audit document:** `.claude/doc/audit_production_deployment_session4.md`
+
+### Critical Finding Summary
+
+| Priority | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 1 | **BLOCKING** |
+| HIGH | 4 | Require attention |
+| MEDIUM | 4 | Recommended fixes |
+| LOW | 1 | Optional |
+
+### CRITICAL - BLOCKING ISSUE
+
+**FINDING 1: HARDCODED PRIVATE KEY IN PRODUCTION CONFIG**
+
+The file `appsettings.Production.json` contains a live mainnet private key on line 11:
+```json
+"PrivateKey": "f8d790b492e646a195181fc07b3809d792afe653b513623f039605c123ea3adc8d831dea807b6a00"
+```
+
+**IMMEDIATE ACTIONS REQUIRED:**
+1. Rotate ALL private keys immediately - current keys must be considered compromised
+2. Remove private keys from config files
+3. Use environment variables: `export LIGHTER__PRIVATEKEY="your-new-key"`
+4. Or use .NET User Secrets: `dotnet user-secrets set "Lighter:PrivateKey" "your-key"`
+
+### HIGH Priority Issues
+
+1. **5x Leverage Too High** - With $200 collateral, 5x leverage means liquidation at 20% adverse move. BTC moves 10-15% in volatile days. **Recommendation: Keep at 2x.**
+
+2. **AutoStartTrading Enabled** - Bot starts immediately without health checks. **Change to `false`.**
+
+3. **WebSocket Reconnection Race** - Potential for duplicate orders during reconnection. Existing fix helps but could be more robust.
+
+4. **No Pre-Submission Leverage Check** - Orders placed without final leverage validation.
+
+### Audit Verdict
+
+**Overall Score: 6.5/10**
+**Verdict: CONDITIONAL PASS**
+**Recommendation: DO NOT DEPLOY until CRITICAL issue fixed**
+
+### Recommended Production Config for $200 Collateral
+
+```json
+{
+    "AutoStartTrading": false,
+    "Capital": {
+        "MaxLeverage": 1.5,
+        "MaxAggregateLeverage": 1.0,
+        "MaxPositionSizePercent": 15,
+        "MaxOrderSizePercent": 8,
+        "ReserveBalancePercent": 40
+    },
+    "Grid": {
+        "MinOrdersPerSide": 3,
+        "MaxOrdersPerSide": 5,
+        "DefaultOrdersPerSide": 4
+    },
+    "LossLimits": {
+        "Rolling24HourLossPercent": -8,
+        "SingleTradeLossPercent": -3
+    }
+}
+```
+
+### Pre-Deployment Checklist
+
+- [ ] **CRITICAL**: Rotate ALL private keys
+- [ ] **CRITICAL**: Move secrets to environment variables
+- [ ] **HIGH**: Set `AutoStartTrading: false`
+- [ ] **HIGH**: Keep leverage at 2x or lower
+- [ ] **MEDIUM**: Test full system with testnet for 24h
+- [ ] **MEDIUM**: Verify webhook endpoint
+
+### Files Reviewed
+
+- `TradingBotHostedService.cs` - Main orchestrator
+- `TradingDecisionEngine.cs` - Decision making
+- `GridOrderManager.cs` - Order management
+- `GridLifecycleService.cs` - Grid lifecycle
+- `GridCalculator.cs` - Grid calculations
+- `RiskSentinel.cs` - Risk aggregation
+- `FlashCrashDetector.cs` - Crash protection
+- `FlashPumpDetector.cs` - Pump protection
+- `LossMonitor.cs` - Loss tracking
+- `RebalancingService.cs` - Rebalancing logic
+- `MarketScalingService.cs` - Price/amount scaling
+- `TradingBotOptions.cs` - Configuration options
+- `appsettings.Production.json` - Production config
+- `LighterRealtimeStateService.cs` - WebSocket state

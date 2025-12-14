@@ -6,6 +6,7 @@ using GridBot.ApiService.Services.MoonBag;
 using GridBot.ApiService.Services.Risk;
 using GridBot.ApiService.Services.State;
 using GridBot.Lighter;
+using GridBot.Lighter.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -26,6 +27,7 @@ public sealed class TradingBotHostedService : BackgroundService
     private readonly ILossMonitor _lossMonitor;
     private readonly IMarketResolver _marketResolver;
     private readonly ILighterRealtimeState _realtimeState;
+    private readonly ILighterCommandClient _commandClient;
 
     private DateTimeOffset _lastDecisionLoopTime = DateTimeOffset.MinValue;
     private DecisionResult? _lastDecisionResult;
@@ -42,7 +44,8 @@ public sealed class TradingBotHostedService : BackgroundService
         IMoonBagManager moonBagManager,
         ILossMonitor lossMonitor,
         IMarketResolver marketResolver,
-        ILighterRealtimeState realtimeState)
+        ILighterRealtimeState realtimeState,
+        ILighterCommandClient commandClient)
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(stateService);
@@ -53,6 +56,7 @@ public sealed class TradingBotHostedService : BackgroundService
         ArgumentNullException.ThrowIfNull(lossMonitor);
         ArgumentNullException.ThrowIfNull(marketResolver);
         ArgumentNullException.ThrowIfNull(realtimeState);
+        ArgumentNullException.ThrowIfNull(commandClient);
 
         _logger = logger;
         _stateService = stateService;
@@ -63,6 +67,7 @@ public sealed class TradingBotHostedService : BackgroundService
         _lossMonitor = lossMonitor;
         _marketResolver = marketResolver;
         _realtimeState = realtimeState;
+        _commandClient = commandClient;
     }
 
     /// <summary>
@@ -110,6 +115,9 @@ public sealed class TradingBotHostedService : BackgroundService
             _riskConfig.Capital.MaxLeverage,
             _riskConfig.LossLimits.Rolling24HourLossPercent,
             _riskConfig.LossLimits.MaxDrawdownPercent);
+
+        // Set leverage on the exchange based on configuration
+        await SetLeverageAsync(_marketResolver.MarketId, cancellationToken).ConfigureAwait(false);
 
         // Load persisted state from Redis
         await LoadPersistedStateAsync(cancellationToken).ConfigureAwait(false);
@@ -314,6 +322,62 @@ public sealed class TradingBotHostedService : BackgroundService
                 marketId,
                 result.RecoveryPhase,
                 result.RecoveryTimeRemaining?.ToString(@"hh\:mm\:ss") ?? "Unknown");
+        }
+    }
+
+    /// <summary>
+    /// Sets the leverage on the Lighter exchange based on the configured MaxLeverage.
+    /// This must be called at startup to ensure the exchange uses the configured leverage.
+    /// </summary>
+    /// <param name="marketId">The market ID to set leverage for.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task SetLeverageAsync(int marketId, CancellationToken ct)
+    {
+        var maxLeverage = _riskConfig.Capital.MaxLeverage;
+
+        // Convert MaxLeverage to InitialMarginFraction
+        // Formula: InitialMarginFraction = 10000 / MaxLeverage
+        // E.g., 2x leverage = 10000/2 = 5000 (50% initial margin)
+        // E.g., 5x leverage = 10000/5 = 2000 (20% initial margin)
+        var initialMarginFraction = (int)(10000m / maxLeverage);
+
+        var request = new UpdateLeverageRequest
+        {
+            MarketIndex = marketId,
+            InitialMarginFraction = initialMarginFraction,
+            MarginMode = MarginMode.Cross
+        };
+
+        _logger.LogInformation(
+            "Setting leverage for market {MarketId}: MaxLeverage={MaxLeverage}x, InitialMarginFraction={InitialMarginFraction}, MarginMode={MarginMode}",
+            marketId, maxLeverage, initialMarginFraction, request.MarginMode);
+
+        try
+        {
+            var result = await _commandClient.UpdateLeverageAsync(request, ct).ConfigureAwait(false);
+
+            if (result.Code == 200 && !string.IsNullOrEmpty(result.TxHash))
+            {
+                _logger.LogInformation(
+                    "Leverage set successfully for market {MarketId}: TxHash={TxHash}",
+                    marketId, result.TxHash);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Leverage update response: Code={Code}, Message={Message}, TxHash={TxHash}",
+                    result.Code, result.Message, result.TxHash);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Log error but don't fail startup - trading can proceed with exchange default leverage
+            // This is a non-critical operation; the bot can operate safely with lower leverage
+            _logger.LogError(
+                ex,
+                "Failed to set leverage for market {MarketId}. Trading will proceed with exchange default leverage. " +
+                "Configured leverage was {MaxLeverage}x.",
+                marketId, maxLeverage);
         }
     }
 }
