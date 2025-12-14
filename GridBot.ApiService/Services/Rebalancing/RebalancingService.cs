@@ -44,10 +44,7 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
     /// </summary>
     private readonly ConcurrentDictionary<int, SemaphoreSlim> _rebalanceLocks = new();
 
-    /// <summary>
-    /// Minimum time between rebalance operations (prevents rapid-fire orders).
-    /// </summary>
-    private static readonly TimeSpan MinRebalanceInterval = TimeSpan.FromMinutes(1);
+    // NOTE: MinRebalanceInterval now comes from configuration: _riskConfig.Trend.MinRebalanceIntervalMinutes
 
     /// <summary>
     /// Client order index counter for unique order IDs.
@@ -157,11 +154,20 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
 
         try
         {
+            // FIX: Use limit orders instead of market orders to avoid taker fees and slippage
+            // Apply aggressive maker spread (0.03%) to increase fill probability while getting maker fee
+            const decimal aggressiveMakerSpread = 0.0003m;
+            var limitPrice = isAsk
+                ? currentPrice * (1 - aggressiveMakerSpread)  // Sell slightly below mid for faster fill
+                : currentPrice * (1 + aggressiveMakerSpread); // Buy slightly above mid for faster fill
+
             // Scale price and amount using market-specific decimals from metadata
-            var scaledPrice = await _scalingService.ScalePriceAsync(currentPrice, marketId, ct).ConfigureAwait(false);
+            var scaledPrice = await _scalingService.ScalePriceAsync(limitPrice, marketId, ct).ConfigureAwait(false);
             var scaledAmount = await _scalingService.ScaleBaseAmountAsync(cryptoAmount, marketId, ct).ConfigureAwait(false);
 
-            // Create market order for immediate execution
+            // FIX: Use limit order with PostOnly to ensure maker fee
+            // Order expires in 5 minutes - if not filled, next cycle will retry
+            var orderExpiry = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds();
             var orderRequest = new CreateOrderRequest
             {
                 MarketIndex = marketId,
@@ -169,12 +175,16 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
                 BaseAmount = scaledAmount,
                 Price = scaledPrice,
                 IsAsk = isAsk,
-                OrderType = OrderType.Market,
-                TimeInForce = TimeInForce.ImmediateOrCancel,
-                OrderExpiry = OrderConstants.DefaultIocExpiry
+                OrderType = OrderType.Limit,
+                TimeInForce = TimeInForce.PostOnly,
+                OrderExpiry = orderExpiry
             };
 
-            var response = await _commandClient.CreateOrderAsync(orderRequest, priceProtection: true, ct);
+            _logger.LogDebug(
+                "Rebalance order: {Direction} {Amount} at limit price {LimitPrice:F2} (mid: {MidPrice:F2}, spread: {Spread:F2}%)",
+                isAsk ? "SELL" : "BUY", scaledAmount, limitPrice, currentPrice, aggressiveMakerSpread * 100);
+
+            var response = await _commandClient.CreateOrderAsync(orderRequest, priceProtection: false, ct);
 
             // Record the rebalance
             RecordRebalance(marketId, Math.Abs(targetDelta));
@@ -234,10 +244,12 @@ public sealed class RebalancingService : IRebalancingService, IDisposable
             return false;
         }
 
-        // Check minimum interval
+        // Check minimum interval (from configuration)
+        var minIntervalMinutes = _riskConfig.Trend.MinRebalanceIntervalMinutes;
+        var minInterval = TimeSpan.FromMinutes(minIntervalMinutes);
         if (_lastRebalanceTime.TryGetValue(marketId, out var lastTime))
         {
-            if (DateTimeOffset.UtcNow - lastTime < MinRebalanceInterval)
+            if (DateTimeOffset.UtcNow - lastTime < minInterval)
             {
                 return false;
             }

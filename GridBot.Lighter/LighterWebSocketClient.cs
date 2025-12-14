@@ -728,11 +728,41 @@ public sealed class LighterWebSocketClient : ILighterWebSocketClient
         try
         {
             var msg = JsonSerializer.Deserialize<OrdersMessage>(json, LighterJsonOptions.Default);
-            if (msg?.Orders == null) return;
+            if (msg?.Orders == null)
+            {
+                _logger.LogWarning("HandleOrdersMessage: Received null orders in message");
+                return;
+            }
+
+            // DEBUG: Log raw message type and market count
+            _logger.LogDebug(
+                "HandleOrdersMessage: Type={Type}, Channel={Channel}, Markets={MarketCount}",
+                msg.Type ?? "null", msg.Channel ?? "null", msg.Orders.Count);
 
             foreach (var (marketIdStr, orders) in msg.Orders)
             {
                 if (!int.TryParse(marketIdStr, out var marketId)) continue;
+
+                // DEBUG: Log order details for this market
+                var openOrders = orders.Count(o => o.Status == "open");
+                var partialOrders = orders.Count(o => o.Status == "partial");
+                var otherOrders = orders.Count - openOrders - partialOrders;
+
+                _logger.LogDebug(
+                    "HandleOrdersMessage: Market {MarketId} received {Total} orders (open={Open}, partial={Partial}, other={Other})",
+                    marketId, orders.Count, openOrders, partialOrders, otherOrders);
+
+                // Log first few orders for debugging
+                foreach (var o in orders.Take(3))
+                {
+                    _logger.LogDebug(
+                        "  WS Order: OrderIndex={OrderIndex}, ClientOrderIndex={ClientOrderIndex}, Status={Status}, Price={Price}, IsAsk={IsAsk}",
+                        o.OrderIndex, o.ClientOrderIndex, o.Status, o.Price, o.IsAsk);
+                }
+                if (orders.Count > 3)
+                {
+                    _logger.LogDebug("  ... and {More} more orders", orders.Count - 3);
+                }
 
                 var evt = new OrderUpdateEvent
                 {

@@ -94,6 +94,32 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
     {
         var orderSnapshots = _state.GetOrders(marketId);
 
+        // DEBUG: Log raw order snapshot data from WebSocket state
+        _logger.LogDebug(
+            "GetActiveOrdersAsync: Market {MarketId} - WebSocket state has {Count} order snapshots",
+            marketId, orderSnapshots.Count);
+
+        if (orderSnapshots.Count > 0)
+        {
+            foreach (var snap in orderSnapshots.Take(5)) // Log first 5 for debugging
+            {
+                _logger.LogDebug(
+                    "  OrderSnapshot: OrderIndex={OrderIndex}, ClientOrderIndex={ClientOrderIndex}, Status={Status}, Price={Price}, Size={Size}, IsBuy={IsBuy}",
+                    snap.OrderIndex, snap.ClientOrderIndex, snap.Status, snap.Price, snap.Size, snap.IsBuy);
+            }
+            if (orderSnapshots.Count > 5)
+            {
+                _logger.LogDebug("  ... and {More} more orders", orderSnapshots.Count - 5);
+            }
+        }
+        else
+        {
+            _logger.LogWarning(
+                "GetActiveOrdersAsync: Market {MarketId} - WebSocket state returned EMPTY order list. " +
+                "WebSocket may not have received order updates yet or orders channel not subscribed.",
+                marketId);
+        }
+
         var orders = orderSnapshots
             .Where(o => o.Status == "open" || o.Status == "partial")
             .Select(o => new Order
@@ -111,6 +137,25 @@ public sealed class WsLighterQueryClient : ILighterQueryClient
                 Type = "limit" // WebSocket doesn't provide order type details
             })
             .ToList();
+
+        // DEBUG: Log how many orders passed the status filter
+        var filteredOut = orderSnapshots.Count - orders.Count;
+        if (filteredOut > 0)
+        {
+            _logger.LogDebug(
+                "GetActiveOrdersAsync: Market {MarketId} - Filtered out {FilteredCount} orders (status not open/partial). Returning {ActiveCount} active orders.",
+                marketId, filteredOut, orders.Count);
+        }
+
+        // DEBUG: Log orders with/without ClientOrderIndex
+        var withClientIndex = orders.Count(o => o.ClientOrderIndex.HasValue);
+        var withoutClientIndex = orders.Count - withClientIndex;
+        if (withoutClientIndex > 0)
+        {
+            _logger.LogWarning(
+                "GetActiveOrdersAsync: Market {MarketId} - {WithoutCount} orders have no ClientOrderIndex (will not match grid levels)",
+                marketId, withoutClientIndex);
+        }
 
         return Task.FromResult(orders);
     }

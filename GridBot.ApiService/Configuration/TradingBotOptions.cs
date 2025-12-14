@@ -314,6 +314,12 @@ public sealed class TrendOptions
     public decimal MaxRebalanceRatePercent { get; set; } = 10m;
 
     /// <summary>
+    /// Minimum interval between rebalance attempts in minutes (default 15).
+    /// This allows grid fills to settle before attempting another rebalance.
+    /// </summary>
+    public int MinRebalanceIntervalMinutes { get; set; } = 15;
+
+    /// <summary>
     /// Emergency rebalance threshold - force rebalance above this deviation (default 30%).
     /// </summary>
     public decimal EmergencyRebalanceThresholdPercent { get; set; } = 30m;

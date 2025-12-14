@@ -76,6 +76,19 @@ public sealed class InventoryManager : IInventoryManager
         var rebalanceNeeded = ShouldRebalance(currentSkew, targetSkew, trendOptions.RebalanceTolerancePercent);
         var isEmergency = IsEmergencyRebalance(currentSkew, targetSkew);
 
+        // FIX: Flat position guard - don't rebalance when position is effectively flat AND target is flat
+        // This prevents the NO_POS + Neutral trend bug where 0% position with 0% target triggers rebalance
+        var isEffectivelyFlat = Math.Abs(cryptoValueUsd) < (totalPortfolioUsd * 0.02m); // <2% position
+        var targetIsFlat = Math.Abs(targetSkew) < 5m; // Target near 0%
+
+        if (rebalanceNeeded && isEffectivelyFlat && targetIsFlat)
+        {
+            _logger.LogDebug(
+                "Flat position guard: Position ({CryptoValue:F2} USD, {Skew:F1}%) effectively matches flat target ({Target:F1}%). Rebalance suppressed.",
+                cryptoValueUsd, currentSkew, targetSkew);
+            rebalanceNeeded = false;
+        }
+
         // For perpetual futures, position = 0 (flat) is normal operation, not a bootstrap condition.
         // Unlike spot trading where you need inventory to sell, perpetuals allow opening
         // long or short positions freely. Bootstrap mode is not applicable.

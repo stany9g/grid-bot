@@ -441,12 +441,17 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
             }
 
             var activeLevelsCount = levels.Count(l => l.Status == GridLevelStatus.Active && l.ClientOrderIndex.HasValue);
+
+            // FIX: Prevent false fill detection when WebSocket data is stale or missing
+            // If we have active grid levels but exchange returns 0 orders with ClientOrderIndex,
+            // this indicates a WebSocket data issue - DO NOT mark orders as filled
             if (activeLevelsCount > 0 && orderLookup.Count == 0)
             {
-                _logger.LogError(
-                    "CRITICAL: Market {MarketId} has {ActiveLevels} active grid levels but exchange returned 0 orders with ClientOrderIndex. " +
-                    "This will incorrectly mark all orders as filled! Check WebSocket orders subscription.",
+                _logger.LogWarning(
+                    "Order sync skipped for market {MarketId}: {ActiveLevels} active grid levels but exchange returned 0 orders with ClientOrderIndex. " +
+                    "WebSocket may be stale or disconnected. Preserving current order state to prevent false fills.",
                     marketId, activeLevelsCount);
+                return; // Exit early - do not modify order states
             }
 
             // FIX CRITICAL: Acquire _orderLock before mutating GridLevel objects

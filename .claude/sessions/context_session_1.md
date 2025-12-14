@@ -2163,3 +2163,82 @@ if (response.Code == 21712)
 | `GridBot.ApiService/Services/Grid/GridOrderManager.cs` | Add pre-check in `CancelAllGridOrdersAsync` and grid rebuild methods |
 
 ---
+
+## Rebalancing Logic Analysis for Perpetual Futures Grid Bot (December 13, 2025)
+
+### Problem Identified
+
+The trading bot logs showed incorrect rebalancing behavior:
+```
+CYCLE[1] Price:90160.05 | Pos:NO_POS | Trend:Neutral (target:0%, actual:0%) | Grid:B:6 S:6 | Risk:OK
+Executing rebalance on market 1: BUY 0.000177 crypto at ~90163.10 ($16.00, 8.0% of portfolio)
+```
+
+Key issues:
+1. **NO_POS with 0% target/actual skew triggers 8% rebalance** - should NOT happen
+2. **Market orders for rebalancing** - causes taker fees and slippage
+3. **Rebalancing while grid is fully deployed (B:6 S:6)** - grid should handle position management
+
+### Analysis Document Created
+
+Full analysis at: `.claude/doc/rebalancing-risk-analysis-perpetuals.md`
+
+### Key Findings
+
+| Issue | Root Cause | Severity |
+|-------|------------|----------|
+| False positive rebalance | Missing flat position guard | CRITICAL |
+| Grid-rebalance conflict | No check for active grid orders | CRITICAL |
+| Market order slippage | Uses OrderType.Market + IOC | HIGH |
+| Over-trading | Rebalance every cycle regardless of trend change | MEDIUM |
+
+### Recommended Rule Changes
+
+1. **Grid Precedence Rule:**
+   ```
+   IF grid_order_count >= 8 THEN DISABLE rebalancing
+   ```
+
+2. **Flat Position Guard:**
+   ```
+   IF |position| < 2% collateral AND target_skew == 0% THEN SKIP rebalancing
+   ```
+
+3. **Trend Change Only:**
+   ```
+   IF NOT trend_state_changed AND NOT emergency THEN SKIP rebalancing
+   ```
+
+4. **Limit Order Rebalancing:**
+   ```
+   USE OrderType.Limit with aggressive maker pricing
+   ```
+
+### Files to Modify
+
+1. `GridBot.ApiService/Services/Inventory/InventoryManager.cs` - Add flat position guard
+2. `GridBot.ApiService/Services/Trend/TrendIntelligenceService.cs` - Add grid-active check
+3. `GridBot.ApiService/Services/Rebalancing/RebalancingService.cs` - Change to limit orders
+4. `GridBot.ApiService/appsettings.Production.json` - Update thresholds
+
+### Configuration Changes Recommended
+
+```json
+{
+  "Trend": {
+    "RebalanceTolerancePercent": 15,     // Was 8%
+    "MaxRebalanceRatePercent": 5,        // Was 8%
+    "MinRebalanceIntervalMinutes": 15    // New: Was 1 min
+  }
+}
+```
+
+### Summary
+
+The rebalancing subsystem is designed for spot trading inventory management, not perpetual futures grid trading. For perpetuals:
+- Grid fills should be the PRIMARY position adjustment mechanism
+- Rebalancing should only occur on significant trend regime changes
+- Market orders should never be used for non-emergency rebalancing
+- Flat positions matching flat targets should not trigger any action
+
+---

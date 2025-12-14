@@ -127,8 +127,22 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     public AccountSnapshot? GetAccount() => _account;
 
     /// <inheritdoc />
-    public IReadOnlyList<OrderSnapshot> GetOrders(int marketId) =>
-        _orders.TryGetValue(marketId, out var orders) ? orders : Array.Empty<OrderSnapshot>();
+    public IReadOnlyList<OrderSnapshot> GetOrders(int marketId)
+    {
+        if (_orders.TryGetValue(marketId, out var orders))
+        {
+            _logger.LogDebug(
+                "GetOrders: Market {MarketId} returning {Count} orders from state",
+                marketId, orders.Count);
+            return orders;
+        }
+
+        _logger.LogWarning(
+            "GetOrders: Market {MarketId} has NO orders in state (key not found). " +
+            "Total markets with orders: {MarketCount}",
+            marketId, _orders.Count);
+        return Array.Empty<OrderSnapshot>();
+    }
 
     /// <inheritdoc />
     public MarketStatsSnapshot? GetMarketStats(int marketId) =>
@@ -664,15 +678,32 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
         {
             await foreach (var update in _wsClient.OrderUpdates.ReadAllAsync(cancellationToken))
             {
+                // DEBUG: Log order state changes
+                var previousCount = _orders.TryGetValue(update.MarketId, out var prev) ? prev.Count : 0;
+                var newCount = update.Orders.Count;
+                var openCount = update.Orders.Count(o => o.Status == "open");
+
                 _orders[update.MarketId] = update.Orders;
                 RecordMessageReceived(update.Timestamp);
 
-                if (_logger.IsEnabled(LogLevel.Trace))
+                // Always log order updates at Debug level for troubleshooting
+                _logger.LogDebug(
+                    "ProcessOrderUpdates: Market {MarketId} orders updated: {PrevCount} -> {NewCount} (open: {OpenCount})",
+                    update.MarketId, previousCount, newCount, openCount);
+
+                // Log details if orders changed significantly or became empty
+                if (newCount == 0 && previousCount > 0)
                 {
-                    _logger.LogTrace(
-                        "Order update for market {MarketId}: {OrderCount} orders",
-                        update.MarketId,
-                        update.Orders.Count);
+                    _logger.LogWarning(
+                        "ProcessOrderUpdates: Market {MarketId} order list became EMPTY (was {PrevCount}). " +
+                        "This may cause false fill detection!",
+                        update.MarketId, previousCount);
+                }
+                else if (newCount < previousCount && newCount > 0)
+                {
+                    _logger.LogDebug(
+                        "ProcessOrderUpdates: Market {MarketId} order count decreased by {Diff} (possible fills or cancellations)",
+                        update.MarketId, previousCount - newCount);
                 }
             }
         }

@@ -281,12 +281,30 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             }
 
             // EC-002: Check if all orders were cancelled externally while position exists
-            var activeOrderCount = gridState.Levels.Count(l =>
-                l.Status == GridLevelStatus.Active && l.OrderId.HasValue);
+            // Use ClientOrderIndex (set when we place orders) rather than OrderId
+            var levelsWithClientOrderIndex = gridState.Levels.Count(l =>
+                l.Status == GridLevelStatus.Active && l.ClientOrderIndex.HasValue);
             var inventory = _stateService.CurrentInventory;
             var hasPosition = Math.Abs(inventory.CurrentSkew) > 5; // More than 5% exposure (long or short) = has position
 
-            if (activeOrderCount == 0 && hasPosition && gridState.Levels.Count > 0)
+            // FIX: Don't trigger EC-002 if we couldn't verify order status (WebSocket data issue)
+            // Check if the order sync was skipped due to WebSocket returning 0 orders
+            // If we have levels with ClientOrderIndex but all were marked as filled in a single sync,
+            // this is likely a WebSocket data issue, not actual fills
+            var allLevelsFilled = gridState.Levels.Count(l => l.Status == GridLevelStatus.Filled);
+            var possibleWebSocketIssue = levelsWithClientOrderIndex == 0 &&
+                                         allLevelsFilled == gridState.Levels.Count &&
+                                         fillsDetected == gridState.Levels.Count;
+
+            if (possibleWebSocketIssue)
+            {
+                _logger.LogWarning(
+                    "EC-002 SUPPRESSED for market {MarketId}: All {Count} orders marked as filled simultaneously. " +
+                    "This is likely a WebSocket data issue, not actual external cancellation. " +
+                    "Skipping grid rebuild to prevent duplicate orders.",
+                    marketId, allLevelsFilled);
+            }
+            else if (levelsWithClientOrderIndex == 0 && hasPosition && gridState.Levels.Count > 0)
             {
                 _logger.LogWarning(
                     "EC-002: All orders cancelled externally for market {MarketId}. Position exists (skew={Skew:F1}%). Rebuilding grid.",

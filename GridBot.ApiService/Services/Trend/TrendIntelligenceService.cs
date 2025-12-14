@@ -1,4 +1,5 @@
 using GridBot.ApiService.Models.Trading;
+using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.Inventory;
 using GridBot.ApiService.Services.Rebalancing;
 using GridBot.ApiService.Services.State;
@@ -17,19 +18,28 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
     private readonly IInventoryManager _inventoryManager;
     private readonly IRebalancingService _rebalancingService;
     private readonly ITradingStateService _tradingStateService;
+    private readonly IGridLifecycleService _gridLifecycleService;
     private readonly ILogger<TrendIntelligenceService> _logger;
+
+    /// <summary>
+    /// Minimum number of active grid orders that suppresses rebalancing.
+    /// When grid has this many active orders, let grid fills handle position adjustment.
+    /// </summary>
+    private const int MinActiveOrdersToSuppressRebalance = 8;
 
     public TrendIntelligenceService(
         ITrendDetector trendDetector,
         IInventoryManager inventoryManager,
         IRebalancingService rebalancingService,
         ITradingStateService tradingStateService,
+        IGridLifecycleService gridLifecycleService,
         ILogger<TrendIntelligenceService> logger)
     {
         _trendDetector = trendDetector ?? throw new ArgumentNullException(nameof(trendDetector));
         _inventoryManager = inventoryManager ?? throw new ArgumentNullException(nameof(inventoryManager));
         _rebalancingService = rebalancingService ?? throw new ArgumentNullException(nameof(rebalancingService));
         _tradingStateService = tradingStateService ?? throw new ArgumentNullException(nameof(tradingStateService));
+        _gridLifecycleService = gridLifecycleService ?? throw new ArgumentNullException(nameof(gridLifecycleService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -83,7 +93,29 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
             var currentState = _tradingStateService.CurrentState;
             var canRebalance = currentState != TradingState.Degraded_ProtectiveMode;
 
-            if (inventoryAnalysis.RebalanceNeeded && canRebalance)
+            // FIX: Check if grid is actively managing position
+            // When grid has 8+ active orders, let grid fills handle position adjustment
+            var gridState = await _gridLifecycleService.GetCurrentGridStateAsync(marketId, ct);
+            var activeOrderCount = gridState?.Levels.Count(l => l.Status == GridLevelStatus.Active) ?? 0;
+            var gridIsActivelyManaging = activeOrderCount >= MinActiveOrdersToSuppressRebalance;
+
+            // FIX: Only rebalance on trend state changes (not every cycle) unless emergency
+            // This prevents over-trading and lets grid fills naturally adjust position
+            var shouldRebalance = inventoryAnalysis.RebalanceNeeded
+                && canRebalance
+                && (trendStateChanged || inventoryAnalysis.IsEmergency);
+
+            // FIX: Grid precedence - when grid is active, suppress non-emergency rebalancing
+            if (shouldRebalance && gridIsActivelyManaging && !inventoryAnalysis.IsEmergency)
+            {
+                _logger.LogDebug(
+                    "Rebalance suppressed on market {MarketId}: Grid is active with {ActiveOrders} orders. " +
+                    "Grid fills will naturally adjust position. Delta={Delta:F1}%",
+                    marketId, activeOrderCount, inventoryAnalysis.RebalanceDelta);
+                shouldRebalance = false;
+            }
+
+            if (shouldRebalance)
             {
                 if (_rebalancingService.CanRebalanceNow(marketId))
                 {
@@ -112,6 +144,12 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
                         "Rebalance skipped on market {MarketId}: Cannot rebalance now (rate limit)",
                         marketId);
                 }
+            }
+            else if (inventoryAnalysis.RebalanceNeeded && !trendStateChanged && !inventoryAnalysis.IsEmergency)
+            {
+                _logger.LogDebug(
+                    "Rebalance deferred on market {MarketId}: Trend unchanged ({Trend}), grid will handle adjustment. Delta={Delta:F1}%",
+                    marketId, _tradingStateService.CurrentTrendState, inventoryAnalysis.RebalanceDelta);
             }
 
             // Step 6: Update inventory state even if no rebalance occurred
