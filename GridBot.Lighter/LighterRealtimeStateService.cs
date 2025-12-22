@@ -45,6 +45,12 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     private readonly ConcurrentDictionary<int, PositionSnapshot> _mutablePositions = new();
     private readonly object _positionsLock = new();
 
+    // Cache of recently removed orders with their final status for fill vs cancel detection
+    // Key: MarketId, Value: Dictionary of ClientOrderIndex -> (Status, RemovedAt)
+    // Orders are kept for 60 seconds after removal.
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<long, (string Status, DateTimeOffset RemovedAt)>> _recentlyRemovedOrders = new();
+    private static readonly TimeSpan RemovedOrderCacheTtl = TimeSpan.FromSeconds(60);
+
     // Health monitoring state
     private long _lastMessageReceivedTicks;
     private readonly List<DateTimeOffset> _disconnectEvents = new();
@@ -691,12 +697,23 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                     {
                         if (mutableState.Orders.Remove(order.OrderIndex))
                         {
+                            // Track the removed order's final status for fill vs cancel detection
+                            // Use ClientOrderIndex as key since that's what GridOrderManager uses for matching
+                            if (order.ClientOrderIndex > 0)
+                            {
+                                var removedCache = _recentlyRemovedOrders.GetOrAdd(marketId, _ => new());
+                                removedCache[order.ClientOrderIndex] = (order.Status, DateTimeOffset.UtcNow);
+                            }
+
                             _logger.LogDebug(
-                                "Order delta REMOVE market {MarketId}: OrderIndex={OrderIndex}, Status={Status} (filled/cancelled)",
-                                marketId, order.OrderIndex, order.Status);
+                                "Order delta REMOVE market {MarketId}: OrderIndex={OrderIndex}, ClientOrderIndex={ClientOrderIndex}, Status={Status} (filled/cancelled)",
+                                marketId, order.OrderIndex, order.ClientOrderIndex, order.Status);
                         }
                     }
                 }
+
+                // Periodically clean up expired cache entries
+                CleanupRemovedOrdersCache();
             }
 
             // Return as list
@@ -860,6 +877,64 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
     {
         _userStats = null;
         _logger.LogDebug("Cleared user stats state");
+    }
+
+    /// <inheritdoc />
+    public string? GetRemovedOrderStatus(int marketId, long clientOrderIndex)
+    {
+        if (_recentlyRemovedOrders.TryGetValue(marketId, out var cache) &&
+            cache.TryGetValue(clientOrderIndex, out var entry))
+        {
+            // Only return if not expired
+            if (entry.RemovedAt >= DateTimeOffset.UtcNow - RemovedOrderCacheTtl)
+            {
+                return entry.Status;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Cleans up expired entries from the removed orders cache.
+    /// Called periodically during order delta processing.
+    /// </summary>
+    private void CleanupRemovedOrdersCache()
+    {
+        var cutoff = DateTimeOffset.UtcNow - RemovedOrderCacheTtl;
+
+        foreach (var (marketId, cache) in _recentlyRemovedOrders)
+        {
+            var expiredKeys = cache
+                .Where(kvp => kvp.Value.RemovedAt < cutoff)
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var key in expiredKeys)
+            {
+                cache.TryRemove(key, out _);
+            }
+
+            // Remove empty market caches
+            if (cache.IsEmpty)
+            {
+                _recentlyRemovedOrders.TryRemove(marketId, out _);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Clears all removed orders cache state.
+    /// Called on disconnect to ensure fresh data on reconnect.
+    /// </summary>
+    private void ClearAllRemovedOrdersCache()
+    {
+        var count = _recentlyRemovedOrders.Count;
+        _recentlyRemovedOrders.Clear();
+
+        if (count > 0)
+        {
+            _logger.LogDebug("Cleared removed orders cache for {Count} markets", count);
+        }
     }
 
     private async Task ProcessAccountUpdatesAsync(CancellationToken cancellationToken)
@@ -1027,6 +1102,7 @@ public sealed class LighterRealtimeStateService : ILighterRealtimeState
                     ClearAllPositionState();
                     ClearAllMarketStatsState();
                     ClearAllUserStatsState();
+                    ClearAllRemovedOrdersCache();
 
                     _logger.LogWarning(
                         "WebSocket disconnected. Disconnect count in 24h: {Count}. All WebSocket state cleared.",

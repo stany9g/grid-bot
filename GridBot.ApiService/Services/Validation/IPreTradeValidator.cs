@@ -55,4 +55,28 @@ public interface IPreTradeValidator
         int marketId,
         IReadOnlyList<(bool IsBuy, decimal SizeUsd)> orders,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Validates a PostOnly order won't cross the spread.
+    /// PostOnly orders that would immediately match are rejected by the exchange.
+    /// </summary>
+    /// <param name="marketId">Market identifier.</param>
+    /// <param name="isBuy">True for buy orders, false for sell orders.</param>
+    /// <param name="orderPrice">The limit price of the order.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// Validation result. If invalid, contains reason why order would cross.
+    /// May include RecommendedPrice if order can be adjusted.
+    /// </returns>
+    /// <remarks>
+    /// PostOnly crossing rules:
+    /// - BUY order: price must be &lt; best ask (lowest sell)
+    /// - SELL order: price must be &gt; best bid (highest buy)
+    /// If order would cross, it's rejected to prevent exchange cancellation.
+    /// </remarks>
+    Task<PostOnlyValidation> ValidatePostOnlyPriceAsync(
+        int marketId,
+        bool isBuy,
+        decimal orderPrice,
+        CancellationToken ct = default);
 }

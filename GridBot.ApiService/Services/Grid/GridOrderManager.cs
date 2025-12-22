@@ -19,6 +19,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
 {
     private readonly ILighterCommandClient _commandClient;
     private readonly ILighterQueryClient _queryClient;
+    private readonly ILighterRealtimeState _realtimeState;
     private readonly IMoonBagManager _moonBagManager;
     private readonly IMarketScalingService _scalingService;
     private readonly IRiskConfiguration _config;
@@ -51,6 +52,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
     public GridOrderManager(
         ILighterCommandClient commandClient,
         ILighterQueryClient queryClient,
+        ILighterRealtimeState realtimeState,
         IMoonBagManager moonBagManager,
         IMarketScalingService scalingService,
         IRiskConfiguration config,
@@ -59,6 +61,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
     {
         ArgumentNullException.ThrowIfNull(commandClient);
         ArgumentNullException.ThrowIfNull(queryClient);
+        ArgumentNullException.ThrowIfNull(realtimeState);
         ArgumentNullException.ThrowIfNull(moonBagManager);
         ArgumentNullException.ThrowIfNull(scalingService);
         ArgumentNullException.ThrowIfNull(config);
@@ -67,6 +70,7 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
 
         _commandClient = commandClient;
         _queryClient = queryClient;
+        _realtimeState = realtimeState;
         _moonBagManager = moonBagManager;
         _scalingService = scalingService;
         _config = config;
@@ -501,14 +505,38 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
                     }
                     else if (level.Status == GridLevelStatus.Active)
                     {
-                        // Order was active but no longer in active orders - fully filled
-                        level.Status = GridLevelStatus.Filled;
-                        level.PartialFillPercent = 100m; // Mark as fully filled
-                        _logger.LogInformation(
-                            "Detected fill at {Side} level {Index}, price {Price}",
-                            level.IsBid ? "bid" : "ask",
-                            level.LevelIndex,
-                            level.Price);
+                        // Order was active but no longer in active orders
+                        // Check WebSocket cache to determine if it was filled or cancelled
+                        var finalStatus = _realtimeState.GetRemovedOrderStatus(marketId, level.ClientOrderIndex.Value);
+
+                        if (finalStatus == "cancelled")
+                        {
+                            // Order was cancelled (e.g., PostOnly crossing) - NOT filled
+                            // Reset to Pending so it can be retried on the next cycle
+                            level.Status = GridLevelStatus.Pending;
+                            level.OrderId = null;
+                            level.ClientOrderIndex = null;
+                            level.PartialFillPercent = 0m;
+
+                            _logger.LogWarning(
+                                "Order CANCELLED (not filled) at {Side} level {Index}, price {Price}. " +
+                                "Likely PostOnly rejection - order crossed the spread.",
+                                level.IsBid ? "bid" : "ask",
+                                level.LevelIndex,
+                                level.Price);
+                        }
+                        else
+                        {
+                            // Status is "filled" or unknown (assume filled for safety)
+                            level.Status = GridLevelStatus.Filled;
+                            level.PartialFillPercent = 100m;
+                            _logger.LogInformation(
+                                "Detected fill at {Side} level {Index}, price {Price} (status: {Status})",
+                                level.IsBid ? "bid" : "ask",
+                                level.LevelIndex,
+                                level.Price,
+                                finalStatus ?? "unknown/assumed-filled");
+                        }
                     }
 
                     level.LastUpdatedAt = DateTimeOffset.UtcNow;

@@ -258,6 +258,137 @@ public sealed class PreTradeValidator : IPreTradeValidator
         return results;
     }
 
+    /// <inheritdoc />
+    public Task<PostOnlyValidation> ValidatePostOnlyPriceAsync(
+        int marketId,
+        bool isBuy,
+        decimal orderPrice,
+        CancellationToken ct = default)
+    {
+        var preTrade = _options.Value.PreTrade;
+
+        // Get order book from WebSocket state
+        var orderBook = _realtimeState.GetOrderBook(marketId);
+
+        // Rule: Fail closed - if no order book data, reject
+        if (orderBook == null)
+        {
+            _logger.LogWarning(
+                "POST-ONLY FAIL: Order book not available for market {MarketId}",
+                marketId);
+
+            return Task.FromResult(PostOnlyValidation.NoData(
+                "Order book not available - cannot validate PostOnly price",
+                orderPrice));
+        }
+
+        var dataAge = DateTimeOffset.UtcNow - orderBook.LastUpdate;
+
+        // Rule: Check data freshness (must be < 5 seconds)
+        if (dataAge.TotalSeconds > preTrade.MaxDataAgeSeconds)
+        {
+            _logger.LogWarning(
+                "POST-ONLY FAIL: Order book data stale ({DataAge:F1}s > {Max}s) for market {MarketId}",
+                dataAge.TotalSeconds, preTrade.MaxDataAgeSeconds, marketId);
+
+            return Task.FromResult(PostOnlyValidation.NoData(
+                $"Order book data too stale ({dataAge.TotalSeconds:F1}s)",
+                orderPrice));
+        }
+
+        var bestBid = orderBook.BestBidPrice;
+        var bestAsk = orderBook.BestAskPrice;
+
+        // Validate we have valid bid/ask
+        if (bestBid <= 0 || bestAsk <= 0)
+        {
+            _logger.LogWarning(
+                "POST-ONLY FAIL: Invalid best bid/ask ({BestBid}/{BestAsk}) for market {MarketId}",
+                bestBid, bestAsk, marketId);
+
+            return Task.FromResult(PostOnlyValidation.NoData(
+                "Invalid order book state - no valid bid/ask",
+                orderPrice));
+        }
+
+        // PostOnly crossing validation
+        // BUY order: must be strictly < best ask (can't match with sellers)
+        // SELL order: must be strictly > best bid (can't match with buyers)
+        if (isBuy)
+        {
+            var distanceFromCrossing = bestAsk - orderPrice;
+
+            if (orderPrice >= bestAsk)
+            {
+                // Buy price would cross - calculate safe price (1 tick below best ask)
+                // Use 0.01% buffer below best ask to be safe
+                var safePrice = bestAsk * 0.9999m;
+
+                _logger.LogWarning(
+                    "POST-ONLY CROSS: BUY at {OrderPrice:F2} >= bestAsk {BestAsk:F2} for market {MarketId}. " +
+                    "Order would cross spread. SafePrice: {SafePrice:F2}",
+                    orderPrice, bestAsk, marketId, safePrice);
+
+                return Task.FromResult(PostOnlyValidation.WouldCross(
+                    $"BUY price {orderPrice:F2} >= best ask {bestAsk:F2} - would cross spread",
+                    orderPrice,
+                    bestBid,
+                    bestAsk,
+                    distanceFromCrossing,
+                    dataAge,
+                    recommendedPrice: safePrice));
+            }
+
+            _logger.LogDebug(
+                "POST-ONLY PASS: BUY at {OrderPrice:F2} < bestAsk {BestAsk:F2} (distance: {Distance:F2})",
+                orderPrice, bestAsk, distanceFromCrossing);
+
+            return Task.FromResult(PostOnlyValidation.Valid(
+                orderPrice,
+                bestBid,
+                bestAsk,
+                distanceFromCrossing,
+                dataAge));
+        }
+        else
+        {
+            // SELL order
+            var distanceFromCrossing = orderPrice - bestBid;
+
+            if (orderPrice <= bestBid)
+            {
+                // Sell price would cross - calculate safe price (1 tick above best bid)
+                // Use 0.01% buffer above best bid to be safe
+                var safePrice = bestBid * 1.0001m;
+
+                _logger.LogWarning(
+                    "POST-ONLY CROSS: SELL at {OrderPrice:F2} <= bestBid {BestBid:F2} for market {MarketId}. " +
+                    "Order would cross spread. SafePrice: {SafePrice:F2}",
+                    orderPrice, bestBid, marketId, safePrice);
+
+                return Task.FromResult(PostOnlyValidation.WouldCross(
+                    $"SELL price {orderPrice:F2} <= best bid {bestBid:F2} - would cross spread",
+                    orderPrice,
+                    bestBid,
+                    bestAsk,
+                    distanceFromCrossing,
+                    dataAge,
+                    recommendedPrice: safePrice));
+            }
+
+            _logger.LogDebug(
+                "POST-ONLY PASS: SELL at {OrderPrice:F2} > bestBid {BestBid:F2} (distance: {Distance:F2})",
+                orderPrice, bestBid, distanceFromCrossing);
+
+            return Task.FromResult(PostOnlyValidation.Valid(
+                orderPrice,
+                bestBid,
+                bestAsk,
+                distanceFromCrossing,
+                dataAge));
+        }
+    }
+
     /// <summary>
     /// Calculates total depth in USD for one side of the order book.
     /// </summary>

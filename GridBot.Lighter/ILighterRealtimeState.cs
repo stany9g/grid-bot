@@ -178,6 +178,16 @@ public interface ILighterRealtimeState : IAsyncDisposable
     /// Allows subscribers to react to connection changes immediately.
     /// </summary>
     event EventHandler<WebSocketHealthChangedEventArgs>? HealthChanged;
+
+    /// <summary>
+    /// Gets the final status of a recently removed order.
+    /// Returns null if the order is not in the removed cache (either still active or cache expired).
+    /// Used to distinguish between filled and cancelled orders in grid sync.
+    /// </summary>
+    /// <param name="marketId">Market ID.</param>
+    /// <param name="clientOrderIndex">Client order index to look up.</param>
+    /// <returns>The final status ("filled", "cancelled", etc.) or null if not found.</returns>
+    string? GetRemovedOrderStatus(int marketId, long clientOrderIndex);
 }
 
 /// <summary>

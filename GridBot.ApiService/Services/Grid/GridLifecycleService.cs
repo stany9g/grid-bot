@@ -44,8 +44,11 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
     /// <summary>
     /// Price movement threshold that triggers a grid shift (relative to grid width).
+    /// Value of 0.10 means shift when price deviates by 10% of half-width.
+    /// For a 10% grid width: shift at 0.5% price deviation.
+    /// For a 4% grid width: shift at 0.2% price deviation.
     /// </summary>
-    private const decimal PriceShiftThreshold = 0.5m;
+    private const decimal PriceShiftThreshold = 0.10m;
 
     public GridLifecycleService(
         IGridCalculator gridCalculator,
@@ -786,10 +789,10 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
     }
 
     /// <summary>
-    /// Validates orders against market depth and places them.
-    /// H.3 CRITICAL: Pre-Trade Depth Check
-    /// - If validation fails with RecommendedSizeUsd, adjusts order size
-    /// - If validation fails without recommendation, skips the order
+    /// Validates orders against market depth and PostOnly crossing, then places them.
+    /// H.3 CRITICAL: Pre-Trade Depth Check + PostOnly Spread Check
+    /// - If depth validation fails with RecommendedSizeUsd, adjusts order size
+    /// - If PostOnly validation fails, skips the order (price would cross spread)
     /// - Fail closed: If validation throws, reject the order
     /// </summary>
     /// <param name="marketId">Market identifier.</param>
@@ -808,6 +811,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
         var validatedLevels = new List<GridLevel>();
         var rejectedCount = 0;
+        var crossingSkipCount = 0;
 
         foreach (var level in levels)
         {
@@ -816,20 +820,43 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
 
             try
             {
-                var validation = await _preTradeValidator.ValidateOrderAsync(
+                // STEP 1: Validate PostOnly price won't cross spread
+                var postOnlyValidation = await _preTradeValidator.ValidatePostOnlyPriceAsync(
+                    marketId,
+                    level.IsBid,
+                    level.Price,
+                    ct).ConfigureAwait(false);
+
+                if (!postOnlyValidation.IsValid)
+                {
+                    // Order would cross spread - skip this order entirely
+                    // Don't mark as Cancelled, just skip - the grid shift will handle it
+                    _logger.LogInformation(
+                        "POST-ONLY SKIP: {Side} order at {Price:F2} would cross spread (best bid/ask: {BestBid:F2}/{BestAsk:F2}). Skipping until price returns.",
+                        level.IsBid ? "BUY" : "SELL",
+                        level.Price,
+                        postOnlyValidation.BestBid,
+                        postOnlyValidation.BestAsk);
+
+                    crossingSkipCount++;
+                    continue; // Don't place, don't mark cancelled - just skip
+                }
+
+                // STEP 2: Validate depth
+                var depthValidation = await _preTradeValidator.ValidateOrderAsync(
                     marketId,
                     level.IsBid,
                     orderSizeUsd,
                     ct).ConfigureAwait(false);
 
-                if (validation.IsValid)
+                if (depthValidation.IsValid)
                 {
                     validatedLevels.Add(level);
                 }
-                else if (validation.RecommendedSizeUsd.HasValue && validation.RecommendedSizeUsd.Value > 0)
+                else if (depthValidation.RecommendedSizeUsd.HasValue && depthValidation.RecommendedSizeUsd.Value > 0)
                 {
                     // Adjust order size to recommended
-                    var adjustedSize = validation.RecommendedSizeUsd.Value / level.Price;
+                    var adjustedSize = depthValidation.RecommendedSizeUsd.Value / level.Price;
 
                     _logger.LogWarning(
                         "PRE-TRADE: Adjusting {Side} order at {Price:F2} from {OriginalSize:F4} to {AdjustedSize:F4} (${OriginalUsd:F0} -> ${AdjustedUsd:F0})",
@@ -838,7 +865,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                         level.Size,
                         adjustedSize,
                         orderSizeUsd,
-                        validation.RecommendedSizeUsd.Value);
+                        depthValidation.RecommendedSizeUsd.Value);
 
                     level.Size = adjustedSize;
                     validatedLevels.Add(level);
@@ -851,7 +878,7 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
                         level.IsBid ? "BUY" : "SELL",
                         level.Price,
                         orderSizeUsd,
-                        validation.Reason);
+                        depthValidation.Reason);
 
                     level.Status = GridLevelStatus.Cancelled;
                     rejectedCount++;
@@ -871,20 +898,28 @@ public sealed class GridLifecycleService : IGridLifecycleService, IDisposable
             }
         }
 
+        if (crossingSkipCount > 0)
+        {
+            _logger.LogInformation(
+                "POST-ONLY: Skipped {SkipCount} orders that would cross spread for market {MarketId}. " +
+                "Grid will shift when price stabilizes.",
+                crossingSkipCount, marketId);
+        }
+
         if (validatedLevels.Count == 0)
         {
             _logger.LogWarning(
-                "PRE-TRADE: All {Count} orders rejected for market {MarketId}. No orders will be placed.",
+                "PRE-TRADE: All {Count} orders rejected/skipped for market {MarketId}. No orders will be placed.",
                 levels.Count, marketId);
 
             return new GridPlacementResult { OrdersPlaced = 0, OrdersFailed = rejectedCount };
         }
 
-        if (rejectedCount > 0)
+        if (rejectedCount > 0 || crossingSkipCount > 0)
         {
             _logger.LogInformation(
-                "PRE-TRADE: {Validated}/{Total} orders passed validation for market {MarketId}",
-                validatedLevels.Count, levels.Count, marketId);
+                "PRE-TRADE: {Validated}/{Total} orders passed validation for market {MarketId} (rejected={Rejected}, crossing={Crossing})",
+                validatedLevels.Count, levels.Count, marketId, rejectedCount, crossingSkipCount);
         }
 
         // Place validated orders
