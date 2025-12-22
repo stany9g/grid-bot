@@ -26,13 +26,14 @@
 
   <ItemGroup>
     <!-- Copy native libraries to output directory -->
-    <None Include="Native\signer-arm64.so">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Native\signer-arm64.so</Link>
-    </None>
 	  <None Include="Native\lighter-signer-windows-amd64.dll">
 		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		  <Link>Native\lighter-signer-windows-amd64.dll</Link>
+	  </None>
+
+	  <None Include="Native\signer-arm64.so">
+		  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		  <Link>Native\signer-arm64.so</Link>
 	  </None>
   </ItemGroup>
 
