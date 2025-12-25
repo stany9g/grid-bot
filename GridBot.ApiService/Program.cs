@@ -1,8 +1,12 @@
 using GridBot.ApiService.Components;
 using GridBot.ApiService.Extensions;
 using GridBot.ApiService.Services.MarketData;
+using GridBot.Core.Configuration;
+using GridBot.Core.Services.Adaptive;
+using GridBot.Core.Services.Configuration;
 using GridBot.Lighter;
 using Microsoft.AspNetCore.Hosting.StaticWebAssets;
+using Microsoft.Extensions.Options;
 using MudBlazor.Services;
 using Scalar.AspNetCore;
 
@@ -68,6 +72,108 @@ public partial class Program
             await engine.ResumeAsync(ct);
             return Results.Ok(new { Success = true });
         }).WithName("ResumeTrading");
+
+        // Configuration endpoints
+        var config = app.MapGroup("/api/config").WithTags("Configuration");
+
+        config.MapGet("/", (IGridConfigurationService configService) =>
+        {
+            return Results.Ok(configService.Current);
+        }).WithName("GetConfiguration");
+
+        config.MapPut("/", async (RuntimeGridConfig incomingConfig, IGridConfigurationService configService, CancellationToken ct) =>
+        {
+            var errors = incomingConfig.Validate();
+            if (errors.Count > 0)
+            {
+                return Results.BadRequest(new { Errors = errors });
+            }
+
+            await configService.UpdateAsync(c =>
+            {
+                // Grid Strategy (auto-tunable)
+                c.GridSpacingPercent.Value = incomingConfig.GridSpacingPercent.Value;
+                c.GridSpacingPercent.IsAuto = incomingConfig.GridSpacingPercent.IsAuto;
+                c.BuyLevels.Value = incomingConfig.BuyLevels.Value;
+                c.BuyLevels.IsAuto = incomingConfig.BuyLevels.IsAuto;
+                c.SellLevels.Value = incomingConfig.SellLevels.Value;
+                c.SellLevels.IsAuto = incomingConfig.SellLevels.IsAuto;
+                c.OrderSizeUsdc.Value = incomingConfig.OrderSizeUsdc.Value;
+                c.OrderSizeUsdc.IsAuto = incomingConfig.OrderSizeUsdc.IsAuto;
+
+                // Risk configuration (fixed)
+                c.MaxDailyLossPercent = incomingConfig.MaxDailyLossPercent;
+                c.FlashCrashThresholdPercent = incomingConfig.FlashCrashThresholdPercent;
+                c.PauseCooldownMinutes = incomingConfig.PauseCooldownMinutes;
+                c.MaxPositionPercent = incomingConfig.MaxPositionPercent;
+
+                // Exchange configuration (fixed)
+                c.Market = incomingConfig.Market;
+                c.MarketIndex = incomingConfig.MarketIndex;
+                c.Leverage = incomingConfig.Leverage;
+
+                // Timing configuration (fixed)
+                c.LoopIntervalSeconds = incomingConfig.LoopIntervalSeconds;
+                c.UsePostOnlyOrders = incomingConfig.UsePostOnlyOrders;
+            }, ct);
+
+            return Results.Ok(configService.Current);
+        }).WithName("UpdateConfiguration");
+
+        config.MapPost("/reset", async (IGridConfigurationService configService, CancellationToken ct) =>
+        {
+            await configService.ResetToDefaultsAsync(ct);
+            return Results.Ok(configService.Current);
+        }).WithName("ResetConfiguration");
+
+        config.MapGet("/suggestions", async (
+            IAdaptiveParameterService adaptiveService,
+            IGridConfigurationService configService,
+            ILighterQueryClient queryClient,
+            IOptions<LighterOptions> lighterOptions,
+            CancellationToken ct) =>
+        {
+            var account = await queryClient.GetAccountAsync(lighterOptions.Value.AccountIndex, ct);
+            var equity = decimal.TryParse(account.TotalAssetValue, out var val) ? val : 0m;
+
+            var suggestions = await adaptiveService.CalculateSuggestionsAsync(
+                configService.Current.MarketIndex,
+                equity,
+                ct);
+
+            return Results.Ok(suggestions);
+        }).WithName("GetSuggestions");
+
+        config.MapGet("/markets", async (IMarketResolver marketResolver, CancellationToken ct) =>
+        {
+            var markets = await marketResolver.GetAvailableMarketsAsync(ct);
+            return Results.Ok(markets);
+        }).WithName("GetAvailableMarkets");
+
+        config.MapPost("/apply-suggestions", async (
+            IGridConfigurationService configService,
+            IAdaptiveParameterService adaptiveService,
+            ILighterQueryClient queryClient,
+            IOptions<LighterOptions> lighterOptions,
+            CancellationToken ct) =>
+        {
+            var account = await queryClient.GetAccountAsync(lighterOptions.Value.AccountIndex, ct);
+            var equity = decimal.TryParse(account.TotalAssetValue, out var val) ? val : 0m;
+
+            var suggestions = await adaptiveService.CalculateSuggestionsAsync(
+                configService.Current.MarketIndex,
+                equity,
+                ct);
+
+            configService.UpdateSuggestions(
+                suggestions.SuggestedSpacing,
+                suggestions.SuggestedBuyLevels,
+                suggestions.SuggestedSellLevels,
+                suggestions.SuggestedOrderSize);
+
+            await configService.SaveAsync(ct);
+            return Results.Ok(configService.Current);
+        }).WithName("ApplySuggestions");
 
         app.MapDefaultEndpoints();
         app.MapRazorComponents<App>().AddInteractiveServerRenderMode();

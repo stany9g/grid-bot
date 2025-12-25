@@ -1,8 +1,11 @@
 using GridBot.ApiService.Services;
+using GridBot.ApiService.Services.Adaptive;
 using GridBot.ApiService.Services.Dashboard;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.Telemetry;
 using GridBot.Core.Extensions;
+using GridBot.Core.Services.Adaptive;
+using GridBot.TrendIntelligence.Extensions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenTelemetry.Metrics;
@@ -28,6 +31,12 @@ public static class TradingBotExtensions
 
         // Core trading engine from GridBot.Core
         services.AddGridBotCore(configuration);
+
+        // TrendIntelligence for IIndicatorService (used by AdaptiveParameterService)
+        services.AddTrendIntelligence();
+
+        // Adaptive parameter service for auto-tuning suggestions
+        services.AddSingleton<IAdaptiveParameterService, AdaptiveParameterService>();
 
         // Market data services
         services.AddSingleton<IMarketResolver, MarketResolver>();

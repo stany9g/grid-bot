@@ -1,17 +1,17 @@
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
+using GridBot.Core.Services.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace GridBot.Core.Services.Risk;
 
 /// <summary>
 /// Basic risk monitor with flash crash detection and daily loss limit.
-/// Thread-safe implementation.
+/// Thread-safe implementation using runtime configuration.
 /// </summary>
 public sealed class BasicRiskMonitor : IBasicRiskMonitor
 {
-    private readonly SimpleGridConfig _config;
+    private readonly IGridConfigurationService _configService;
     private readonly ILogger<BasicRiskMonitor> _logger;
     private readonly object _lock = new();
 
@@ -24,14 +24,11 @@ public sealed class BasicRiskMonitor : IBasicRiskMonitor
     private DateOnly _currentDay;
 
     public BasicRiskMonitor(
-        IOptions<SimpleGridConfig> config,
+        IGridConfigurationService configService,
         ILogger<BasicRiskMonitor> logger)
     {
-        ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(logger);
-
-        _config = config.Value;
-        _logger = logger;
+        _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _currentDay = DateOnly.FromDateTime(DateTime.UtcNow);
     }
 
@@ -120,8 +117,9 @@ public sealed class BasicRiskMonitor : IBasicRiskMonitor
 
         // Calculate drop percentage
         var dropPercent = (highestPrice - currentPrice) / highestPrice * 100;
+        var threshold = _configService.Current.FlashCrashThresholdPercent;
 
-        if (dropPercent >= _config.FlashCrashThresholdPercent)
+        if (dropPercent >= threshold)
         {
             return RiskStatus.FlashCrash(dropPercent);
         }
@@ -136,10 +134,11 @@ public sealed class BasicRiskMonitor : IBasicRiskMonitor
 
         // Calculate loss percentage
         var lossPercent = (_startOfDayEquity - currentEquity) / _startOfDayEquity * 100;
+        var maxLoss = _configService.Current.MaxDailyLossPercent;
 
-        if (lossPercent >= _config.MaxDailyLossPercent)
+        if (lossPercent >= maxLoss)
         {
-            return RiskStatus.DailyLossLimit(lossPercent, _config.MaxDailyLossPercent);
+            return RiskStatus.DailyLossLimit(lossPercent, maxLoss);
         }
 
         return RiskStatus.Safe;

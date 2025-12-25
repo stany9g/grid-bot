@@ -1,0 +1,145 @@
+@using MudBlazor
+@using GridBot.Core.Configuration
+
+<div class="d-flex flex-column gap-2">
+    <div class="d-flex align-center justify-space-between">
+        <MudText Typo="Typo.subtitle2">@Label</MudText>
+        <div class="d-flex align-center gap-2">
+            @if (IsAuto && SuggestedValue.HasValue)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined">
+                    Suggested: @SuggestedValue.Value
+                </MudChip>
+            }
+            <MudSwitch T="bool"
+                       Value="@IsAuto"
+                       ValueChanged="OnAutoToggled"
+                       Color="Color.Primary"
+                       Size="Size.Small"
+                       Label="Auto" />
+        </div>
+    </div>
+
+    <MudNumericField T="int"
+                     Value="@Value"
+                     ValueChanged="OnValueChanged"
+                     Min="@Min"
+                     Max="@Max"
+                     Step="1"
+                     Disabled="@IsAuto"
+                     Variant="Variant.Outlined"
+                     Margin="Margin.Dense"
+                     Adornment="Adornment.End"
+                     AdornmentText="levels" />
+
+    @if (ShowWarning)
+    {
+        <MudAlert Severity="@WarningSeverity" Dense="true" Class="mt-1">
+            @WarningMessage
+        </MudAlert>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Label { get; set; } = string.Empty;
+
+    [Parameter]
+    public int Value { get; set; }
+
+    [Parameter]
+    public EventCallback<int> ValueChanged { get; set; }
+
+    [Parameter]
+    public int? SuggestedValue { get; set; }
+
+    [Parameter]
+    public bool IsAuto { get; set; }
+
+    [Parameter]
+    public EventCallback<bool> IsAutoChanged { get; set; }
+
+    [Parameter]
+    public int Min { get; set; } = 2;
+
+    [Parameter]
+    public int Max { get; set; } = 30;
+
+    private bool ShowWarning => !IsAuto && GetWarningLevel() != WarningLevel.None;
+
+    private Severity WarningSeverity => GetWarningLevel() switch
+    {
+        WarningLevel.Danger => Severity.Error,
+        WarningLevel.Warning => Severity.Warning,
+        WarningLevel.Info => Severity.Info,
+        _ => Severity.Normal
+    };
+
+    private string WarningMessage => GetWarningMessage();
+
+    private async Task OnValueChanged(int newValue)
+    {
+        await ValueChanged.InvokeAsync(newValue);
+    }
+
+    private async Task OnAutoToggled(bool newValue)
+    {
+        await IsAutoChanged.InvokeAsync(newValue);
+    }
+
+    private WarningLevel GetWarningLevel()
+    {
+        if (IsAuto) return WarningLevel.None;
+
+        // Too few levels
+        if (Value < 3) return WarningLevel.Warning;
+
+        // Too many levels
+        if (Value > 25) return WarningLevel.Warning;
+
+        // Check deviation from suggestion
+        if (SuggestedValue.HasValue && SuggestedValue.Value > 0)
+        {
+            var ratio = (decimal)Value / SuggestedValue.Value;
+            if (ratio < 0.5m) return WarningLevel.Warning;
+            if (ratio > 2.0m) return WarningLevel.Warning;
+            if (ratio < 0.8m || ratio > 1.25m) return WarningLevel.Info;
+        }
+
+        return WarningLevel.None;
+    }
+
+    private string GetWarningMessage()
+    {
+        if (IsAuto) return string.Empty;
+
+        if (Value < 3)
+            return "Too few levels may result in insufficient grid coverage.";
+
+        if (Value > 25)
+            return "Too many levels may cause order management overhead.";
+
+        if (SuggestedValue.HasValue && SuggestedValue.Value > 0)
+        {
+            var ratio = (decimal)Value / SuggestedValue.Value;
+            if (ratio < 0.5m)
+                return $"Value is significantly below suggestion ({SuggestedValue.Value}).";
+            if (ratio > 2.0m)
+                return $"Value is significantly above suggestion ({SuggestedValue.Value}).";
+            if (ratio < 0.8m)
+                return $"Value is below suggestion ({SuggestedValue.Value}).";
+            if (ratio > 1.25m)
+                return $"Value is above suggestion ({SuggestedValue.Value}).";
+        }
+
+        return string.Empty;
+    }
+
+    private enum WarningLevel
+    {
+        None,
+        Info,
+        Warning,
+        Danger
+    }
+}

@@ -1,0 +1,184 @@
+@using MudBlazor
+@using GridBot.Core.Configuration
+
+<div class="d-flex flex-column gap-2">
+    <div class="d-flex align-center justify-space-between">
+        <MudText Typo="Typo.subtitle2">@Label</MudText>
+        <div class="d-flex align-center gap-2">
+            @if (IsAuto && SuggestedValue.HasValue)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined">
+                    Suggested: @FormatValue(SuggestedValue.Value)
+                </MudChip>
+            }
+            <MudSwitch T="bool"
+                       Value="@IsAuto"
+                       ValueChanged="OnAutoToggled"
+                       Color="Color.Primary"
+                       Size="Size.Small"
+                       Label="Auto" />
+        </div>
+    </div>
+
+    <div class="d-flex align-center gap-3">
+        @if (UseSlider)
+        {
+            <MudSlider T="decimal"
+                       Value="@Value"
+                       ValueChanged="OnValueChanged"
+                       Min="@Min"
+                       Max="@Max"
+                       Step="@Step"
+                       Disabled="@IsAuto"
+                       Color="Color.Primary"
+                       Class="flex-grow-1" />
+        }
+
+        <MudNumericField T="decimal"
+                         Value="@Value"
+                         ValueChanged="OnValueChanged"
+                         Min="@Min"
+                         Max="@Max"
+                         Step="@Step"
+                         Disabled="@IsAuto"
+                         Variant="Variant.Outlined"
+                         Margin="Margin.Dense"
+                         Adornment="@(string.IsNullOrEmpty(Unit) ? Adornment.None : Adornment.End)"
+                         AdornmentText="@Unit"
+                         Style="@(UseSlider ? "width: 120px;" : "width: 100%;")" />
+    </div>
+
+    @if (ShowWarning)
+    {
+        <MudAlert Severity="@WarningSeverity" Dense="true" Class="mt-1">
+            @WarningMessage
+        </MudAlert>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Label { get; set; } = string.Empty;
+
+    [Parameter]
+    public decimal Value { get; set; }
+
+    [Parameter]
+    public EventCallback<decimal> ValueChanged { get; set; }
+
+    [Parameter]
+    public decimal? SuggestedValue { get; set; }
+
+    [Parameter]
+    public bool IsAuto { get; set; }
+
+    [Parameter]
+    public EventCallback<bool> IsAutoChanged { get; set; }
+
+    [Parameter]
+    public decimal Min { get; set; }
+
+    [Parameter]
+    public decimal Max { get; set; }
+
+    [Parameter]
+    public decimal Step { get; set; } = 0.01m;
+
+    [Parameter]
+    public string Unit { get; set; } = string.Empty;
+
+    [Parameter]
+    public bool UseSlider { get; set; } = true;
+
+    // Warning thresholds (from risk assessment)
+    [Parameter]
+    public decimal? DangerouslyLowThreshold { get; set; }
+
+    [Parameter]
+    public decimal? DangerouslyHighThreshold { get; set; }
+
+    private bool ShowWarning => !IsAuto && GetWarningLevel() != WarningLevel.None;
+
+    private Severity WarningSeverity => GetWarningLevel() switch
+    {
+        WarningLevel.Danger => Severity.Error,
+        WarningLevel.Warning => Severity.Warning,
+        WarningLevel.Info => Severity.Info,
+        _ => Severity.Normal
+    };
+
+    private string WarningMessage => GetWarningMessage();
+
+    private async Task OnValueChanged(decimal newValue)
+    {
+        await ValueChanged.InvokeAsync(newValue);
+    }
+
+    private async Task OnAutoToggled(bool newValue)
+    {
+        await IsAutoChanged.InvokeAsync(newValue);
+    }
+
+    private string FormatValue(decimal value)
+    {
+        var formatted = value.ToString("0.##");
+        return string.IsNullOrEmpty(Unit) ? formatted : $"{formatted}{Unit}";
+    }
+
+    private WarningLevel GetWarningLevel()
+    {
+        if (IsAuto) return WarningLevel.None;
+
+        // Check dangerous thresholds
+        if (DangerouslyLowThreshold.HasValue && Value < DangerouslyLowThreshold.Value)
+            return WarningLevel.Danger;
+        if (DangerouslyHighThreshold.HasValue && Value > DangerouslyHighThreshold.Value)
+            return WarningLevel.Danger;
+
+        // Check deviation from suggestion
+        if (SuggestedValue.HasValue && SuggestedValue.Value > 0)
+        {
+            var ratio = Value / SuggestedValue.Value;
+            if (ratio < 0.5m) return WarningLevel.Warning; // TooTight: < 50% of suggestion
+            if (ratio > 2.0m) return WarningLevel.Warning; // TooWide: > 200% of suggestion
+            if (ratio < 0.8m || ratio > 1.25m) return WarningLevel.Info; // Mild deviation
+        }
+
+        return WarningLevel.None;
+    }
+
+    private string GetWarningMessage()
+    {
+        if (IsAuto) return string.Empty;
+
+        // Check dangerous thresholds
+        if (DangerouslyLowThreshold.HasValue && Value < DangerouslyLowThreshold.Value)
+            return $"Value is dangerously low. Minimum recommended: {FormatValue(DangerouslyLowThreshold.Value)}";
+        if (DangerouslyHighThreshold.HasValue && Value > DangerouslyHighThreshold.Value)
+            return $"Value is dangerously high. Maximum recommended: {FormatValue(DangerouslyHighThreshold.Value)}";
+
+        // Check deviation from suggestion
+        if (SuggestedValue.HasValue && SuggestedValue.Value > 0)
+        {
+            var ratio = Value / SuggestedValue.Value;
+            if (ratio < 0.5m)
+                return $"Value is significantly below suggestion ({FormatValue(SuggestedValue.Value)}). May not perform optimally.";
+            if (ratio > 2.0m)
+                return $"Value is significantly above suggestion ({FormatValue(SuggestedValue.Value)}). May miss opportunities.";
+            if (ratio < 0.8m)
+                return $"Value is below suggestion ({FormatValue(SuggestedValue.Value)}).";
+            if (ratio > 1.25m)
+                return $"Value is above suggestion ({FormatValue(SuggestedValue.Value)}).";
+        }
+
+        return string.Empty;
+    }
+
+    private enum WarningLevel
+    {
+        None,
+        Info,
+        Warning,
+        Danger
+    }
+}

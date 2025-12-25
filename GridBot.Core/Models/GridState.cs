@@ -67,11 +67,13 @@ public sealed class GridState
 
     /// <summary>
     /// Number of active buy orders.
+    /// Computed directly from Levels to avoid multiple enumeration.
     /// </summary>
-    public int ActiveBuyOrderCount => BuyLevels.Count(l => l.HasActiveOrder);
+    public int ActiveBuyOrderCount => Levels.Count(l => l.IsBuy && l.HasActiveOrder);
 
     /// <summary>
     /// Number of active sell orders.
+    /// Computed directly from Levels to avoid multiple enumeration.
     /// </summary>
-    public int ActiveSellOrderCount => SellLevels.Count(l => l.HasActiveOrder);
+    public int ActiveSellOrderCount => Levels.Count(l => !l.IsBuy && l.HasActiveOrder);
 }

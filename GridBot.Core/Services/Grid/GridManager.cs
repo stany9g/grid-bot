@@ -1,5 +1,6 @@
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
+using GridBot.Core.Services.Configuration;
 using GridBot.Lighter;
 using GridBot.Lighter.Models;
 using Microsoft.Extensions.Logging;
@@ -9,7 +10,7 @@ namespace GridBot.Core.Services.Grid;
 
 public sealed class GridManager : IGridManager
 {
-    private readonly SimpleGridConfig _config;
+    private readonly IGridConfigurationService _configService;
     private readonly LighterOptions _lighterOptions;
     private readonly IGridCalculator _calculator;
     private readonly ILighterCommandClient _commandClient;
@@ -19,25 +20,19 @@ public sealed class GridManager : IGridManager
     private readonly GridState _state = new();
 
     public GridManager(
-        IOptions<SimpleGridConfig> config,
+        IGridConfigurationService configService,
         IOptions<LighterOptions> lighterOptions,
         IGridCalculator calculator,
         ILighterCommandClient commandClient,
         ILighterQueryClient queryClient,
         ILogger<GridManager> logger)
     {
-        ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(lighterOptions);
-        ArgumentNullException.ThrowIfNull(calculator);
-        ArgumentNullException.ThrowIfNull(commandClient);
-        ArgumentNullException.ThrowIfNull(queryClient);
-        ArgumentNullException.ThrowIfNull(logger);
-        _config = config.Value;
-        _lighterOptions = lighterOptions.Value;
-        _calculator = calculator;
-        _commandClient = commandClient;
-        _queryClient = queryClient;
-        _logger = logger;
+        _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+        _lighterOptions = lighterOptions?.Value ?? throw new ArgumentNullException(nameof(lighterOptions));
+        _calculator = calculator ?? throw new ArgumentNullException(nameof(calculator));
+        _commandClient = commandClient ?? throw new ArgumentNullException(nameof(commandClient));
+        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
     public GridState State => _state;
@@ -82,7 +77,7 @@ public sealed class GridManager : IGridManager
             await CancelAllOrdersInternalAsync(cancellationToken).ConfigureAwait(false);
             _state.State = TradingState.Paused;
             _state.PauseReason = reason;
-            _state.CooldownUntil = DateTimeOffset.UtcNow.AddMinutes(_config.PauseCooldownMinutes);
+            _state.CooldownUntil = DateTimeOffset.UtcNow.AddMinutes(_configService.Current.PauseCooldownMinutes);
         }
         finally { _lock.Release(); }
     }
@@ -113,21 +108,23 @@ public sealed class GridManager : IGridManager
 
     private async Task CancelAllOrdersInternalAsync(CancellationToken cancellationToken)
     {
-        var response = await _commandClient.CancelAllOrdersAsync(_config.MarketIndex, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var config = _configService.Current;
+        await _commandClient.CancelAllOrdersAsync(config.MarketIndex, cancellationToken: cancellationToken).ConfigureAwait(false);
         _state.Levels = _state.Levels.Select(l => l.WithoutOrder()).ToList();
     }
 
     private async Task PlaceGridOrdersAsync(List<GridLevel> levels, CancellationToken cancellationToken)
     {
+        var config = _configService.Current;
         var requests = levels.Select(level => new CreateOrderRequest
         {
-            MarketIndex = _config.MarketIndex,
+            MarketIndex = config.MarketIndex,
             ClientOrderIndex = level.ClientOrderIndex,
             BaseAmount = _calculator.ToScaledAmount(level.Size),
             Price = _calculator.ToScaledPrice(level.Price),
             IsAsk = !level.IsBuy,
             OrderType = OrderType.Limit,
-            TimeInForce = _config.UsePostOnlyOrders ? TimeInForce.PostOnly : TimeInForce.GoodTillTime
+            TimeInForce = config.UsePostOnlyOrders ? TimeInForce.PostOnly : TimeInForce.GoodTillTime
         }).ToArray();
         if (requests.Length == 0) return;
         await _commandClient.CreateOrderBatchAsync(requests, cancellationToken).ConfigureAwait(false);
@@ -135,21 +132,23 @@ public sealed class GridManager : IGridManager
 
     private async Task SyncWithExchangeAsync(CancellationToken cancellationToken)
     {
+        var config = _configService.Current;
         var (authToken, error) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
         if (error != null) return;
-        var activeOrders = await _queryClient.GetActiveOrdersAsync(_lighterOptions.AccountIndex, _config.MarketIndex, authToken!, cancellationToken).ConfigureAwait(false);
+        var activeOrders = await _queryClient.GetActiveOrdersAsync(_lighterOptions.AccountIndex, config.MarketIndex, authToken!, cancellationToken).ConfigureAwait(false);
         var activeOrderIds = activeOrders.Select(o => long.Parse(o.OrderId)).ToHashSet();
-        _state.Levels = _state.Levels.Select(level => 
-            level.OrderId.HasValue && !activeOrderIds.Contains(level.OrderId.Value) 
-                ? level.WithoutOrder() 
+        _state.Levels = _state.Levels.Select(level =>
+            level.OrderId.HasValue && !activeOrderIds.Contains(level.OrderId.Value)
+                ? level.WithoutOrder()
                 : level).ToList();
     }
 
     private bool ShouldShiftGrid(decimal currentPrice)
     {
         if (_state.CenterPrice <= 0) return false;
+        var config = _configService.Current;
         var priceChange = Math.Abs(currentPrice - _state.CenterPrice) / _state.CenterPrice * 100;
-        return priceChange >= _config.GridSpacingPercent / 2;
+        return priceChange >= config.GridSpacingPercent.EffectiveValue / 2;
     }
 
     private async Task ShiftGridAsync(decimal newCenterPrice, CancellationToken cancellationToken)

@@ -1,6 +1,11 @@
 namespace GridBot.ApiService.Services.MarketData;
 
 /// <summary>
+/// Available market information.
+/// </summary>
+public sealed record MarketInfo(int MarketId, string Symbol, string BaseAsset, bool IsActive);
+
+/// <summary>
 /// Resolves market symbols to their corresponding market IDs at runtime.
 /// </summary>
 public interface IMarketResolver
@@ -25,11 +30,23 @@ public interface IMarketResolver
     /// <summary>
     /// Initializes the resolver by fetching order books and resolving the symbol.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns true if initialized successfully.
     /// </summary>
     bool IsInitialized { get; }
+
+    /// <summary>
+    /// Resolves a market symbol to its market ID.
+    /// </summary>
+    /// <param name="symbol">Symbol like "BTC" or "ETH".</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Market ID, or null if not found.</returns>
+    Task<int?> ResolveMarketIndexAsync(string symbol, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all available markets from the exchange.
+    /// </summary>
+    Task<IReadOnlyList<MarketInfo>> GetAvailableMarketsAsync(CancellationToken cancellationToken = default);
 }

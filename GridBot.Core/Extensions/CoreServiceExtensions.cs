@@ -1,4 +1,5 @@
 using GridBot.Core.Configuration;
+using GridBot.Core.Services.Configuration;
 using GridBot.Core.Services.Engine;
 using GridBot.Core.Services.Grid;
 using GridBot.Core.Services.Risk;
@@ -30,7 +31,10 @@ public static class CoreServiceExtensions
         services.Configure<SimpleGridConfig>(
             configuration.GetSection(SimpleGridConfig.SectionName));
 
-        // Register services
+        // Register configuration service (singleton for runtime config management)
+        services.AddSingleton<IGridConfigurationService, GridConfigurationService>();
+
+        // Register trading services
         services.AddSingleton<IGridCalculator, GridCalculator>();
         services.AddSingleton<IBasicRiskMonitor, BasicRiskMonitor>();
         services.AddSingleton<IGridManager, GridManager>();

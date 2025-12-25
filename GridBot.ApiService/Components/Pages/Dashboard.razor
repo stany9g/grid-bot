@@ -10,6 +10,22 @@
 
 <PageTitle>ALTE Grid Bot Dashboard</PageTitle>
 
+@* Settings Drawer *@
+<MudDrawer @bind-Open="_settingsDrawerOpen"
+           Anchor="Anchor.End"
+           Elevation="1"
+           Variant="DrawerVariant.Temporary"
+           Width="500px">
+    <MudDrawerHeader>
+        <div class="d-flex justify-space-between align-center" style="width: 100%;">
+            <MudText Typo="Typo.h6">Settings</MudText>
+            <MudIconButton Icon="@Icons.Material.Filled.Close"
+                           OnClick="@(() => _settingsDrawerOpen = false)" />
+        </div>
+    </MudDrawerHeader>
+    <SettingsPanel />
+</MudDrawer>
+
 <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="py-4">
     @* Header *@
     <div class="d-flex justify-space-between align-center mb-4">
@@ -29,6 +45,10 @@
                 <MudIconButton Icon="@Icons.Material.Filled.Refresh"
                                OnClick="RefreshDashboard"
                                Disabled="_isRefreshing" />
+            </MudTooltip>
+            <MudTooltip Text="Settings">
+                <MudIconButton Icon="@Icons.Material.Filled.Settings"
+                               OnClick="@(() => _settingsDrawerOpen = true)" />
             </MudTooltip>
             <MudText Typo="Typo.caption" Color="Color.Secondary">
                 Updated: @_state.LastUpdated.ToLocalTime().ToString("HH:mm:ss")
@@ -108,6 +128,7 @@
     private bool _autoRefresh = true;
     private bool _isLoading = true;
     private bool _isRefreshing;
+    private bool _settingsDrawerOpen;
 
     protected override void OnInitialized()
     {

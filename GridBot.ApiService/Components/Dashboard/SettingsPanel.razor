@@ -1,0 +1,585 @@
+@using MudBlazor
+@using GridBot.Core.Configuration
+@using GridBot.Core.Services.Configuration
+@using GridBot.Core.Services.Adaptive
+@using GridBot.Core.Models
+@using GridBot.ApiService.Services.MarketData
+@inject IGridConfigurationService ConfigService
+@inject IMarketResolver MarketResolver
+@inject IAdaptiveParameterService AdaptiveService
+@inject ISnackbar Snackbar
+@implements IDisposable
+
+<MudPaper Elevation="0" Class="pa-4">
+    <div class="d-flex justify-space-between align-center mb-4">
+        <MudText Typo="Typo.h6">
+            <MudIcon Icon="@Icons.Material.Filled.Settings" Class="mr-2" />
+            Grid Configuration
+        </MudText>
+        <div class="d-flex gap-2">
+            <MudButton Variant="Variant.Text"
+                       Color="Color.Secondary"
+                       Size="Size.Small"
+                       OnClick="RefreshSuggestions"
+                       Disabled="@_isLoading">
+                <MudIcon Icon="@Icons.Material.Filled.AutoAwesome" Size="Size.Small" Class="mr-1" />
+                Refresh Suggestions
+            </MudButton>
+        </div>
+    </div>
+
+    @if (_isLoading)
+    {
+        <MudProgressLinear Indeterminate="true" Color="Color.Primary" Class="mb-4" />
+    }
+
+    @if (_validationErrors.Count > 0)
+    {
+        <MudAlert Severity="Severity.Error" Class="mb-4">
+            <MudText Typo="Typo.subtitle2">Configuration Errors:</MudText>
+            <ul class="mb-0">
+                @foreach (var error in _validationErrors)
+                {
+                    <li>@error</li>
+                }
+            </ul>
+        </MudAlert>
+    }
+
+    <MudExpansionPanels MultiExpansion="true">
+        @* Grid Strategy Panel *@
+        <MudExpansionPanel @bind-Expanded="@_gridPanelExpanded">
+            <TitleContent>
+                <div class="d-flex align-center gap-2">
+                    <MudIcon Icon="@Icons.Material.Filled.GridOn" />
+                    <MudText>Grid Strategy</MudText>
+                    @if (_config.GridSpacingPercent.IsAuto || _config.BuyLevels.IsAuto || _config.SellLevels.IsAuto || _config.OrderSizeUsdc.IsAuto)
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Outlined">Auto</MudChip>
+                    }
+                </div>
+            </TitleContent>
+            <ChildContent>
+                <div class="d-flex flex-column gap-4 pa-2">
+                    <ConfigSlider Label="Grid Spacing"
+                                  Value="@_config.GridSpacingPercent.Value"
+                                  ValueChanged="@(v => UpdateGridSpacing(v))"
+                                  SuggestedValue="@_config.GridSpacingPercent.SuggestedValue"
+                                  IsAuto="@_config.GridSpacingPercent.IsAuto"
+                                  IsAutoChanged="@(v => UpdateGridSpacingAuto(v))"
+                                  Min="@HardLimits.MinGridSpacingPercent"
+                                  Max="@HardLimits.MaxGridSpacingPercent"
+                                  Step="0.05m"
+                                  Unit="%"
+                                  DangerouslyLowThreshold="0.25m"
+                                  DangerouslyHighThreshold="3.0m" />
+
+                    <div class="d-flex gap-4">
+                        <div class="flex-grow-1">
+                            <ConfigLevelsInput Label="Buy Levels"
+                                               Value="@_config.BuyLevels.Value"
+                                               ValueChanged="@(v => UpdateBuyLevels(v))"
+                                               SuggestedValue="@_config.BuyLevels.SuggestedValue"
+                                               IsAuto="@_config.BuyLevels.IsAuto"
+                                               IsAutoChanged="@(v => UpdateBuyLevelsAuto(v))"
+                                               Min="@HardLimits.MinLevelsPerSide"
+                                               Max="@HardLimits.MaxLevelsPerSide" />
+                        </div>
+                        <div class="flex-grow-1">
+                            <ConfigLevelsInput Label="Sell Levels"
+                                               Value="@_config.SellLevels.Value"
+                                               ValueChanged="@(v => UpdateSellLevels(v))"
+                                               SuggestedValue="@_config.SellLevels.SuggestedValue"
+                                               IsAuto="@_config.SellLevels.IsAuto"
+                                               IsAutoChanged="@(v => UpdateSellLevelsAuto(v))"
+                                               Min="@HardLimits.MinLevelsPerSide"
+                                               Max="@HardLimits.MaxLevelsPerSide" />
+                        </div>
+                    </div>
+
+                    <ConfigSlider Label="Order Size"
+                                  Value="@_config.OrderSizeUsdc.Value"
+                                  ValueChanged="@(v => UpdateOrderSize(v))"
+                                  SuggestedValue="@_config.OrderSizeUsdc.SuggestedValue"
+                                  IsAuto="@_config.OrderSizeUsdc.IsAuto"
+                                  IsAutoChanged="@(v => UpdateOrderSizeAuto(v))"
+                                  Min="@HardLimits.MinOrderSizeUsdc"
+                                  Max="@HardLimits.MaxOrderSizeAbsolute"
+                                  Step="10m"
+                                  Unit=" USDC"
+                                  UseSlider="false"
+                                  DangerouslyLowThreshold="15m" />
+                </div>
+            </ChildContent>
+        </MudExpansionPanel>
+
+        @* Risk Management Panel *@
+        <MudExpansionPanel>
+            <TitleContent>
+                <div class="d-flex align-center gap-2">
+                    <MudIcon Icon="@Icons.Material.Filled.Shield" />
+                    <MudText>Risk Management</MudText>
+                </div>
+            </TitleContent>
+            <ChildContent>
+                <div class="d-flex flex-column gap-4 pa-2">
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Max Daily Loss</MudText>
+                        <MudSlider T="decimal"
+                                   Value="@_config.MaxDailyLossPercent"
+                                   ValueChanged="@(v => UpdateMaxDailyLoss(v))"
+                                   Min="@HardLimits.MinDailyLossPercent"
+                                   Max="@HardLimits.MaxDailyLossPercent"
+                                   Step="0.5m"
+                                   Color="Color.Error" />
+                        <div class="d-flex justify-space-between">
+                            <MudText Typo="Typo.caption">@HardLimits.MinDailyLossPercent%</MudText>
+                            <MudText Typo="Typo.body2" Color="Color.Error">@_config.MaxDailyLossPercent%</MudText>
+                            <MudText Typo="Typo.caption">@HardLimits.MaxDailyLossPercent%</MudText>
+                        </div>
+                    </div>
+
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Flash Crash Threshold</MudText>
+                        <MudSlider T="decimal"
+                                   Value="@_config.FlashCrashThresholdPercent"
+                                   ValueChanged="@(v => UpdateFlashCrashThreshold(v))"
+                                   Min="@HardLimits.MinFlashCrashThresholdPercent"
+                                   Max="@HardLimits.MaxFlashCrashThresholdPercent"
+                                   Step="0.5m"
+                                   Color="Color.Warning" />
+                        <div class="d-flex justify-space-between">
+                            <MudText Typo="Typo.caption">@HardLimits.MinFlashCrashThresholdPercent%</MudText>
+                            <MudText Typo="Typo.body2" Color="Color.Warning">@_config.FlashCrashThresholdPercent%</MudText>
+                            <MudText Typo="Typo.caption">@HardLimits.MaxFlashCrashThresholdPercent%</MudText>
+                        </div>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mt-1">
+                            Trading pauses if price drops this percentage in 1 minute
+                        </MudText>
+                    </div>
+
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Pause Cooldown</MudText>
+                        <MudNumericField T="int"
+                                         Value="@_config.PauseCooldownMinutes"
+                                         ValueChanged="@(v => UpdatePauseCooldown(v))"
+                                         Min="1"
+                                         Max="120"
+                                         Variant="Variant.Outlined"
+                                         Margin="Margin.Dense"
+                                         Adornment="Adornment.End"
+                                         AdornmentText="minutes" />
+                    </div>
+
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Max Position Size</MudText>
+                        <MudSlider T="decimal"
+                                   Value="@_config.MaxPositionPercent"
+                                   ValueChanged="@(v => UpdateMaxPosition(v))"
+                                   Min="1m"
+                                   Max="50m"
+                                   Step="1m"
+                                   Color="Color.Primary" />
+                        <div class="d-flex justify-space-between">
+                            <MudText Typo="Typo.caption">1%</MudText>
+                            <MudText Typo="Typo.body2">@_config.MaxPositionPercent% of equity</MudText>
+                            <MudText Typo="Typo.caption">50%</MudText>
+                        </div>
+                    </div>
+                </div>
+            </ChildContent>
+        </MudExpansionPanel>
+
+        @* Exchange Panel *@
+        <MudExpansionPanel>
+            <TitleContent>
+                <div class="d-flex align-center gap-2">
+                    <MudIcon Icon="@Icons.Material.Filled.CurrencyExchange" />
+                    <MudText>Exchange</MudText>
+                </div>
+            </TitleContent>
+            <ChildContent>
+                <div class="d-flex flex-column gap-4 pa-2">
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Market</MudText>
+                        <MudSelect T="string"
+                                   Value="@_config.Market"
+                                   ValueChanged="@(v => UpdateMarket(v))"
+                                   Variant="Variant.Outlined"
+                                   Margin="Margin.Dense"
+                                   Label="Select Market"
+                                   AnchorOrigin="Origin.BottomCenter">
+                            @foreach (var market in _availableMarkets)
+                            {
+                                <MudSelectItem Value="@market.BaseAsset">
+                                    @market.Symbol
+                                    @if (!market.IsActive)
+                                    {
+                                        <MudChip T="string" Size="Size.Small" Color="Color.Warning">Inactive</MudChip>
+                                    }
+                                </MudSelectItem>
+                            }
+                        </MudSelect>
+                        @if (_config.MarketIndex > 0)
+                        {
+                            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mt-1">
+                                Market ID: @_config.MarketIndex
+                            </MudText>
+                        }
+                    </div>
+
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Leverage</MudText>
+                        <MudSlider T="int"
+                                   Value="@_config.Leverage"
+                                   ValueChanged="@(v => UpdateLeverage(v))"
+                                   Min="@HardLimits.MinLeverage"
+                                   Max="@HardLimits.MaxLeverage"
+                                   Step="1"
+                                   Color="Color.Secondary" />
+                        <div class="d-flex justify-space-between">
+                            <MudText Typo="Typo.caption">@(HardLimits.MinLeverage)x</MudText>
+                            <MudText Typo="Typo.body2">@(_config.Leverage)x</MudText>
+                            <MudText Typo="Typo.caption">@(HardLimits.MaxLeverage)x</MudText>
+                        </div>
+                        @if (_config.Leverage > 5)
+                        {
+                            <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
+                                High leverage increases liquidation risk
+                            </MudAlert>
+                        }
+                    </div>
+                </div>
+            </ChildContent>
+        </MudExpansionPanel>
+
+        @* Timing Panel *@
+        <MudExpansionPanel>
+            <TitleContent>
+                <div class="d-flex align-center gap-2">
+                    <MudIcon Icon="@Icons.Material.Filled.Timer" />
+                    <MudText>Timing</MudText>
+                </div>
+            </TitleContent>
+            <ChildContent>
+                <div class="d-flex flex-column gap-4 pa-2">
+                    <div>
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Loop Interval</MudText>
+                        <MudNumericField T="int"
+                                         Value="@_config.LoopIntervalSeconds"
+                                         ValueChanged="@(v => UpdateLoopInterval(v))"
+                                         Min="1"
+                                         Max="60"
+                                         Variant="Variant.Outlined"
+                                         Margin="Margin.Dense"
+                                         Adornment="Adornment.End"
+                                         AdornmentText="seconds" />
+                        <MudText Typo="Typo.caption" Color="Color.Secondary" Class="mt-1">
+                            How often the trading loop runs
+                        </MudText>
+                    </div>
+
+                    <div>
+                        <MudSwitch T="bool"
+                                   Value="@_config.UsePostOnlyOrders"
+                                   ValueChanged="@(v => UpdatePostOnly(v))"
+                                   Color="Color.Primary"
+                                   Label="Use Post-Only Orders" />
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">
+                            Post-only orders act as maker orders and never take liquidity
+                        </MudText>
+                    </div>
+                </div>
+            </ChildContent>
+        </MudExpansionPanel>
+    </MudExpansionPanels>
+
+    @* Action Buttons *@
+    <div class="d-flex justify-end gap-2 mt-4">
+        <MudButton Variant="Variant.Outlined"
+                   Color="Color.Secondary"
+                   OnClick="ResetToDefaults"
+                   Disabled="@(_isLoading || _isSaving)">
+            Reset to Defaults
+        </MudButton>
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Primary"
+                   OnClick="SaveConfiguration"
+                   Disabled="@(_isLoading || _isSaving || _validationErrors.Count > 0)">
+            @if (_isSaving)
+            {
+                <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+            }
+            Save Configuration
+        </MudButton>
+    </div>
+</MudPaper>
+
+@code {
+    private RuntimeGridConfig _config = new();
+    private List<MarketInfo> _availableMarkets = [];
+    private List<string> _validationErrors = [];
+    private bool _isLoading = true;
+    private bool _isSaving;
+    private bool _gridPanelExpanded = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _config = CloneConfig(ConfigService.Current);
+        ConfigService.ConfigChanged += OnConfigChanged;
+
+        try
+        {
+            var markets = await MarketResolver.GetAvailableMarketsAsync();
+            _availableMarkets = markets.Where(m => m.IsActive).ToList();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to load markets: {ex.Message}", Severity.Error);
+        }
+
+        _isLoading = false;
+        ValidateConfig();
+    }
+
+    private void OnConfigChanged(object? sender, RuntimeGridConfig newConfig)
+    {
+        _config = CloneConfig(newConfig);
+        ValidateConfig();
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task RefreshSuggestions()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            // Get suggestions from adaptive service
+            var suggestions = await AdaptiveService.CalculateSuggestionsAsync(
+                _config.MarketIndex,
+                1000m); // TODO: Get actual equity from account service
+
+            // Update suggestion values in local config
+            _config.GridSpacingPercent.SuggestedValue = suggestions.SuggestedSpacing;
+            _config.BuyLevels.SuggestedValue = suggestions.SuggestedBuyLevels;
+            _config.SellLevels.SuggestedValue = suggestions.SuggestedSellLevels;
+            _config.OrderSizeUsdc.SuggestedValue = suggestions.SuggestedOrderSize;
+
+            Snackbar.Add($"Suggestions updated: {suggestions.Reasoning}", Severity.Info);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to refresh suggestions: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task SaveConfiguration()
+    {
+        _isSaving = true;
+        StateHasChanged();
+
+        try
+        {
+            await ConfigService.UpdateAsync(config =>
+            {
+                // Copy all values from local config
+                config.GridSpacingPercent.Value = _config.GridSpacingPercent.Value;
+                config.GridSpacingPercent.IsAuto = _config.GridSpacingPercent.IsAuto;
+                config.BuyLevels.Value = _config.BuyLevels.Value;
+                config.BuyLevels.IsAuto = _config.BuyLevels.IsAuto;
+                config.SellLevels.Value = _config.SellLevels.Value;
+                config.SellLevels.IsAuto = _config.SellLevels.IsAuto;
+                config.OrderSizeUsdc.Value = _config.OrderSizeUsdc.Value;
+                config.OrderSizeUsdc.IsAuto = _config.OrderSizeUsdc.IsAuto;
+                config.MaxDailyLossPercent = _config.MaxDailyLossPercent;
+                config.FlashCrashThresholdPercent = _config.FlashCrashThresholdPercent;
+                config.PauseCooldownMinutes = _config.PauseCooldownMinutes;
+                config.MaxPositionPercent = _config.MaxPositionPercent;
+                config.Market = _config.Market;
+                config.Leverage = _config.Leverage;
+                config.LoopIntervalSeconds = _config.LoopIntervalSeconds;
+                config.UsePostOnlyOrders = _config.UsePostOnlyOrders;
+            });
+
+            Snackbar.Add("Configuration saved successfully", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to save configuration: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isSaving = false;
+        }
+    }
+
+    private async Task ResetToDefaults()
+    {
+        try
+        {
+            await ConfigService.ResetToDefaultsAsync();
+            Snackbar.Add("Configuration reset to defaults", Severity.Info);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to reset configuration: {ex.Message}", Severity.Error);
+        }
+    }
+
+    // Update methods for each config value
+    private void UpdateGridSpacing(decimal value)
+    {
+        _config.GridSpacingPercent.Value = value;
+        ValidateConfig();
+    }
+
+    private void UpdateGridSpacingAuto(bool isAuto)
+    {
+        _config.GridSpacingPercent.IsAuto = isAuto;
+        ValidateConfig();
+    }
+
+    private void UpdateBuyLevels(int value)
+    {
+        _config.BuyLevels.Value = value;
+        ValidateConfig();
+    }
+
+    private void UpdateBuyLevelsAuto(bool isAuto)
+    {
+        _config.BuyLevels.IsAuto = isAuto;
+        ValidateConfig();
+    }
+
+    private void UpdateSellLevels(int value)
+    {
+        _config.SellLevels.Value = value;
+        ValidateConfig();
+    }
+
+    private void UpdateSellLevelsAuto(bool isAuto)
+    {
+        _config.SellLevels.IsAuto = isAuto;
+        ValidateConfig();
+    }
+
+    private void UpdateOrderSize(decimal value)
+    {
+        _config.OrderSizeUsdc.Value = value;
+        ValidateConfig();
+    }
+
+    private void UpdateOrderSizeAuto(bool isAuto)
+    {
+        _config.OrderSizeUsdc.IsAuto = isAuto;
+        ValidateConfig();
+    }
+
+    private void UpdateMaxDailyLoss(decimal value)
+    {
+        _config.MaxDailyLossPercent = value;
+        ValidateConfig();
+    }
+
+    private void UpdateFlashCrashThreshold(decimal value)
+    {
+        _config.FlashCrashThresholdPercent = value;
+        ValidateConfig();
+    }
+
+    private void UpdatePauseCooldown(int value)
+    {
+        _config.PauseCooldownMinutes = value;
+        ValidateConfig();
+    }
+
+    private void UpdateMaxPosition(decimal value)
+    {
+        _config.MaxPositionPercent = value;
+        ValidateConfig();
+    }
+
+    private async Task UpdateMarket(string value)
+    {
+        _config.Market = value;
+
+        // Resolve market index
+        var marketId = await MarketResolver.ResolveMarketIndexAsync(value);
+        if (marketId.HasValue)
+        {
+            _config.MarketIndex = marketId.Value;
+        }
+
+        ValidateConfig();
+    }
+
+    private void UpdateLeverage(int value)
+    {
+        _config.Leverage = value;
+        ValidateConfig();
+    }
+
+    private void UpdateLoopInterval(int value)
+    {
+        _config.LoopIntervalSeconds = value;
+        ValidateConfig();
+    }
+
+    private void UpdatePostOnly(bool value)
+    {
+        _config.UsePostOnlyOrders = value;
+        ValidateConfig();
+    }
+
+    private void ValidateConfig()
+    {
+        _validationErrors = _config.Validate();
+    }
+
+    private static RuntimeGridConfig CloneConfig(RuntimeGridConfig source)
+    {
+        return new RuntimeGridConfig
+        {
+            GridSpacingPercent = new ConfigValue<decimal>(source.GridSpacingPercent.Value)
+            {
+                SuggestedValue = source.GridSpacingPercent.SuggestedValue,
+                IsAuto = source.GridSpacingPercent.IsAuto
+            },
+            BuyLevels = new ConfigValue<int>(source.BuyLevels.Value)
+            {
+                SuggestedValue = source.BuyLevels.SuggestedValue,
+                IsAuto = source.BuyLevels.IsAuto
+            },
+            SellLevels = new ConfigValue<int>(source.SellLevels.Value)
+            {
+                SuggestedValue = source.SellLevels.SuggestedValue,
+                IsAuto = source.SellLevels.IsAuto
+            },
+            OrderSizeUsdc = new ConfigValue<decimal>(source.OrderSizeUsdc.Value)
+            {
+                SuggestedValue = source.OrderSizeUsdc.SuggestedValue,
+                IsAuto = source.OrderSizeUsdc.IsAuto
+            },
+            MaxDailyLossPercent = source.MaxDailyLossPercent,
+            FlashCrashThresholdPercent = source.FlashCrashThresholdPercent,
+            PauseCooldownMinutes = source.PauseCooldownMinutes,
+            MaxPositionPercent = source.MaxPositionPercent,
+            Market = source.Market,
+            MarketIndex = source.MarketIndex,
+            Leverage = source.Leverage,
+            LoopIntervalSeconds = source.LoopIntervalSeconds,
+            UsePostOnlyOrders = source.UsePostOnlyOrders
+        };
+    }
+
+    public void Dispose()
+    {
+        ConfigService.ConfigChanged -= OnConfigChanged;
+    }
+}

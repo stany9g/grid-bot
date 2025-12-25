@@ -1,5 +1,6 @@
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
+using GridBot.Core.Services.Configuration;
 using GridBot.Core.Services.Grid;
 using GridBot.Core.Services.Risk;
 using GridBot.Lighter;
@@ -10,11 +11,11 @@ namespace GridBot.Core.Services.Engine;
 
 /// <summary>
 /// Simple trading engine - the main orchestrator.
-/// Only 5 dependencies, not 17.
+/// Uses runtime configuration service for adaptive parameter support.
 /// </summary>
 public sealed class SimpleTradingEngine : ISimpleTradingEngine
 {
-    private readonly SimpleGridConfig _config;
+    private readonly IGridConfigurationService _configService;
     private readonly LighterOptions _lighterOptions;
     private readonly IGridManager _gridManager;
     private readonly IBasicRiskMonitor _riskMonitor;
@@ -25,26 +26,19 @@ public sealed class SimpleTradingEngine : ISimpleTradingEngine
     private bool _isInitialized;
 
     public SimpleTradingEngine(
-        IOptions<SimpleGridConfig> config,
+        IGridConfigurationService configService,
         IOptions<LighterOptions> lighterOptions,
         IGridManager gridManager,
         IBasicRiskMonitor riskMonitor,
         ILighterQueryClient queryClient,
         ILogger<SimpleTradingEngine> logger)
     {
-        ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(lighterOptions);
-        ArgumentNullException.ThrowIfNull(gridManager);
-        ArgumentNullException.ThrowIfNull(riskMonitor);
-        ArgumentNullException.ThrowIfNull(queryClient);
-        ArgumentNullException.ThrowIfNull(logger);
-
-        _config = config.Value;
-        _lighterOptions = lighterOptions.Value;
-        _gridManager = gridManager;
-        _riskMonitor = riskMonitor;
-        _queryClient = queryClient;
-        _logger = logger;
+        _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+        _lighterOptions = lighterOptions?.Value ?? throw new ArgumentNullException(nameof(lighterOptions));
+        _gridManager = gridManager ?? throw new ArgumentNullException(nameof(gridManager));
+        _riskMonitor = riskMonitor ?? throw new ArgumentNullException(nameof(riskMonitor));
+        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
     public GridState State => _gridManager.State;
@@ -106,7 +100,8 @@ public sealed class SimpleTradingEngine : ISimpleTradingEngine
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogInformation("Starting trading engine for {Market}", _config.Market);
+        var config = _configService.Current;
+        _logger.LogInformation("Starting trading engine for {Market}", config.Market);
         _isRunning = true;
 
         // Get initial price and initialize
@@ -136,8 +131,10 @@ public sealed class SimpleTradingEngine : ISimpleTradingEngine
 
     private async Task<(decimal Price, decimal Equity)> GetMarketDataAsync(CancellationToken cancellationToken)
     {
+        var config = _configService.Current;
+
         // Get order book for current price
-        var orderBook = await _queryClient.GetOrderBookDetailsAsync(_config.MarketIndex, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var orderBook = await _queryClient.GetOrderBookDetailsAsync(config.MarketIndex, cancellationToken: cancellationToken).ConfigureAwait(false);
         var price = orderBook.LastTradePrice;
 
         // Get account for equity
