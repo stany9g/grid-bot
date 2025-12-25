@@ -1,3 +1,9 @@
+// ============================================================================
+// DEPRECATED: This service is part of the legacy ApiService implementation.
+// It will be replaced by the modular architecture in GridBot.Core, 
+// GridBot.TrendIntelligence, GridBot.MoonBag, and GridBot.AdvancedRisk.
+// See REFACTORING_PROGRESS.md for migration status.
+// ============================================================================
 using System.Collections.Concurrent;
 using GridBot.ApiService.Configuration;
 using GridBot.ApiService.Models.Trading;
@@ -1055,3 +1061,4 @@ public sealed class MoonBagManager : IMoonBagManager, IDisposable
         _moonBagStates.Clear();
     }
 }
+

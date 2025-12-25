@@ -1,3 +1,9 @@
+// ============================================================================
+// DEPRECATED: This service is part of the legacy ApiService implementation.
+// It will be replaced by the modular architecture in GridBot.Core, 
+// GridBot.TrendIntelligence, GridBot.MoonBag, and GridBot.AdvancedRisk.
+// See REFACTORING_PROGRESS.md for migration status.
+// ============================================================================
 using GridBot.ApiService.Models.Trading;
 using GridBot.ApiService.Services.Grid;
 using GridBot.ApiService.Services.Inventory;
@@ -268,3 +274,4 @@ public sealed class TrendIntelligenceService : ITrendIntelligenceService
         await _tradingStateService.UpdateInventoryAsync(updatedInventory);
     }
 }
+

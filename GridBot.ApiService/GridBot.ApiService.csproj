@@ -9,7 +9,10 @@
   <ItemGroup>
     <ProjectReference Include="..\GridBot.ServiceDefaults\GridBot.ServiceDefaults.csproj" />
     <ProjectReference Include="..\GridBot.Lighter\GridBot.Lighter.csproj" />
+    <ProjectReference Include="..\GridBot.Core\GridBot.Core.csproj" />
     <ProjectReference Include="..\GridBot.TrendIntelligence\GridBot.TrendIntelligence.csproj" />
+    <ProjectReference Include="..\GridBot.MoonBag\GridBot.MoonBag.csproj" />
+    <ProjectReference Include="..\GridBot.AdvancedRisk\GridBot.AdvancedRisk.csproj" />
   </ItemGroup>
 
   <ItemGroup>

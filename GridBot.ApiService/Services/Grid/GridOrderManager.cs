@@ -1,3 +1,9 @@
+// ============================================================================
+// DEPRECATED: This service is part of the legacy ApiService implementation.
+// It will be replaced by the modular architecture in GridBot.Core, 
+// GridBot.TrendIntelligence, GridBot.MoonBag, and GridBot.AdvancedRisk.
+// See REFACTORING_PROGRESS.md for migration status.
+// ============================================================================
 using System.Globalization;
 using System.Text.Json;
 using GridBot.ApiService.Configuration;
@@ -898,3 +904,4 @@ public sealed class GridOrderManager : IGridOrderManager, IDisposable
         _orderLock.Dispose();
     }
 }
+

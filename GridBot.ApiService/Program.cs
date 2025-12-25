@@ -30,7 +30,7 @@ public partial class Program
         builder.AddServiceDefaults();
 
         // Add trading telemetry (custom meters for OpenTelemetry)
-        builder.Services.AddTradingTelemetry();
+        // Telemetry is now included in AddTradingBot
 
         // Add Redis distributed cache from Aspire
         builder.AddRedisDistributedCache("cache");
@@ -39,10 +39,14 @@ public partial class Program
         builder.Services.AddLighterClient(builder.Configuration);
 
         // Add state persistence services
-        builder.Services.AddPersistence();
+        // Persistence is now included in AddTradingBot
 
         // Add ALTE trading bot services
-        builder.Services.AddTradingBot(builder.Configuration);
+        // Determine trading mode from configuration
+        var useSimpleMode = builder.Configuration.GetValue<bool>("TradingBot:UseSimpleMode");
+        
+        // Add ALTE trading bot services (simple or full mode)
+        builder.Services.AddTradingBot(builder.Configuration, useSimpleMode);
 
         // Add services to the container.
         builder.Services.AddProblemDetails();
