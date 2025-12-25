@@ -105,3 +105,115 @@ Everything else deferred to Phase 2 after validating core profitability.
 
 ### Review Document:
 C:\Users\stany\source\repos\plan\GridBot\.claude\doc\phase1-structure-review.md
+
+---
+
+## Phase 4: GridBot.AdvancedRisk Implementation (2025-12-25)
+
+### Objective
+Extract advanced risk management features into GridBot.AdvancedRisk library with proper abstractions.
+
+### Created Structure
+
+```
+GridBot.AdvancedRisk/
+├── Models/
+│   ├── RecoveryPhase.cs         - Recovery phase enum (None, Phase1, Phase2, Phase3)
+│   ├── RecoveryStatus.cs        - Recovery status record with multipliers
+│   ├── RiskEventSeverity.cs     - Event severity levels (Info, Warning, High, Critical)
+│   ├── RiskEvent.cs             - Risk event record with factory methods
+│   ├── LiquidityHealth.cs       - Liquidity health enum (Healthy, Thin, Critical, Unknown)
+│   ├── LiquidityStatus.cs       - Liquidity status record
+│   └── WebhookTarget.cs         - Webhook configuration record
+│
+├── Services/
+│   ├── IAdvancedRiskConfiguration.cs    - Configuration abstraction
+│   ├── IAdvancedRiskMarketDataProvider.cs - Market data abstraction
+│   ├── IAdvancedRiskStateProvider.cs    - State persistence abstraction
+│   │
+│   ├── Recovery/
+│   │   ├── IRecoveryManager.cs          - Multi-phase recovery interface
+│   │   └── RecoveryManager.cs           - Recovery implementation
+│   │
+│   ├── Risk/
+│   │   ├── IFlashPumpDetector.cs        - Flash pump detection interface
+│   │   ├── FlashPumpDetector.cs         - Flash pump implementation
+│   │   ├── IRiskEventLogger.cs          - Risk event logging interface
+│   │   ├── RiskEventLogger.cs           - Risk event logging implementation
+│   │   ├── ILiquidityMonitor.cs         - Liquidity monitoring interface
+│   │   └── LiquidityMonitor.cs          - Liquidity monitoring implementation
+│   │
+│   └── Notifications/
+│       ├── IWebhookNotifier.cs          - Webhook notification interface
+│       └── WebhookNotifier.cs           - Discord/Telegram/HA webhook support
+│
+└── Extensions/
+    └── AdvancedRiskServiceExtensions.cs - DI registration with AddAdvancedRisk()
+```
+
+### Abstraction Interfaces
+
+Services require the consuming application (GridBot.ApiService) to implement:
+
+1. **IAdvancedRiskConfiguration** - Provides configuration values:
+   - Recovery phase durations and multipliers
+   - Flash pump thresholds and cooldowns
+   - Liquidity monitoring thresholds
+   - Webhook settings
+
+2. **IAdvancedRiskMarketDataProvider** - Provides market data:
+   - GetMidPriceAsync()
+   - GetOrderBookDepthAsync()
+
+3. **IAdvancedRiskStateProvider** - Provides state persistence:
+   - GetRecoveryStatusAsync() / SaveRecoveryStatusAsync()
+   - IsProtectiveModeActiveAsync() / SetProtectiveModeAsync()
+
+### Key Features Implemented
+
+1. **RecoveryManager** - Multi-phase recovery from protective mode
+   - Phase 1: 25% position, 2x spread (15 min)
+   - Phase 2: 50% position, 1x spread (30 min)
+   - Phase 3: 75% position, 1x spread (60 min)
+   - Thread-safe with per-market locks
+
+2. **FlashPumpDetector** - Detects rapid price increases
+   - Configurable threshold and window
+   - Cooldown period after detection
+   - Symmetric protection for short positions
+
+3. **LiquidityMonitor** - Order book depth monitoring
+   - Healthy/Thin/Critical classification
+   - Recommends spread and position multipliers
+   - Triggers risk events on critical liquidity
+
+4. **RiskEventLogger** - Structured risk event logging
+   - In-memory event history per market
+   - Sends to IWebhookNotifier for notifications
+
+5. **WebhookNotifier** - External notifications
+   - Discord embed support
+   - Telegram HTML formatting
+   - Home Assistant state updates
+   - Generic HTTP POST fallback
+   - Retry logic with exponential backoff
+
+### Package References
+- Microsoft.Extensions.DependencyInjection.Abstractions
+- Microsoft.Extensions.Logging.Abstractions
+- Microsoft.Extensions.Http
+
+### Build Status
+**Success** - 0 errors, 0 warnings
+Full solution builds successfully.
+
+### Usage
+```csharp
+// In GridBot.ApiService
+services.AddAdvancedRisk();
+
+// Requires implementing and registering:
+services.AddSingleton<IAdvancedRiskConfiguration, ApiAdvancedRiskConfiguration>();
+services.AddSingleton<IAdvancedRiskMarketDataProvider, ApiMarketDataProvider>();
+services.AddSingleton<IAdvancedRiskStateProvider, RedisStateProvider>();
+```

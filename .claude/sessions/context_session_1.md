@@ -72,3 +72,39 @@ GridBot.ApiService     -> Thin API layer
 3. Create simplified SimpleTradingEngine
 4. Test each module independently
 5. Update GridBot.ApiService to use new modules
+
+## Phase 4: GridBot.AdvancedRisk Code Review (2025-12-25)
+
+### Review Summary
+Reviewed GridBot.AdvancedRisk module (7 service files, 5 models, 3 interfaces, 1 extension).
+
+**CRITICAL FINDINGS:**
+1. RecoveryManager._marketLocks unbounded growth - semaphore map never removes entries, causes memory leak with many markets
+   - Fix: Add ClearMarketLock(int marketId) method
+   - Effort: 15 minutes
+   - Blocks production deployment with high market count
+
+**WARNINGS:**
+2. LiquidityMonitor cache has no TTL - stale data persists indefinitely
+   - Action: Document refresh requirements or add cache expiry
+   - Effort: 20 minutes
+
+3. WebhookNotifier retry logic off-by-one - while(retries <= max) allows extra attempt
+   - Fix: Change to while(retries < max)
+   - Effort: 5 minutes
+
+**APPROVED Components:**
+- FlashPumpDetector: Solid pump detection, proper thread-safety
+- RiskEventLogger: Bounded queue (1000 events/market), clean logging
+- WebhookNotifier: Good retry strategy (exponential backoff), multi-platform support
+- Recovery phase transitions: Clean state machine
+
+Review document: .claude/doc/PHASE4_ADVANCED_RISK_REVIEW.md
+
+### Architecture Quality
+Module is well-structured with:
+- Clean separation of concerns (recovery, detection, logging, notifications)
+- Thread-safe implementations (ConcurrentDictionary, locks, SemaphoreSlim)
+- Proper async/await with ConfigureAwait(false)
+- Good DI patterns with interface abstractions
+- No circular dependencies
