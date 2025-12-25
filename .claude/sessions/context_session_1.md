@@ -108,3 +108,85 @@ Module is well-structured with:
 - Proper async/await with ConfigureAwait(false)
 - Good DI patterns with interface abstractions
 - No circular dependencies
+
+## Phase 5: GridBot.Core Implementation (2025-12-25)
+
+### Summary
+Created the simplified core grid trading engine with ~500 lines of code.
+
+### Files Created
+
+**Configuration:**
+- `GridBot.Core/Configuration/SimpleGridConfig.cs` - 20 configuration parameters
+
+**Models:**
+- `GridBot.Core/Models/TradingState.cs` - Just 2 states: Active, Paused
+- `GridBot.Core/Models/GridLevel.cs` - Price, size, orderId record
+- `GridBot.Core/Models/GridState.cs` - Current grid status
+- `GridBot.Core/Models/RiskStatus.cs` - Safe or pause reason
+
+**Services/Risk:**
+- `GridBot.Core/Services/Risk/IBasicRiskMonitor.cs` - Interface
+- `GridBot.Core/Services/Risk/BasicRiskMonitor.cs` - Flash crash + daily loss only
+
+**Services/Grid:**
+- `GridBot.Core/Services/Grid/IGridCalculator.cs` - Interface
+- `GridBot.Core/Services/Grid/GridCalculator.cs` - Simple grid math
+- `GridBot.Core/Services/Grid/IGridManager.cs` - Interface
+- `GridBot.Core/Services/Grid/GridManager.cs` - Order management
+
+**Services/Engine:**
+- `GridBot.Core/Services/Engine/ISimpleTradingEngine.cs` - Interface
+- `GridBot.Core/Services/Engine/SimpleTradingEngine.cs` - Main loop (~100 lines)
+
+**Extensions:**
+- `GridBot.Core/Extensions/CoreServiceExtensions.cs` - AddGridBotCore()
+
+### Key Design Decisions
+
+1. **Only 2 Trading States**: Active and Paused (not 16)
+2. **Only 20 Config Parameters** (not 160)
+3. **Only 5 Engine Dependencies** (not 17)
+4. **Fixed Grid Spacing**: No ATR-based dynamics
+5. **Simple Risk**: Flash crash (1 min) + daily loss limit only
+6. **No Trend Detection**: That's in GridBot.TrendIntelligence
+7. **No Moon Bags**: That's in GridBot.MoonBag
+
+### Architecture
+
+```
+GridBot.Core/
+├── Configuration/
+│   └── SimpleGridConfig.cs
+├── Models/
+│   ├── TradingState.cs
+│   ├── GridLevel.cs
+│   ├── GridState.cs
+│   └── RiskStatus.cs
+├── Services/
+│   ├── Engine/
+│   │   ├── ISimpleTradingEngine.cs
+│   │   └── SimpleTradingEngine.cs
+│   ├── Grid/
+│   │   ├── IGridCalculator.cs
+│   │   ├── GridCalculator.cs
+│   │   ├── IGridManager.cs
+│   │   └── GridManager.cs
+│   └── Risk/
+│       ├── IBasicRiskMonitor.cs
+│       └── BasicRiskMonitor.cs
+└── Extensions/
+    └── CoreServiceExtensions.cs
+```
+
+### Usage
+
+```csharp
+// Minimal setup
+builder.Services.AddLighterClient(configuration);
+builder.Services.AddGridBotCore(configuration);
+```
+
+### Build Status
+- Solution compiles successfully with 0 warnings, 0 errors
+- All projects build: Core, TrendIntelligence, MoonBag, AdvancedRisk, ApiService, AppHost

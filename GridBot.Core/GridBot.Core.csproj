@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <RootNamespace>GridBot.Core</RootNamespace>
+    <Description>Simple grid trading engine for Lighter DEX</Description>
   </PropertyGroup>
 
   <ItemGroup>

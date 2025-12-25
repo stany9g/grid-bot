@@ -217,3 +217,66 @@ services.AddSingleton<IAdvancedRiskConfiguration, ApiAdvancedRiskConfiguration>(
 services.AddSingleton<IAdvancedRiskMarketDataProvider, ApiMarketDataProvider>();
 services.AddSingleton<IAdvancedRiskStateProvider, RedisStateProvider>();
 ```
+
+---
+
+## Phase 5: GridBot.Core Code Review (2025-12-25)
+
+### Objective
+Perform critical-only code review of GridBot.Core (simplified grid trading engine) for Phase 1 MVP.
+
+### Files Reviewed
+- SimpleTradingEngine.cs - Main orchestrator
+- GridManager.cs - Grid order management
+- GridCalculator.cs - Grid level calculation
+- BasicRiskMonitor.cs - Flash crash and loss limit detection
+- GridState.cs - State model (CRITICAL ISSUE FOUND)
+- GridLevel.cs - Grid level model
+- RiskStatus.cs - Risk status model
+- SimpleGridConfig.cs - Configuration
+- CoreServiceExtensions.cs - DI registration
+- All interface definitions
+
+### Critical Findings
+
+**1 CRITICAL Issue Found:**
+
+**IEnumerable Multiple Enumeration** in GridState.cs (lines 71, 76)
+- ActiveBuyOrderCount and ActiveSellOrderCount use BuyLevels/SellLevels which chain Where + Count
+- Results in 2+ enumerations per property access
+- Violates LINQ safety rule for IEnumerable
+
+**Fix:**
+```csharp
+public int ActiveBuyOrderCount => Levels.Count(l => l.IsBuy && l.HasActiveOrder);
+public int ActiveSellOrderCount => Levels.Count(l => !l.IsBuy && l.HasActiveOrder);
+```
+
+### Overall Assessment
+
+**Verdict: APPROVED with 1 critical issue to fix**
+
+GridBot.Core successfully implements KISS principle:
+- Only 5 dependencies in SimpleTradingEngine
+- Clean separation: Grid calculation, Risk monitoring, Order management
+- Proper thread-safety: locks in GridManager and BasicRiskMonitor
+- All Tasks properly awaited
+
+**Key Strengths:**
+1. BasicRiskMonitor: Thread-safe price history with auto-aging queue
+2. GridCalculator: Correct Lighter DEX scaling, atomic indices
+3. GridManager: SemaphoreSlim locking, proper state machine
+4. SimpleTradingEngine: 6-step cycle with graceful error handling
+5. RiskStatus: Excellent factory pattern
+6. Configuration: 20 parameters well-scoped to Phase 1
+
+### Review Document Location
+
+Full review: `C:\Users\stany\source\repos\plan\GridBot\.claude\doc\phase5-gridbot-core-review.md`
+
+### Next Steps
+
+1. Fix CRITICAL IEnumerable issue in GridState
+2. Run unit test suite
+3. Integrate into GridBot.ApiService
+4. Proceed to Phase 2: TrendIntelligence module
