@@ -3,4 +3,8 @@
   <Project Path="GridBot.AppHost/GridBot.AppHost.csproj" />
   <Project Path="GridBot.Lighter/GridBot.Lighter.csproj" />
   <Project Path="GridBot.ServiceDefaults/GridBot.ServiceDefaults.csproj" />
+  <Project Path="GridBot.Core/GridBot.Core.csproj" />
+  <Project Path="GridBot.TrendIntelligence/GridBot.TrendIntelligence.csproj" />
+  <Project Path="GridBot.MoonBag/GridBot.MoonBag.csproj" />
+  <Project Path="GridBot.AdvancedRisk/GridBot.AdvancedRisk.csproj" />
 </Solution>

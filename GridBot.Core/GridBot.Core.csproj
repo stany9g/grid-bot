@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GridBot.Lighter\GridBot.Lighter.csproj" />
+    <ProjectReference Include="..\GridBot.ServiceDefaults\GridBot.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+</Project>
