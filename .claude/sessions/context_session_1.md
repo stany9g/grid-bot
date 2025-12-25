@@ -422,3 +422,112 @@ Phase 6: ApiService Simplification - Final review PASSED
 Architecture now supports:
 - Simple mode: GridBot.Core only (~3000 lines total)
 - Full mode: Legacy ApiService + all optional modules
+
+## Phase 11-13: Legacy Cleanup (2025-12-25) - COMPLETE
+
+### Summary
+Completed legacy cleanup of GridBot.ApiService. Removed all legacy services, models, and configurations. ApiService is now a thin layer that hosts Blazor dashboard, provides REST API endpoints, and runs SimpleTradingEngine from Core.
+
+### Phase 11: Create SimpleTradingBotHostedService
+- Created `GridBot.ApiService/Services/SimpleTradingBotHostedService.cs`
+- BackgroundService that runs GridBot.Core SimpleTradingEngine
+- Runs trading loop every 5 seconds (configurable)
+- Simple startup/shutdown logging
+- Tracks LastCycleTime for health checks
+
+### Phase 12: Update TradingBotExtensions.cs
+- Removed ALL legacy service registrations (75+ services removed)
+- Kept only:
+  - AddGridBotCore() from GridBot.Core
+  - SimpleTradingBotHostedService registration
+  - Dashboard services (DashboardStateService)
+  - MarketData services (MarketResolver, MarketScalingService, MarketDataService)
+  - Telemetry (TradingMetrics)
+  - SimpleTradingBotHealthCheck
+- Removed useSimpleMode toggle - now ONLY simple mode
+
+### Phase 13: Update Program.cs
+- Removed all legacy using statements
+- Simplified service registration to just call AddTradingBot()
+- Kept essential API endpoints:
+  - /api/lighter/* - Order management, account, markets, nonce
+  - /api/trading/status - Simple trading status
+  - /api/trading/control/pause - Pause trading
+  - /api/trading/control/resume - Resume trading
+- Removed endpoints that depended on deleted services
+
+### Phase 13b: Delete Adapters
+Deleted entire Adapters folder (no longer needed):
+- TrendMarketDataAdapter.cs
+- TrendConfigurationAdapter.cs
+- MoonBagConfigurationAdapter.cs
+- MoonBagMarketDataAdapter.cs
+- AdvancedRiskMarketDataAdapter.cs
+
+### Phase 13c: Fix Remaining Issues
+- Created `Models/Trading/MarketDataModels.cs` with CandlestickData, OrderBookSnapshot, PriceLevel
+- Created `Services/SimpleTradingBotHealthCheck.cs` (replaced old TradingBotHealthCheck)
+- Updated `DashboardStateService.cs` to use ISimpleTradingEngine instead of legacy services
+- Updated `MarketResolver.cs` to use SimpleGridConfig instead of TradingBotOptions
+- Updated `MarketDataService.cs` to use new Models.Trading namespace
+- Updated `_Imports.razor` to remove deleted namespace references
+- Deleted `DecisionLogViewer.razor` component (depended on deleted services)
+- Fixed Dashboard.razor to remove DecisionLogViewer reference
+- Fixed IsBid -> IsBuy property mapping in DashboardStateService
+
+### Build Status
+**0 Warnings, 0 Errors**
+All 8 projects compile successfully:
+- GridBot.Core
+- GridBot.TrendIntelligence
+- GridBot.MoonBag
+- GridBot.AdvancedRisk
+- GridBot.Lighter
+- GridBot.ServiceDefaults
+- GridBot.ApiService
+- GridBot.AppHost
+
+### Files Modified/Created
+**Created:**
+- GridBot.ApiService/Services/SimpleTradingBotHostedService.cs
+- GridBot.ApiService/Services/SimpleTradingBotHealthCheck.cs
+- GridBot.ApiService/Models/Trading/MarketDataModels.cs
+
+**Modified:**
+- GridBot.ApiService/Extensions/TradingBotExtensions.cs (completely rewritten)
+- GridBot.ApiService/Program.cs (simplified)
+- GridBot.ApiService/Services/Dashboard/DashboardStateService.cs (simplified)
+- GridBot.ApiService/Services/MarketData/MarketResolver.cs (simplified)
+- GridBot.ApiService/Services/MarketData/MarketDataService.cs (updated namespace)
+- GridBot.ApiService/Components/_Imports.razor (removed deleted namespaces)
+- GridBot.ApiService/Components/Pages/Dashboard.razor (removed DecisionLogViewer)
+
+**Deleted:**
+- GridBot.ApiService/Adapters/ (entire folder - 5 files)
+- GridBot.ApiService/Services/TradingBotHealthCheck.cs (replaced)
+- GridBot.ApiService/Components/Dashboard/DecisionLogViewer.razor
+
+### Architecture After Cleanup
+```
+GridBot.ApiService (Thin Layer)
+├── Components/           <- Blazor dashboard components
+├── Extensions/
+│   └── TradingBotExtensions.cs  <- Simple mode only
+├── Models/
+│   ├── Dashboard/        <- Dashboard DTOs
+│   └── Trading/          <- MarketData models
+├── Services/
+│   ├── Dashboard/        <- DashboardStateService
+│   ├── MarketData/       <- Market data services
+│   ├── Telemetry/        <- Trading metrics
+│   ├── SimpleTradingBotHealthCheck.cs
+│   └── SimpleTradingBotHostedService.cs
+└── Program.cs            <- Minimal API endpoints
+```
+
+### Key Principle
+ApiService is now a thin layer that:
+1. Hosts Blazor dashboard
+2. Provides REST API endpoints for Lighter DEX
+3. Runs SimpleTradingEngine from GridBot.Core
+4. Uses MarketData services to get data from Lighter
