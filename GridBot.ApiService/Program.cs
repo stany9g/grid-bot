@@ -1,10 +1,11 @@
+using GridBot.Abstractions.Trading;
 using GridBot.ApiService.Components;
 using GridBot.ApiService.Extensions;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.Core.Configuration;
 using GridBot.Core.Services.Adaptive;
 using GridBot.Core.Services.Configuration;
-using GridBot.Lighter;
+using GridBot.Lighter.Extensions;
 using Microsoft.AspNetCore.Hosting.StaticWebAssets;
 using Microsoft.Extensions.Options;
 using MudBlazor.Services;
@@ -23,7 +24,10 @@ public partial class Program
 
         builder.AddServiceDefaults();
         builder.AddRedisDistributedCache("cache");
-        builder.Services.AddLighterClient(builder.Configuration);
+
+        // Register Lighter DEX with abstraction adapters
+        builder.Services.AddLighterExchange(builder.Configuration, "lighter-main");
+
         builder.Services.AddTradingBot(builder.Configuration);
         builder.Services.AddProblemDetails();
         builder.Services.AddOpenApi();
@@ -38,19 +42,49 @@ public partial class Program
         app.MapOpenApi();
         app.MapScalarApiReference();
 
-        var lighter = app.MapGroup("/api/lighter").WithTags("Lighter Trading");
+        // Exchange abstraction endpoints (DEX-agnostic)
+        var exchange = app.MapGroup("/api/exchange").WithTags("Exchange");
 
-        lighter.MapGet("/markets", async (GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
+        exchange.MapGet("/markets", async (IMarketDataClient client, CancellationToken ct) =>
         {
-            var result = await client.GetOrderBooksAsync(ct);
+            var result = await client.GetMarketsAsync(ct);
             return Results.Ok(result);
-        }).WithName("GetMarkets");
+        }).WithName("GetExchangeMarkets");
 
-        lighter.MapGet("/account/{accountIndex}", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, GridBot.Lighter.ILighterQueryClient client, CancellationToken ct) =>
+        exchange.MapGet("/account", async (IAccountClient client, CancellationToken ct) =>
         {
-            var result = await client.GetAccountAsync(accountIndex, ct);
+            var result = await client.GetAccountAsync(ct);
             return Results.Ok(result);
-        }).WithName("GetAccount");
+        }).WithName("GetExchangeAccount");
+
+        exchange.MapGet("/price/{marketId}", async (string marketId, IMarketDataClient client, CancellationToken ct) =>
+        {
+            var result = await client.GetCurrentPriceAsync(marketId, ct);
+            return Results.Ok(new { MarketId = marketId, Price = result });
+        }).WithName("GetExchangePrice");
+
+        exchange.MapGet("/orderbook/{marketId}", async (string marketId, IMarketDataClient client, int depth = 20, CancellationToken ct = default) =>
+        {
+            var result = await client.GetOrderBookAsync(marketId, depth, ct);
+            return Results.Ok(result);
+        }).WithName("GetExchangeOrderBook");
+
+        // Legacy Lighter endpoints (deprecated, kept for backward compatibility)
+        // Now uses abstraction interfaces instead of internal ILighterQueryClient
+        var lighter = app.MapGroup("/api/lighter").WithTags("Lighter Trading (Deprecated)");
+
+        lighter.MapGet("/markets", async (IMarketDataClient client, CancellationToken ct) =>
+        {
+            var result = await client.GetMarketsAsync(ct);
+            return Results.Ok(result);
+        }).WithName("GetLighterMarkets");
+
+        lighter.MapGet("/account/{accountIndex}", async ([Microsoft.AspNetCore.Mvc.FromRoute] long accountIndex, IAccountClient client, CancellationToken ct) =>
+        {
+            // Note: accountIndex parameter is ignored - abstraction uses configured account
+            var result = await client.GetAccountAsync(ct);
+            return Results.Ok(result);
+        }).WithName("GetLighterAccount");
 
         var trading = app.MapGroup("/api/trading").WithTags("Trading Dashboard");
 
@@ -129,12 +163,11 @@ public partial class Program
         config.MapGet("/suggestions", async (
             IAdaptiveParameterService adaptiveService,
             IGridConfigurationService configService,
-            ILighterQueryClient queryClient,
-            IOptions<LighterOptions> lighterOptions,
+            IAccountClient accountClient,
             CancellationToken ct) =>
         {
-            var account = await queryClient.GetAccountAsync(lighterOptions.Value.AccountIndex, ct);
-            var equity = decimal.TryParse(account.TotalAssetValue, out var val) ? val : 0m;
+            var account = await accountClient.GetAccountAsync(ct);
+            var equity = account.PortfolioValue;
 
             var suggestions = await adaptiveService.CalculateSuggestionsAsync(
                 configService.Current.MarketIndex,
@@ -153,12 +186,11 @@ public partial class Program
         config.MapPost("/apply-suggestions", async (
             IGridConfigurationService configService,
             IAdaptiveParameterService adaptiveService,
-            ILighterQueryClient queryClient,
-            IOptions<LighterOptions> lighterOptions,
+            IAccountClient accountClient,
             CancellationToken ct) =>
         {
-            var account = await queryClient.GetAccountAsync(lighterOptions.Value.AccountIndex, ct);
-            var equity = decimal.TryParse(account.TotalAssetValue, out var val) ? val : 0m;
+            var account = await accountClient.GetAccountAsync(ct);
+            var equity = account.PortfolioValue;
 
             var suggestions = await adaptiveService.CalculateSuggestionsAsync(
                 configService.Current.MarketIndex,

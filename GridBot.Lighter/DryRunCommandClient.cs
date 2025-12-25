@@ -8,7 +8,7 @@ namespace GridBot.Lighter;
 /// Decorator that wraps ILighterCommandClient and logs operations instead of executing them.
 /// Used for testing WebSocket data feeds without creating real orders.
 /// </summary>
-public sealed class DryRunCommandClient : ILighterCommandClient
+internal sealed class DryRunCommandClient : ILighterCommandClient
 {
     private readonly ILighterCommandClient _inner;
     private readonly ILogger<DryRunCommandClient> _logger;

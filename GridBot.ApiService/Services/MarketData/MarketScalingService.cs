@@ -1,26 +1,25 @@
 using System.Collections.Concurrent;
-using System.Globalization;
-using GridBot.Lighter;
+using GridBot.Abstractions.Scaling;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.ApiService.Services.MarketData;
 
 /// <summary>
 /// Service for scaling prices and amounts according to market-specific decimal precision.
-/// Caches market metadata for performance.
+/// Delegates to the abstraction layer's IScalingProvider for core scaling operations.
 /// </summary>
 public sealed class MarketScalingService : IMarketScalingService
 {
-    private readonly ILighterQueryClient _queryClient;
+    private readonly IScalingProvider _scalingProvider;
     private readonly ILogger<MarketScalingService> _logger;
-    private readonly ConcurrentDictionary<int, MarketMetadata> _marketCache = new();
+    private readonly ConcurrentDictionary<int, MarketMetadata> _metadataCache = new();
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     public MarketScalingService(
-        ILighterQueryClient queryClient,
+        IScalingProvider scalingProvider,
         ILogger<MarketScalingService> logger)
     {
-        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _scalingProvider = scalingProvider ?? throw new ArgumentNullException(nameof(scalingProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -30,16 +29,20 @@ public sealed class MarketScalingService : IMarketScalingService
         if (price < 0)
             throw new ArgumentException($"Price cannot be negative: {price}", nameof(price));
 
-        var metadata = await GetMarketMetadataAsync(marketId, ct).ConfigureAwait(false);
-        var multiplier = metadata.PriceMultiplier;
-        var scaledPrice = price * multiplier;
-        var result = (long)Math.Round(scaledPrice, MidpointRounding.AwayFromZero);
+        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
+        var result = _scalingProvider.ScalePrice(price, scaling);
 
         _logger.LogTrace(
             "Scaled price {Price} to {ScaledPrice} for market {MarketId} (decimals: {Decimals})",
-            price, result, marketId, metadata.SupportedPriceDecimals);
+            price, result, marketId, scaling.PriceDecimals);
 
         return result;
+    }
+
+    private async Task<MarketScaling> GetMarketScalingAsync(int marketId, CancellationToken ct)
+    {
+        var marketIdStr = marketId.ToString();
+        return await _scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -48,86 +51,14 @@ public sealed class MarketScalingService : IMarketScalingService
         if (amount < 0)
             throw new ArgumentException($"Amount cannot be negative: {amount}", nameof(amount));
 
-        var metadata = await GetMarketMetadataAsync(marketId, ct).ConfigureAwait(false);
-        var multiplier = metadata.SizeMultiplier;
-        var scaledAmount = amount * multiplier;
-        var rawResult = (long)Math.Round(scaledAmount, MidpointRounding.AwayFromZero);
+        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
+        var result = _scalingProvider.ScaleAmount(amount, scaling);
 
-        // Snap to valid lot size - all amounts must be multiples of LotSize
-        var lotSize = metadata.LotSize;
-        long result;
-        if (lotSize > 1)
-        {
-            // Round to nearest lot size (not down, to preserve intent)
-            result = ((rawResult + lotSize / 2) / lotSize) * lotSize;
-
-            // If we rounded to zero but had a positive input, use minimum lot size
-            if (result == 0 && amount > 0)
-            {
-                result = lotSize;
-            }
-
-            if (result != rawResult)
-            {
-                _logger.LogWarning(
-                    "LOT SIZE SNAP for market {MarketId}: raw={RawResult} -> snapped={Result} (lotSize={LotSize})",
-                    marketId, rawResult, result, lotSize);
-            }
-        }
-        else
-        {
-            result = rawResult;
-        }
-
-        // Enforce minimum order size from market metadata
-        // MinBaseAmount is human-readable (e.g., 0.002 ETH), scale it for comparison
-        var minBaseAmountScaled = (long)Math.Round(metadata.MinBaseAmount * multiplier, MidpointRounding.AwayFromZero);
-        if (result > 0 && minBaseAmountScaled > 0 && result < minBaseAmountScaled)
-        {
-            _logger.LogWarning(
-                "MIN ORDER SIZE BUMP for market {MarketId}: {Result} -> {Min} (minBaseAmount={MinBase}, scaled={MinScaled})",
-                marketId, result, minBaseAmountScaled, metadata.MinBaseAmount, minBaseAmountScaled);
-            result = minBaseAmountScaled;
-
-            // Re-snap to lot size (in case minimum doesn't align with lot size)
-            if (lotSize > 1 && result % lotSize != 0)
-            {
-                result = ((result + lotSize - 1) / lotSize) * lotSize; // Round up to preserve minimum
-                _logger.LogDebug(
-                    "Re-snapped minimum to lot size for market {MarketId}: {Min} -> {Result}",
-                    marketId, minBaseAmountScaled, result);
-            }
-        }
-
-        // Warn about precision loss
-        if (amount > 0 && result == 0)
-        {
-            _logger.LogWarning(
-                "PRECISION LOSS: Amount {Amount} with {Decimals} decimals rounded to ZERO for market {MarketId}. " +
-                "This will likely cause issues.",
-                amount, metadata.SupportedSizeDecimals, marketId);
-        }
-        else if (result > 0)
-        {
-            // Check for significant precision loss
-            var convertedBack = (decimal)result / multiplier;
-            var precisionLoss = Math.Abs(amount - convertedBack);
-            var precisionLossPercentage = amount > 0 ? (precisionLoss / amount) * 100m : 0m;
-
-            if (precisionLossPercentage > 0.1m)
-            {
-                _logger.LogWarning(
-                    "PRECISION LOSS: Amount {Amount} has {LossPercentage:F4}% precision loss for market {MarketId}. " +
-                    "Original: {Original}, Scaled: {Scaled}, Back to decimal: {ConvertedBack}",
-                    amount, precisionLossPercentage, marketId, amount, result, convertedBack);
-            }
-        }
-
-        // Log scaled values at Debug level for troubleshooting
+        // Additional logging for debugging
         _logger.LogDebug(
-            "Scaling amount for market {MarketId}: input={Amount}, decimals={Decimals}, multiplier={Multiplier}, " +
-            "scaled={Scaled}, lotSize={LotSize}, minBase={MinBase}",
-            marketId, amount, metadata.SupportedSizeDecimals, multiplier, result, lotSize, metadata.MinBaseAmount);
+            "Scaling amount for market {MarketId}: input={Amount}, decimals={Decimals}, " +
+            "scaled={Scaled}, minStep={MinStep}, minOrder={MinOrder}",
+            marketId, amount, scaling.AmountDecimals, result, scaling.MinStepSize, scaling.MinOrderSize);
 
         return result;
     }
@@ -135,53 +66,52 @@ public sealed class MarketScalingService : IMarketScalingService
     /// <inheritdoc />
     public async Task<decimal> UnscalePriceAsync(long scaledPrice, int marketId, CancellationToken ct = default)
     {
-        var metadata = await GetMarketMetadataAsync(marketId, ct).ConfigureAwait(false);
-        return scaledPrice / metadata.PriceMultiplier;
+        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
+        return _scalingProvider.UnscalePrice(scaledPrice, scaling);
     }
 
     /// <inheritdoc />
     public async Task<decimal> UnscaleBaseAmountAsync(long scaledAmount, int marketId, CancellationToken ct = default)
     {
-        var metadata = await GetMarketMetadataAsync(marketId, ct).ConfigureAwait(false);
-        return scaledAmount / metadata.SizeMultiplier;
+        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
+        return _scalingProvider.UnscaleAmount(scaledAmount, scaling);
     }
 
     /// <inheritdoc />
     public async Task<MarketMetadata> GetMarketMetadataAsync(int marketId, CancellationToken ct = default)
     {
-        if (_marketCache.TryGetValue(marketId, out var cached))
+        if (_metadataCache.TryGetValue(marketId, out var cached))
             return cached;
 
         await _loadLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             // Double-check after acquiring lock
-            if (_marketCache.TryGetValue(marketId, out cached))
+            if (_metadataCache.TryGetValue(marketId, out cached))
                 return cached;
 
-            var details = await _queryClient.GetOrderBookDetailsAsync(marketId, cancellationToken: ct)
-                .ConfigureAwait(false);
+            var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
 
             var metadata = new MarketMetadata
             {
-                MarketId = details.MarketId,
-                Symbol = details.Symbol,
-                SupportedPriceDecimals = details.SupportedPriceDecimals,
-                SupportedSizeDecimals = details.SupportedSizeDecimals,
-                SizeDecimals = details.SizeDecimals,
-                MinBaseAmount = decimal.TryParse(details.MinBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minBase) ? minBase : 0,
-                MinQuoteAmount = decimal.TryParse(details.MinQuoteAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minQuote) ? minQuote : 0
+                MarketId = marketId,
+                Symbol = scaling.MarketId,
+                SupportedPriceDecimals = scaling.PriceDecimals,
+                SupportedSizeDecimals = scaling.AmountDecimals,
+                SizeDecimals = scaling.AmountDecimals,
+                MinBaseAmount = scaling.MinOrderSize,
+                MinQuoteAmount = 0
             };
 
-            _marketCache[marketId] = metadata;
+            _metadataCache[marketId] = metadata;
 
-            _logger.LogWarning(
+            _logger.LogInformation(
                 "MARKET METADATA for {Symbol} (ID: {MarketId}): " +
-                "SupportedPriceDecimals={SupportedPriceDecimals}, SupportedSizeDecimals={SupportedSizeDecimals}, " +
-                "SizeDecimals={SizeDecimals}, LotSize={LotSize}, MinBase={MinBase}, MinQuote={MinQuote}",
+                "PriceDecimals={PriceDecimals}, SizeDecimals={SizeDecimals}, " +
+                "MinStep={MinStep}, MinOrder={MinOrder}",
                 metadata.Symbol, marketId,
                 metadata.SupportedPriceDecimals, metadata.SupportedSizeDecimals,
-                metadata.SizeDecimals, metadata.LotSize, metadata.MinBaseAmount, metadata.MinQuoteAmount);
+                scaling.MinStepSize, scaling.MinOrderSize);
 
             return metadata;
         }
@@ -192,38 +122,11 @@ public sealed class MarketScalingService : IMarketScalingService
     }
 
     /// <inheritdoc />
-    public async Task PreloadMarketsAsync(CancellationToken ct = default)
+    public Task PreloadMarketsAsync(CancellationToken ct = default)
     {
-        try
-        {
-            var orderBooks = await _queryClient.GetOrderBooksAsync(ct).ConfigureAwait(false);
-
-            foreach (var book in orderBooks)
-            {
-                var metadata = new MarketMetadata
-                {
-                    MarketId = book.MarketId,
-                    Symbol = book.Symbol,
-                    SupportedPriceDecimals = book.SupportedPriceDecimals,
-                    SupportedSizeDecimals = book.SupportedSizeDecimals,
-                    SizeDecimals = book.SizeDecimals,
-                    MinBaseAmount = decimal.TryParse(book.MinBaseAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minBase) ? minBase : 0,
-                    MinQuoteAmount = decimal.TryParse(book.MinQuoteAmount, NumberStyles.Number, CultureInfo.InvariantCulture, out var minQuote) ? minQuote : 0
-                };
-
-                _marketCache[book.MarketId] = metadata;
-
-                _logger.LogDebug(
-                    "Preloaded market {Symbol} (ID: {MarketId}): PriceDecimals={PriceDecimals}, SizeDecimals={SizeDecimals}",
-                    metadata.Symbol, book.MarketId,
-                    metadata.SupportedPriceDecimals, metadata.SupportedSizeDecimals);
-            }
-
-            _logger.LogInformation("Preloaded {Count} markets", orderBooks.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to preload markets, will load on demand");
-        }
+        // With the abstraction layer, markets are loaded on demand via IScalingProvider.
+        // This method is kept for API compatibility but does nothing.
+        _logger.LogDebug("PreloadMarketsAsync is a no-op with abstraction layer; markets loaded on demand");
+        return Task.CompletedTask;
     }
 }

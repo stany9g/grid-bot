@@ -1,7 +1,8 @@
+using GridBot.Abstractions.Communication;
+using GridBot.Abstractions.Trading;
 using GridBot.ApiService.Models.Dashboard;
 using GridBot.Core.Configuration;
 using GridBot.Core.Services.Engine;
-using GridBot.Lighter;
 using Microsoft.Extensions.Options;
 
 namespace GridBot.ApiService.Services.Dashboard;
@@ -9,10 +10,9 @@ namespace GridBot.ApiService.Services.Dashboard;
 public sealed class DashboardStateService : BackgroundService, IDashboardStateService
 {
     private readonly ISimpleTradingEngine _engine;
-    private readonly ILighterQueryClient _queryClient;
-    private readonly ILighterRealtimeState _realtimeState;
+    private readonly IAccountClient _accountClient;
+    private readonly IRealtimeDataProvider _realtimeProvider;
     private readonly SimpleGridConfig _config;
-    private readonly LighterOptions _lighterOptions;
     private readonly ILogger<DashboardStateService> _logger;
 
     private readonly List<AlertItem> _alerts = [];
@@ -28,17 +28,15 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
 
     public DashboardStateService(
         ISimpleTradingEngine engine,
-        ILighterQueryClient queryClient,
-        ILighterRealtimeState realtimeState,
+        IAccountClient accountClient,
+        IRealtimeDataProvider realtimeProvider,
         IOptions<SimpleGridConfig> config,
-        IOptions<LighterOptions> lighterOptions,
         ILogger<DashboardStateService> logger)
     {
         _engine = engine;
-        _queryClient = queryClient;
-        _realtimeState = realtimeState;
+        _accountClient = accountClient;
+        _realtimeProvider = realtimeProvider;
         _config = config.Value;
-        _lighterOptions = lighterOptions.Value;
         _logger = logger;
     }
 
@@ -102,23 +100,28 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
     {
         var engineState = _engine.State;
         var marketId = _config.MarketIndex;
+        var marketIdStr = marketId.ToString();
         decimal currentPrice = 0;
 
-        var wsOrderBook = _realtimeState.GetOrderBook(marketId);
-        if (wsOrderBook != null && wsOrderBook.MidPrice > 0)
-            currentPrice = wsOrderBook.MidPrice;
+        // Try realtime data first
+        var realtimePrice = _realtimeProvider.GetCurrentPrice(marketIdStr);
+        if (realtimePrice.HasValue && realtimePrice.Value > 0)
+        {
+            currentPrice = realtimePrice.Value;
+        }
         else
         {
-            var ob = await _queryClient.GetOrderBookDetailsAsync(marketId, cancellationToken: ct);
-            currentPrice = ob.LastTradePrice;
+            // Fall back to REST API via account client (no direct market data client here)
+            var orderBook = _realtimeProvider.GetOrderBook(marketIdStr);
+            currentPrice = orderBook?.MidPrice ?? 0;
         }
 
         decimal equity = 0, positionSize = 0, unrealizedPnl = 0;
-        var wsAccount = _realtimeState.GetAccount();
-        if (wsAccount != null && _realtimeState.IsConnected)
+        var wsAccount = _realtimeProvider.GetAccount();
+        if (wsAccount != null && _realtimeProvider.IsConnected)
         {
             equity = wsAccount.Collateral;
-            if (wsAccount.Positions.TryGetValue(marketId, out var p))
+            if (wsAccount.Positions.TryGetValue(marketIdStr, out var p))
             {
                 positionSize = p.Size;
                 unrealizedPnl = p.UnrealizedPnl;
@@ -126,8 +129,13 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
         }
         else
         {
-            var account = await _queryClient.GetAccountAsync(_lighterOptions.AccountIndex, ct);
-            decimal.TryParse(account.Collateral, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out equity);
+            var account = await _accountClient.GetAccountAsync(ct);
+            equity = account.Collateral;
+            if (account.Positions.TryGetValue(marketIdStr, out var pos))
+            {
+                positionSize = pos.Size;
+                unrealizedPnl = pos.UnrealizedPnl;
+            }
         }
 
         List<AlertItem> alertsCopy;

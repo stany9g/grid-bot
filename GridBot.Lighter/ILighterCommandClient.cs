@@ -6,12 +6,12 @@ namespace GridBot.Lighter;
 /// <summary>
 /// Result of signing an order without submitting it.
 /// </summary>
-public sealed record SignedOrderResult(int TxType, string TxInfo, string? Error);
+internal sealed record SignedOrderResult(int TxType, string TxInfo, string? Error);
 
 /// <summary>
 /// Result of a batch order submission.
 /// </summary>
-public sealed record BatchOrderResult
+internal sealed record BatchOrderResult
 {
     /// <summary>
     /// Whether the batch submission was successful.
@@ -43,7 +43,7 @@ public sealed record BatchOrderResult
 /// Interface for Lighter command operations (orders and transactions).
 /// Handles signing and submission of write operations.
 /// </summary>
-public interface ILighterCommandClient : IDisposable
+internal interface ILighterCommandClient : IDisposable
 {
     /// <summary>
     /// Creates and submits a limit, market, stop-loss, or take-profit order in a single operation.

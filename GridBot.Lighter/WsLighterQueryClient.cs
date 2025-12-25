@@ -11,7 +11,7 @@ namespace GridBot.Lighter;
 /// Reads real-time data from WebSocket cache.
 /// Uses REST for operations not available via WebSocket (market list, candlesticks).
 /// </summary>
-public sealed class WsLighterQueryClient : ILighterQueryClient
+internal sealed class WsLighterQueryClient : ILighterQueryClient
 {
     private readonly ILighterRealtimeState _state;
     private readonly HttpClient _httpClient;

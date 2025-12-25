@@ -4,6 +4,7 @@ namespace GridBot.Core.Services.Grid;
 
 /// <summary>
 /// Calculates grid levels based on configuration.
+/// Works with decimal values - exchange-specific scaling is handled by adapters.
 /// </summary>
 public interface IGridCalculator
 {
@@ -21,18 +22,4 @@ public interface IGridCalculator
     /// <param name="price">Price of the asset.</param>
     /// <returns>Size in base asset units.</returns>
     decimal CalculateOrderSize(decimal usdcAmount, decimal price);
-
-    /// <summary>
-    /// Converts price to scaled integer for Lighter API.
-    /// </summary>
-    /// <param name="price">Price in decimal.</param>
-    /// <returns>Scaled price for API.</returns>
-    long ToScaledPrice(decimal price);
-
-    /// <summary>
-    /// Converts base amount to scaled integer for Lighter API.
-    /// </summary>
-    /// <param name="amount">Amount in decimal.</param>
-    /// <returns>Scaled amount for API.</returns>
-    long ToScaledAmount(decimal amount);
 }

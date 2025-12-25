@@ -1,13 +1,13 @@
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
 using GridBot.Core.Services.Configuration;
-using GridBot.Lighter.Models;
 
 namespace GridBot.Core.Services.Grid;
 
 /// <summary>
 /// Calculates grid levels using runtime configuration.
 /// Uses EffectiveValue from ConfigValue for auto-tunable parameters.
+/// Scaling is now handled by the exchange adapters - this class works with decimal values.
 /// </summary>
 public sealed class GridCalculator : IGridCalculator
 {
@@ -72,20 +72,6 @@ public sealed class GridCalculator : IGridCalculator
             return 0;
 
         return Math.Round(usdcAmount / price, 8);
-    }
-
-    /// <inheritdoc />
-    public long ToScaledPrice(decimal price)
-    {
-        // Lighter uses 2 decimal places for price (cents)
-        return (long)(price * OrderConstants.PriceScale);
-    }
-
-    /// <inheritdoc />
-    public long ToScaledAmount(decimal amount)
-    {
-        // Lighter uses 8 decimal places for base asset
-        return (long)(amount * OrderConstants.BaseAssetScale);
     }
 
     private long GetNextClientOrderIndex()

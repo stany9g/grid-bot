@@ -15,11 +15,36 @@ public static class CoreServiceExtensions
 {
     /// <summary>
     /// Adds GridBot.Core services to the service collection.
-    /// Requires GridBot.Lighter to be registered first via AddLighterClient().
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This method registers the core trading engine services. Before calling this method,
+    /// the consuming application must register the following abstraction interfaces from
+    /// GridBot.Abstractions:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description><c>IOrderClient</c> - For order management (create, cancel, modify)</description></item>
+    ///   <item><description><c>IAccountClient</c> - For account and position queries</description></item>
+    ///   <item><description><c>IMarketDataClient</c> - For market data (prices, orderbook)</description></item>
+    ///   <item><description><c>IScalingProvider</c> - For price/amount scaling</description></item>
+    /// </list>
+    /// <para>
+    /// For Lighter DEX, use <c>AddLighterExchange()</c> from GridBot.Lighter.
+    /// For other exchanges, register the appropriate adapter implementations.
+    /// </para>
+    /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="configuration">The configuration.</param>
     /// <returns>The service collection for chaining.</returns>
+    /// <example>
+    /// <code>
+    /// // Register exchange adapters first
+    /// services.AddLighterExchange(configuration);
+    ///
+    /// // Then register core services
+    /// services.AddGridBotCore(configuration);
+    /// </code>
+    /// </example>
     public static IServiceCollection AddGridBotCore(
         this IServiceCollection services,
         IConfiguration configuration)

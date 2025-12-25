@@ -1,25 +1,25 @@
+using GridBot.Abstractions.Trading;
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
 using GridBot.Core.Services.Configuration;
 using GridBot.Core.Services.Grid;
 using GridBot.Core.Services.Risk;
-using GridBot.Lighter;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace GridBot.Core.Services.Engine;
 
 /// <summary>
 /// Simple trading engine - the main orchestrator.
 /// Uses runtime configuration service for adaptive parameter support.
+/// Uses DEX-agnostic abstractions for exchange operations.
 /// </summary>
 public sealed class SimpleTradingEngine : ISimpleTradingEngine
 {
     private readonly IGridConfigurationService _configService;
-    private readonly LighterOptions _lighterOptions;
     private readonly IGridManager _gridManager;
     private readonly IBasicRiskMonitor _riskMonitor;
-    private readonly ILighterQueryClient _queryClient;
+    private readonly IMarketDataClient _marketData;
+    private readonly IAccountClient _accountClient;
     private readonly ILogger<SimpleTradingEngine> _logger;
 
     private bool _isRunning;
@@ -27,17 +27,17 @@ public sealed class SimpleTradingEngine : ISimpleTradingEngine
 
     public SimpleTradingEngine(
         IGridConfigurationService configService,
-        IOptions<LighterOptions> lighterOptions,
         IGridManager gridManager,
         IBasicRiskMonitor riskMonitor,
-        ILighterQueryClient queryClient,
+        IMarketDataClient marketData,
+        IAccountClient accountClient,
         ILogger<SimpleTradingEngine> logger)
     {
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
-        _lighterOptions = lighterOptions?.Value ?? throw new ArgumentNullException(nameof(lighterOptions));
         _gridManager = gridManager ?? throw new ArgumentNullException(nameof(gridManager));
         _riskMonitor = riskMonitor ?? throw new ArgumentNullException(nameof(riskMonitor));
-        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _marketData = marketData ?? throw new ArgumentNullException(nameof(marketData));
+        _accountClient = accountClient ?? throw new ArgumentNullException(nameof(accountClient));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -133,13 +133,12 @@ public sealed class SimpleTradingEngine : ISimpleTradingEngine
     {
         var config = _configService.Current;
 
-        // Get order book for current price
-        var orderBook = await _queryClient.GetOrderBookDetailsAsync(config.MarketIndex, cancellationToken: cancellationToken).ConfigureAwait(false);
-        var price = orderBook.LastTradePrice;
+        // Get current price from market data client
+        var price = await _marketData.GetCurrentPriceAsync(config.Market, cancellationToken).ConfigureAwait(false);
 
-        // Get account for equity
-        var account = await _queryClient.GetAccountAsync(_lighterOptions.AccountIndex, cancellationToken).ConfigureAwait(false);
-        var equity = decimal.TryParse(account.TotalAssetValue, out var val) ? val : 0;
+        // Get account for equity (portfolio value)
+        var account = await _accountClient.GetAccountAsync(cancellationToken).ConfigureAwait(false);
+        var equity = account.PortfolioValue;
 
         return (price, equity);
     }

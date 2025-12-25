@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>GridBot.Core</RootNamespace>
-    <Description>Simple grid trading engine for Lighter DEX</Description>
+    <Description>DEX-agnostic grid trading engine</Description>
   </PropertyGroup>
 
   <ItemGroup>
@@ -13,7 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\GridBot.Lighter\GridBot.Lighter.csproj" />
+    <ProjectReference Include="..\GridBot.Abstractions\GridBot.Abstractions.csproj" />
     <ProjectReference Include="..\GridBot.ServiceDefaults\GridBot.ServiceDefaults.csproj" />
   </ItemGroup>
 

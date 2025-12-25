@@ -6,7 +6,7 @@ namespace GridBot.Lighter;
 /// Interface for read-only Lighter REST API operations.
 /// Provides methods to query account, market, and transaction data.
 /// </summary>
-public interface ILighterQueryClient
+internal interface ILighterQueryClient
 {
     /// <summary>
     /// Gets account information including positions and balances.

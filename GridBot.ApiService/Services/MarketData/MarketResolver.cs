@@ -1,15 +1,17 @@
+using GridBot.Abstractions.Trading;
 using GridBot.Core.Services.Configuration;
-using GridBot.Lighter;
 using Microsoft.Extensions.Logging;
+
+using AbstractionsMarketInfo = GridBot.Abstractions.Models.Market.MarketInfo;
 
 namespace GridBot.ApiService.Services.MarketData;
 
 /// <summary>
-/// Resolves market symbols to market IDs via the Lighter DEX API.
+/// Resolves market symbols to market IDs via the exchange API.
 /// </summary>
 public sealed class MarketResolver : IMarketResolver
 {
-    private readonly ILighterQueryClient _queryClient;
+    private readonly IMarketDataClient _marketDataClient;
     private readonly IGridConfigurationService _configService;
     private readonly ILogger<MarketResolver> _logger;
     private readonly SemaphoreSlim _initializationLock = new(1, 1);
@@ -24,11 +26,11 @@ public sealed class MarketResolver : IMarketResolver
     private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
 
     public MarketResolver(
-        ILighterQueryClient queryClient,
+        IMarketDataClient marketDataClient,
         IGridConfigurationService configService,
         ILogger<MarketResolver> logger)
     {
-        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _marketDataClient = marketDataClient ?? throw new ArgumentNullException(nameof(marketDataClient));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -129,14 +131,14 @@ public sealed class MarketResolver : IMarketResolver
 
         try
         {
-            var orderBooks = await _queryClient.GetOrderBooksAsync(cancellationToken).ConfigureAwait(false);
+            var markets = await _marketDataClient.GetMarketsAsync(cancellationToken).ConfigureAwait(false);
 
-            _cachedMarkets = orderBooks
-                .Select(ob => new MarketInfo(
-                    MarketId: ob.MarketId,
-                    Symbol: ob.Symbol,
-                    BaseAsset: ob.BaseAsset ?? ExtractBaseAsset(ob.Symbol),
-                    IsActive: ob.Status.Equals("active", StringComparison.OrdinalIgnoreCase)))
+            _cachedMarkets = markets
+                .Select(m => new MarketInfo(
+                    MarketId: ParseMarketId(m.MarketId),
+                    Symbol: m.Symbol,
+                    BaseAsset: m.BaseAsset,
+                    IsActive: m.IsActive))
                 .ToList();
 
             _cacheExpiry = DateTimeOffset.UtcNow + CacheDuration;
@@ -149,6 +151,11 @@ public sealed class MarketResolver : IMarketResolver
             _logger.LogError(ex, "Failed to fetch available markets");
             return _cachedMarkets ?? [];
         }
+    }
+
+    private static int ParseMarketId(string marketId)
+    {
+        return int.TryParse(marketId, out var id) ? id : 0;
     }
 
     private static string ExtractBaseAsset(string symbol)

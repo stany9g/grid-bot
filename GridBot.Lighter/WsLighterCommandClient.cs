@@ -12,7 +12,7 @@ namespace GridBot.Lighter;
 /// Uses ILighterRealtimeState for market data and WebSocket for transaction submission.
 /// Optionally uses HTTP client for nonce synchronization when WebSocket nonce retries fail.
 /// </summary>
-public sealed class WsLighterCommandClient : ILighterCommandClient
+internal sealed class WsLighterCommandClient : ILighterCommandClient
 {
     private readonly SignerClient _signer;
     private readonly ILighterRealtimeState _state;

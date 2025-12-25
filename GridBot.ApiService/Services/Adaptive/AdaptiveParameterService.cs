@@ -1,8 +1,8 @@
+using GridBot.Abstractions.Trading;
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
 using GridBot.Core.Services.Adaptive;
 using GridBot.Core.Services.Configuration;
-using GridBot.Lighter;
 using GridBot.TrendIntelligence.Models;
 using GridBot.TrendIntelligence.Services.Indicators;
 using Microsoft.Extensions.Logging;
@@ -16,7 +16,7 @@ namespace GridBot.ApiService.Services.Adaptive;
 public sealed class AdaptiveParameterService : IAdaptiveParameterService
 {
     private readonly IIndicatorService _indicatorService;
-    private readonly ILighterQueryClient _queryClient;
+    private readonly IMarketDataClient _marketDataClient;
     private readonly IGridConfigurationService _configService;
     private readonly ILogger<AdaptiveParameterService> _logger;
 
@@ -31,12 +31,12 @@ public sealed class AdaptiveParameterService : IAdaptiveParameterService
 
     public AdaptiveParameterService(
         IIndicatorService indicatorService,
-        ILighterQueryClient queryClient,
+        IMarketDataClient marketDataClient,
         IGridConfigurationService configService,
         ILogger<AdaptiveParameterService> logger)
     {
         _indicatorService = indicatorService ?? throw new ArgumentNullException(nameof(indicatorService));
-        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
+        _marketDataClient = marketDataClient ?? throw new ArgumentNullException(nameof(marketDataClient));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -57,10 +57,11 @@ public sealed class AdaptiveParameterService : IAdaptiveParameterService
         try
         {
             // Fetch 1-hour candlesticks for ATR calculation (need at least 15 for 14-period ATR)
-            var candles = await _queryClient.GetCandlesticksAsync(
-                marketId,
+            var marketIdStr = marketId.ToString();
+            var candles = await _marketDataClient.GetCandlesticksAsync(
+                marketIdStr,
                 resolution: "1h",
-                countBack: 20,
+                count: 20,
                 ct).ConfigureAwait(false);
 
             if (candles is null || candles.Count < 3)
@@ -73,12 +74,12 @@ public sealed class AdaptiveParameterService : IAdaptiveParameterService
             var candleData = candles
                 .Select(c => new CandlestickData
                 {
-                    Timestamp = DateTimeOffset.FromUnixTimeMilliseconds(c.Timestamp),
+                    Timestamp = c.Timestamp,
                     Open = c.Open,
                     High = c.High,
                     Low = c.Low,
                     Close = c.Close,
-                    Volume = c.Volume0
+                    Volume = c.Volume
                 })
                 .OrderBy(c => c.Timestamp)
                 .ToList();

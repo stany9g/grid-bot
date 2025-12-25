@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="GridBot.Abstractions/GridBot.Abstractions.csproj" />
   <Project Path="GridBot.ApiService/GridBot.ApiService.csproj" />
   <Project Path="GridBot.AppHost/GridBot.AppHost.csproj" />
   <Project Path="GridBot.Lighter/GridBot.Lighter.csproj" />

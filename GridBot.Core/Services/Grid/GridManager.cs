@@ -1,37 +1,45 @@
+using GridBot.Abstractions.Factory;
+using GridBot.Abstractions.Models.Enums;
+using GridBot.Abstractions.Models.Orders;
+using GridBot.Abstractions.Scaling;
+using GridBot.Abstractions.Trading;
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
 using GridBot.Core.Services.Configuration;
-using GridBot.Lighter;
-using GridBot.Lighter.Models;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace GridBot.Core.Services.Grid;
 
+/// <summary>
+/// Manages grid trading by placing and maintaining grid orders.
+/// Uses DEX-agnostic abstractions for exchange operations.
+/// </summary>
 public sealed class GridManager : IGridManager
 {
     private readonly IGridConfigurationService _configService;
-    private readonly LighterOptions _lighterOptions;
+    private readonly IOrderClient _orderClient;
+    private readonly IAccountClient _accountClient;
+    private readonly IScalingProvider _scalingProvider;
     private readonly IGridCalculator _calculator;
-    private readonly ILighterCommandClient _commandClient;
-    private readonly ILighterQueryClient _queryClient;
     private readonly ILogger<GridManager> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly GridState _state = new();
 
+    private MarketScaling? _cachedScaling;
+
     public GridManager(
         IGridConfigurationService configService,
-        IOptions<LighterOptions> lighterOptions,
+        IOrderClient orderClient,
+        IAccountClient accountClient,
+        IScalingProvider scalingProvider,
         IGridCalculator calculator,
-        ILighterCommandClient commandClient,
-        ILighterQueryClient queryClient,
         ILogger<GridManager> logger)
     {
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
-        _lighterOptions = lighterOptions?.Value ?? throw new ArgumentNullException(nameof(lighterOptions));
+        _orderClient = orderClient ?? throw new ArgumentNullException(nameof(orderClient));
+        _accountClient = accountClient ?? throw new ArgumentNullException(nameof(accountClient));
+        _scalingProvider = scalingProvider ?? throw new ArgumentNullException(nameof(scalingProvider));
         _calculator = calculator ?? throw new ArgumentNullException(nameof(calculator));
-        _commandClient = commandClient ?? throw new ArgumentNullException(nameof(commandClient));
-        _queryClient = queryClient ?? throw new ArgumentNullException(nameof(queryClient));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -109,36 +117,50 @@ public sealed class GridManager : IGridManager
     private async Task CancelAllOrdersInternalAsync(CancellationToken cancellationToken)
     {
         var config = _configService.Current;
-        await _commandClient.CancelAllOrdersAsync(config.MarketIndex, cancellationToken: cancellationToken).ConfigureAwait(false);
+        await _orderClient.CancelAllOrdersAsync(config.Market, cancellationToken).ConfigureAwait(false);
         _state.Levels = _state.Levels.Select(l => l.WithoutOrder()).ToList();
     }
 
     private async Task PlaceGridOrdersAsync(List<GridLevel> levels, CancellationToken cancellationToken)
     {
         var config = _configService.Current;
+        var scaling = await GetScalingAsync(config.Market, cancellationToken).ConfigureAwait(false);
+
         var requests = levels.Select(level => new CreateOrderRequest
         {
-            MarketIndex = config.MarketIndex,
-            ClientOrderIndex = level.ClientOrderIndex,
-            BaseAmount = _calculator.ToScaledAmount(level.Size),
-            Price = _calculator.ToScaledPrice(level.Price),
-            IsAsk = !level.IsBuy,
-            OrderType = OrderType.Limit,
-            TimeInForce = config.UsePostOnlyOrders ? TimeInForce.PostOnly : TimeInForce.GoodTillTime
+            MarketId = config.Market,
+            ClientOrderId = level.ClientOrderIndex.ToString(),
+            Size = level.Size,
+            Price = level.Price,
+            Side = level.IsBuy ? OrderSide.Buy : OrderSide.Sell,
+            Type = Abstractions.Models.Enums.OrderType.Limit,
+            TimeInForce = config.UsePostOnlyOrders
+                ? Abstractions.Models.Enums.TimeInForce.PostOnly
+                : Abstractions.Models.Enums.TimeInForce.GoodTillCancel
         }).ToArray();
+
         if (requests.Length == 0) return;
-        await _commandClient.CreateOrderBatchAsync(requests, cancellationToken).ConfigureAwait(false);
+        await _orderClient.CreateOrderBatchAsync(requests, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task SyncWithExchangeAsync(CancellationToken cancellationToken)
     {
         var config = _configService.Current;
-        var (authToken, error) = await _commandClient.CreateAuthTokenAsync().ConfigureAwait(false);
-        if (error != null) return;
-        var activeOrders = await _queryClient.GetActiveOrdersAsync(_lighterOptions.AccountIndex, config.MarketIndex, authToken!, cancellationToken).ConfigureAwait(false);
-        var activeOrderIds = activeOrders.Select(o => long.Parse(o.OrderId)).ToHashSet();
+        var activeOrders = await _accountClient.GetActiveOrdersAsync(config.Market, cancellationToken).ConfigureAwait(false);
+
+        // Build set of active order IDs from the exchange
+        var activeOrderIds = new HashSet<long>();
+        foreach (var order in activeOrders)
+        {
+            if (long.TryParse(order.ClientOrderId, out var clientOrderId))
+            {
+                activeOrderIds.Add(clientOrderId);
+            }
+        }
+
+        // Mark levels as unfilled if their corresponding order is no longer active
         _state.Levels = _state.Levels.Select(level =>
-            level.OrderId.HasValue && !activeOrderIds.Contains(level.OrderId.Value)
+            level.OrderId.HasValue && !activeOrderIds.Contains(level.ClientOrderIndex)
                 ? level.WithoutOrder()
                 : level).ToList();
     }
@@ -158,5 +180,15 @@ public sealed class GridManager : IGridManager
         _state.Levels = levels;
         _state.CenterPrice = newCenterPrice;
         await PlaceGridOrdersAsync(levels, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<MarketScaling> GetScalingAsync(string marketId, CancellationToken cancellationToken)
+    {
+        // Cache the scaling info since it rarely changes
+        if (_cachedScaling is null || _cachedScaling.MarketId != marketId)
+        {
+            _cachedScaling = await _scalingProvider.GetMarketScalingAsync(marketId, cancellationToken).ConfigureAwait(false);
+        }
+        return _cachedScaling;
     }
 }
