@@ -1,6 +1,9 @@
+using GridBot.Abstractions.Factory;
 using GridBot.Abstractions.Trading;
 using GridBot.ApiService.Components;
 using GridBot.ApiService.Extensions;
+using GridBot.ApiService.Services.Bot;
+using GridBot.ApiService.Services.Exchange;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.Core.Configuration;
 using GridBot.Core.Services.Adaptive;
@@ -69,6 +72,49 @@ public partial class Program
             return Results.Ok(result);
         }).WithName("GetExchangeOrderBook");
 
+        exchange.MapGet("/available", async (IExchangeSelectionService exchangeSelection, CancellationToken ct) =>
+        {
+            await exchangeSelection.RefreshAvailableExchangesAsync(ct);
+            return Results.Ok(exchangeSelection.AvailableExchanges);
+        }).WithName("GetAvailableExchanges");
+
+        exchange.MapGet("/current", (IExchangeSelectionService exchangeSelection) =>
+        {
+            return Results.Ok(new
+            {
+                ExchangeType = exchangeSelection.CurrentExchangeType?.ToString(),
+                ExchangeId = exchangeSelection.CurrentClient?.ExchangeId,
+                IsConnected = exchangeSelection.CurrentClient?.Connection.IsHealthy ?? false
+            });
+        }).WithName("GetCurrentExchange");
+
+        exchange.MapPost("/select", async (ExchangeSelectRequest request, IExchangeSelectionService exchangeSelection, CancellationToken ct) =>
+        {
+            if (!Enum.TryParse<ExchangeType>(request.ExchangeType, ignoreCase: true, out var exchangeType))
+            {
+                return Results.BadRequest(new { Error = $"Invalid exchange type: {request.ExchangeType}" });
+            }
+
+            try
+            {
+                await exchangeSelection.SelectExchangeAsync(exchangeType, ct);
+                return Results.Ok(new
+                {
+                    Success = true,
+                    ExchangeType = exchangeSelection.CurrentExchangeType?.ToString(),
+                    ExchangeId = exchangeSelection.CurrentClient?.ExchangeId
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
+        }).WithName("SelectExchange");
+
         // Legacy Lighter endpoints (deprecated, kept for backward compatibility)
         // Now uses abstraction interfaces instead of internal ILighterQueryClient
         var lighter = app.MapGroup("/api/lighter").WithTags("Lighter Trading (Deprecated)");
@@ -95,16 +141,70 @@ public partial class Program
             return Results.Ok(new { TradingState = state.State.ToString(), IsRunning = engine.IsRunning, Market = cfg.Market });
         }).WithName("GetTradingStatus");
 
-        trading.MapPost("/control/pause", async (GridBot.Core.Services.Engine.ISimpleTradingEngine engine, CancellationToken ct) =>
+        trading.MapGet("/bot-status", (IGridBotControlService botControl, IExchangeSelectionService exchangeSelection, IOptions<SimpleGridConfig> config) =>
         {
-            await engine.PauseAsync("Manual pause", ct);
-            return Results.Ok(new { Success = true });
+            var cfg = config.Value;
+            return Results.Ok(new
+            {
+                Status = botControl.Status.ToString(),
+                IsRunning = botControl.IsRunning,
+                CurrentExchangeId = botControl.CurrentExchangeId,
+                CurrentExchangeType = botControl.CurrentExchangeType?.ToString(),
+                LastError = botControl.LastError,
+                Market = cfg.Market
+            });
+        }).WithName("GetBotStatus");
+
+        trading.MapPost("/control/start", async (IGridBotControlService botControl, CancellationToken ct) =>
+        {
+            try
+            {
+                await botControl.StartAsync(ct);
+                return Results.Ok(new { Success = true, Status = botControl.Status.ToString() });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
+        }).WithName("StartTrading");
+
+        trading.MapPost("/control/stop", async (IGridBotControlService botControl, CancellationToken ct) =>
+        {
+            try
+            {
+                await botControl.StopAsync(ct);
+                return Results.Ok(new { Success = true, Status = botControl.Status.ToString() });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
+        }).WithName("StopTrading");
+
+        trading.MapPost("/control/pause", async (IGridBotControlService botControl, CancellationToken ct) =>
+        {
+            try
+            {
+                await botControl.PauseAsync("Manual pause", ct);
+                return Results.Ok(new { Success = true, Status = botControl.Status.ToString() });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
         }).WithName("PauseTrading");
 
-        trading.MapPost("/control/resume", async (GridBot.Core.Services.Engine.ISimpleTradingEngine engine, CancellationToken ct) =>
+        trading.MapPost("/control/resume", async (IGridBotControlService botControl, CancellationToken ct) =>
         {
-            await engine.ResumeAsync(ct);
-            return Results.Ok(new { Success = true });
+            try
+            {
+                await botControl.ResumeAsync(ct);
+                return Results.Ok(new { Success = true, Status = botControl.Status.ToString() });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
         }).WithName("ResumeTrading");
 
         // Configuration endpoints

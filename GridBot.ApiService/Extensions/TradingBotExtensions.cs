@@ -1,6 +1,8 @@
 using GridBot.ApiService.Services;
 using GridBot.ApiService.Services.Adaptive;
+using GridBot.ApiService.Services.Bot;
 using GridBot.ApiService.Services.Dashboard;
+using GridBot.ApiService.Services.Exchange;
 using GridBot.ApiService.Services.MarketData;
 using GridBot.ApiService.Services.Telemetry;
 using GridBot.Core.Extensions;
@@ -48,7 +50,14 @@ public static class TradingBotExtensions
         services.AddSingleton<IDashboardStateService>(sp => sp.GetRequiredService<DashboardStateService>());
         services.AddHostedService(sp => sp.GetRequiredService<DashboardStateService>());
 
-        // Trading bot hosted service
+        // Bot control service (must be registered before exchange selection service)
+        services.AddSingleton<GridBotControlService>();
+        services.AddSingleton<IGridBotControlService>(sp => sp.GetRequiredService<GridBotControlService>());
+
+        // Exchange selection service
+        services.AddSingleton<IExchangeSelectionService, ExchangeSelectionService>();
+
+        // Trading bot hosted service (no longer auto-starts, controlled by IGridBotControlService)
         services.AddSingleton<SimpleTradingBotHostedService>();
         services.AddHostedService(sp => sp.GetRequiredService<SimpleTradingBotHostedService>());
 

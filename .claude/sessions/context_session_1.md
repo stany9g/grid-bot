@@ -395,3 +395,32 @@ All production blockers from the trading bot audit have been fixed (2025-12-26):
    - Phase 2: Mainnet paper trading (DryRun mode)
    - Phase 3: Mainnet with position limits
    - Phase 4: Full production
+
+## Code Review: Bot Control & DEX Selection (2025-12-26)
+
+**Review document:** `.claude/doc/code-review-bot-control-dex-selection.md`
+
+### Overall Verdict: APPROVED with HIGH priority fixes
+
+### HIGH Priority Issues (Fix before production):
+
+1. **Race Condition in GridBotControlService.PauseAsync/ResumeAsync**
+   - State validation inside lock, but async operation outside
+   - Another thread could change state between validation and execution
+   - **Fix:** Add `Pausing`/`Resuming` transitional states to `BotStatus` enum
+
+2. **Race Condition in ExchangeSelectionService.SelectExchangeAsync**
+   - Bot running check happens outside the lock (TOCTOU vulnerability)
+   - Bot could start between check and lock acquisition
+   - **Fix:** Move `_botControlService.IsRunning` check inside the lock
+
+### WARNING Issues:
+
+1. **Event raised inside lock** - `SetRunning()`/`SetPaused()` call `RaiseStatusChanged` inside lock (potential deadlock)
+2. **Fire-and-forget task** - `RefreshAvailableExchangesAsync()` called without await in constructor
+
+### Approved Patterns:
+- Correct `IDisposable` implementation in Blazor components
+- Proper `InvokeAsync(StateHasChanged)` for thread-safe UI updates
+- Consistent lock pattern for state protection
+- Proper cancellation token propagation

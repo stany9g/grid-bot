@@ -1,0 +1,189 @@
+@using GridBot.ApiService.Services.Bot
+@using GridBot.ApiService.Services.Exchange
+@using GridBot.Abstractions.Factory
+@using MudBlazor
+@inject IGridBotControlService BotControl
+@inject IExchangeSelectionService ExchangeSelection
+@inject ISnackbar Snackbar
+@implements IDisposable
+
+<div class="d-flex flex-column gap-2">
+    <div class="d-flex align-center gap-2">
+        <MudIcon Icon="@Icons.Material.Filled.CurrencyExchange" Size="Size.Small" />
+        <MudText Typo="Typo.subtitle2">Exchange Selection</MudText>
+        @if (_isLoading)
+        {
+            <MudProgressCircular Size="Size.Small" Indeterminate="true" />
+        }
+    </div>
+
+    <MudTooltip Text="@GetDisabledTooltip()" Disabled="@(!IsSelectorDisabled())">
+        <MudSelect T="ExchangeType?"
+                   Value="@ExchangeSelection.CurrentExchangeType"
+                   ValueChanged="OnExchangeSelected"
+                   Variant="Variant.Outlined"
+                   Margin="Margin.Dense"
+                   Label="Select DEX"
+                   Disabled="@(IsSelectorDisabled() || _isLoading)"
+                   AnchorOrigin="Origin.BottomCenter"
+                   Class="exchange-selector">
+            @foreach (var exchange in ExchangeSelection.AvailableExchanges)
+            {
+                <MudSelectItem Value="@((ExchangeType?)exchange.Type)">
+                    <div class="d-flex align-center justify-space-between" style="width: 100%;">
+                        <span>@exchange.DisplayName</span>
+                        <MudChip T="string"
+                                 Size="Size.Small"
+                                 Color="@(exchange.IsAvailable ? Color.Success : Color.Error)"
+                                 Variant="Variant.Outlined">
+                            @(exchange.IsAvailable ? "Connected" : "Disconnected")
+                        </MudChip>
+                    </div>
+                </MudSelectItem>
+            }
+        </MudSelect>
+    </MudTooltip>
+
+    @* Status message for selected exchange *@
+    @if (ExchangeSelection.CurrentExchangeType.HasValue)
+    {
+        var currentExchange = ExchangeSelection.AvailableExchanges
+            .FirstOrDefault(e => e.Type == ExchangeSelection.CurrentExchangeType.Value);
+
+        if (currentExchange is not null && !string.IsNullOrEmpty(currentExchange.StatusMessage))
+        {
+            <MudText Typo="Typo.caption"
+                     Color="@(currentExchange.IsAvailable ? Color.Success : Color.Error)">
+                @currentExchange.StatusMessage
+            </MudText>
+        }
+    }
+
+    @* Refresh button *@
+    <MudButton Variant="Variant.Text"
+               Color="Color.Secondary"
+               Size="Size.Small"
+               StartIcon="@Icons.Material.Filled.Refresh"
+               OnClick="RefreshExchanges"
+               Disabled="@_isLoading">
+        Refresh Status
+    </MudButton>
+</div>
+
+@code {
+    private bool _isLoading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        BotControl.StatusChanged += OnBotStatusChanged;
+        ExchangeSelection.ExchangeChanged += OnExchangeChanged;
+
+        // Initial refresh of available exchanges
+        await RefreshExchanges();
+    }
+
+    private void OnBotStatusChanged(object? sender, BotStatusChangedEventArgs e)
+    {
+        // Re-render when bot status changes to update disabled state
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnExchangeChanged(object? sender, ExchangeType e)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnExchangeSelected(ExchangeType? exchangeType)
+    {
+        if (!exchangeType.HasValue)
+            return;
+
+        if (IsSelectorDisabled())
+        {
+            Snackbar.Add("Cannot switch exchange while bot is running. Stop the bot first.", Severity.Warning);
+            return;
+        }
+
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await ExchangeSelection.SelectExchangeAsync(exchangeType.Value);
+            Snackbar.Add($"Switched to {GetExchangeDisplayName(exchangeType.Value)}", Severity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot switch exchange: {ex.Message}", Severity.Error);
+        }
+        catch (ArgumentException ex)
+        {
+            Snackbar.Add($"Invalid exchange: {ex.Message}", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to switch exchange: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task RefreshExchanges()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await ExchangeSelection.RefreshAvailableExchangesAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to refresh exchanges: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private bool IsSelectorDisabled()
+    {
+        // Disable when bot is in any active state (not stopped or error)
+        return BotControl.Status is BotStatus.Starting
+            or BotStatus.Running
+            or BotStatus.Paused
+            or BotStatus.Stopping;
+    }
+
+    private string GetDisabledTooltip()
+    {
+        if (!IsSelectorDisabled())
+            return string.Empty;
+
+        return BotControl.Status switch
+        {
+            BotStatus.Starting => "Cannot change exchange while bot is starting",
+            BotStatus.Running => "Stop the bot before switching exchanges",
+            BotStatus.Paused => "Stop the bot before switching exchanges",
+            BotStatus.Stopping => "Cannot change exchange while bot is stopping",
+            _ => "Cannot change exchange now"
+        };
+    }
+
+    private static string GetExchangeDisplayName(ExchangeType exchangeType) => exchangeType switch
+    {
+        ExchangeType.Lighter => "Lighter",
+        ExchangeType.Hyperliquid => "Hyperliquid",
+        ExchangeType.Extended => "Extended",
+        _ => exchangeType.ToString()
+    };
+
+    public void Dispose()
+    {
+        BotControl.StatusChanged -= OnBotStatusChanged;
+        ExchangeSelection.ExchangeChanged -= OnExchangeChanged;
+    }
+}

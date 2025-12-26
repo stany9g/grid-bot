@@ -46,6 +46,11 @@
         </MudAlert>
     }
 
+    @* Exchange Selector Section *@
+    <MudPaper Elevation="0" Class="pa-3 mb-4" Style="background-color: var(--mud-palette-background-grey);">
+        <ExchangeSelector />
+    </MudPaper>
+
     <MudExpansionPanels MultiExpansion="true">
         @* Grid Strategy Panel *@
         <MudExpansionPanel @bind-Expanded="@_gridPanelExpanded">

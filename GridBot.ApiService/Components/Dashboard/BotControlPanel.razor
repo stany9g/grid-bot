@@ -1,0 +1,318 @@
+@using GridBot.ApiService.Services.Bot
+@using GridBot.ApiService.Services.Exchange
+@using GridBot.Abstractions.Factory
+@using MudBlazor
+@inject IGridBotControlService BotControl
+@inject IExchangeSelectionService ExchangeSelection
+@inject ISnackbar Snackbar
+@implements IDisposable
+
+<MudCard Elevation="2" Class="h-100">
+    <MudCardHeader>
+        <CardHeaderContent>
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@Icons.Material.Filled.SmartToy" />
+                <MudText Typo="Typo.h6">Bot Control</MudText>
+                <MudChip T="string"
+                         Color="@GetStatusColor()"
+                         Size="Size.Small"
+                         Variant="Variant.Filled">
+                    @GetStatusDisplayText()
+                </MudChip>
+            </div>
+        </CardHeaderContent>
+        <CardHeaderActions>
+            @if (ExchangeSelection.CurrentExchangeType.HasValue)
+            {
+                <MudChip T="string"
+                         Color="Color.Info"
+                         Size="Size.Small"
+                         Variant="Variant.Outlined"
+                         Icon="@Icons.Material.Filled.CurrencyExchange">
+                    @GetExchangeDisplayName()
+                </MudChip>
+            }
+        </CardHeaderActions>
+    </MudCardHeader>
+    <MudCardContent>
+        <div class="d-flex flex-column gap-4">
+            @* Main Control Buttons *@
+            <div class="d-flex align-center gap-3">
+                @if (BotControl.Status == BotStatus.Stopped || BotControl.Status == BotStatus.Error)
+                {
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Success"
+                               Size="Size.Large"
+                               StartIcon="@Icons.Material.Filled.PlayArrow"
+                               OnClick="StartBot"
+                               Disabled="@(_isProcessing || !ExchangeSelection.CurrentExchangeType.HasValue)"
+                               Class="flex-grow-1">
+                        @if (_isProcessing)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        }
+                        Start Bot
+                    </MudButton>
+                }
+                else if (BotControl.Status == BotStatus.Starting)
+                {
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Info"
+                               Size="Size.Large"
+                               Disabled="true"
+                               Class="flex-grow-1">
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        Starting...
+                    </MudButton>
+                }
+                else if (BotControl.Status == BotStatus.Stopping)
+                {
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Info"
+                               Size="Size.Large"
+                               Disabled="true"
+                               Class="flex-grow-1">
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        Stopping...
+                    </MudButton>
+                }
+                else
+                {
+                    @* Running or Paused - show Stop button *@
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Error"
+                               Size="Size.Large"
+                               StartIcon="@Icons.Material.Filled.Stop"
+                               OnClick="StopBot"
+                               Disabled="@_isProcessing"
+                               Class="flex-grow-1">
+                        @if (_isProcessing)
+                        {
+                            <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        }
+                        Stop Bot
+                    </MudButton>
+                }
+
+                @* Pause/Resume button - only visible when running, paused, or transitioning *@
+                @if (BotControl.Status == BotStatus.Running)
+                {
+                    <MudTooltip Text="Pause trading temporarily">
+                        <MudButton Variant="Variant.Outlined"
+                                   Color="Color.Warning"
+                                   Size="Size.Large"
+                                   StartIcon="@Icons.Material.Filled.Pause"
+                                   OnClick="PauseBot"
+                                   Disabled="@_isProcessing">
+                            Pause
+                        </MudButton>
+                    </MudTooltip>
+                }
+                else if (BotControl.Status == BotStatus.Pausing)
+                {
+                    <MudButton Variant="Variant.Outlined"
+                               Color="Color.Warning"
+                               Size="Size.Large"
+                               Disabled="true">
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        Pausing...
+                    </MudButton>
+                }
+                else if (BotControl.Status == BotStatus.Paused)
+                {
+                    <MudTooltip Text="Resume trading">
+                        <MudButton Variant="Variant.Outlined"
+                                   Color="Color.Success"
+                                   Size="Size.Large"
+                                   StartIcon="@Icons.Material.Filled.PlayArrow"
+                                   OnClick="ResumeBot"
+                                   Disabled="@_isProcessing">
+                            Resume
+                        </MudButton>
+                    </MudTooltip>
+                }
+                else if (BotControl.Status == BotStatus.Resuming)
+                {
+                    <MudButton Variant="Variant.Outlined"
+                               Color="Color.Success"
+                               Size="Size.Large"
+                               Disabled="true">
+                        <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="mr-2" />
+                        Resuming...
+                    </MudButton>
+                }
+            </div>
+
+            @* Error display *@
+            @if (BotControl.Status == BotStatus.Error && !string.IsNullOrEmpty(BotControl.LastError))
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mt-2">
+                    <MudText Typo="Typo.body2">@BotControl.LastError</MudText>
+                </MudAlert>
+            }
+
+            @* No exchange selected warning *@
+            @if (!ExchangeSelection.CurrentExchangeType.HasValue && BotControl.Status == BotStatus.Stopped)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true">
+                    <MudText Typo="Typo.body2">Select a DEX in Settings before starting the bot.</MudText>
+                </MudAlert>
+            }
+        </div>
+    </MudCardContent>
+</MudCard>
+
+@code {
+    private bool _isProcessing;
+
+    protected override void OnInitialized()
+    {
+        BotControl.StatusChanged += OnStatusChanged;
+        ExchangeSelection.ExchangeChanged += OnExchangeChanged;
+    }
+
+    private void OnStatusChanged(object? sender, BotStatusChangedEventArgs e)
+    {
+        _isProcessing = false;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnExchangeChanged(object? sender, ExchangeType e)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task StartBot()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+
+        try
+        {
+            await BotControl.StartAsync();
+            Snackbar.Add("Bot started successfully", Severity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot start bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to start bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+    }
+
+    private async Task StopBot()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+
+        try
+        {
+            await BotControl.StopAsync();
+            Snackbar.Add("Bot stopped", Severity.Info);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot stop bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to stop bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+    }
+
+    private async Task PauseBot()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+
+        try
+        {
+            await BotControl.PauseAsync("User requested pause");
+            Snackbar.Add("Bot paused", Severity.Warning);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot pause bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to pause bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+    }
+
+    private async Task ResumeBot()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+
+        try
+        {
+            await BotControl.ResumeAsync();
+            Snackbar.Add("Bot resumed", Severity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot resume bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to resume bot: {ex.Message}", Severity.Error);
+            _isProcessing = false;
+        }
+    }
+
+    private Color GetStatusColor() => BotControl.Status switch
+    {
+        BotStatus.Stopped => Color.Default,
+        BotStatus.Starting => Color.Info,
+        BotStatus.Running => Color.Success,
+        BotStatus.Pausing => Color.Warning,
+        BotStatus.Paused => Color.Warning,
+        BotStatus.Resuming => Color.Info,
+        BotStatus.Stopping => Color.Info,
+        BotStatus.Error => Color.Error,
+        _ => Color.Default
+    };
+
+    private string GetStatusDisplayText() => BotControl.Status switch
+    {
+        BotStatus.Stopped => "Stopped",
+        BotStatus.Starting => "Starting",
+        BotStatus.Running => "Running",
+        BotStatus.Pausing => "Pausing",
+        BotStatus.Paused => "Paused",
+        BotStatus.Resuming => "Resuming",
+        BotStatus.Stopping => "Stopping",
+        BotStatus.Error => "Error",
+        _ => "Unknown"
+    };
+
+    private string GetExchangeDisplayName()
+    {
+        if (!ExchangeSelection.CurrentExchangeType.HasValue)
+            return "No DEX";
+
+        return ExchangeSelection.CurrentExchangeType.Value switch
+        {
+            ExchangeType.Lighter => "Lighter",
+            ExchangeType.Hyperliquid => "Hyperliquid",
+            ExchangeType.Extended => "Extended",
+            _ => ExchangeSelection.CurrentExchangeType.Value.ToString()
+        };
+    }
+
+    public void Dispose()
+    {
+        BotControl.StatusChanged -= OnStatusChanged;
+        ExchangeSelection.ExchangeChanged -= OnExchangeChanged;
+    }
+}

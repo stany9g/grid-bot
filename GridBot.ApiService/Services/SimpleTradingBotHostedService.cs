@@ -1,3 +1,4 @@
+using GridBot.ApiService.Services.Bot;
 using GridBot.Core.Configuration;
 using GridBot.Core.Services.Engine;
 using Microsoft.Extensions.Options;
@@ -6,6 +7,7 @@ namespace GridBot.ApiService.Services;
 
 /// <summary>
 /// Background service that runs the SimpleTradingEngine from GridBot.Core.
+/// Does NOT auto-start - waits for IGridBotControlService to signal start.
 /// </summary>
 public sealed class SimpleTradingBotHostedService : BackgroundService
 {
@@ -35,33 +37,41 @@ public sealed class SimpleTradingBotHostedService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation(
-            "SimpleTradingBotHostedService starting for {Market} with {LoopInterval}s interval",
+            "SimpleTradingBotHostedService ready for {Market} with {LoopInterval}s interval (waiting for start command)",
             _config.Market,
             _config.LoopIntervalSeconds);
 
+        var loopInterval = TimeSpan.FromSeconds(_config.LoopIntervalSeconds);
+
         try
         {
-            await _engine.StartAsync(stoppingToken);
-
-            var loopInterval = TimeSpan.FromSeconds(_config.LoopIntervalSeconds);
-
+            // Main loop - runs trading cycles when engine is running
             while (!stoppingToken.IsCancellationRequested)
             {
-                try
+                // Only run cycles when engine is running
+                if (_engine.IsRunning)
                 {
-                    await _engine.RunCycleAsync(stoppingToken);
-                    LastCycleTime = DateTimeOffset.UtcNow;
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error in trading cycle");
-                }
+                    try
+                    {
+                        await _engine.RunCycleAsync(stoppingToken);
+                        LastCycleTime = DateTimeOffset.UtcNow;
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error in trading cycle");
+                    }
 
-                await Task.Delay(loopInterval, stoppingToken);
+                    await Task.Delay(loopInterval, stoppingToken);
+                }
+                else
+                {
+                    // Wait a bit before checking again if engine is not running
+                    await Task.Delay(TimeSpan.FromMilliseconds(500), stoppingToken);
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -70,13 +80,17 @@ public sealed class SimpleTradingBotHostedService : BackgroundService
         }
         finally
         {
-            try
+            // Ensure engine is stopped on shutdown
+            if (_engine.IsRunning)
             {
-                await _engine.StopAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error stopping trading engine");
+                try
+                {
+                    await _engine.StopAsync(CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error stopping trading engine");
+                }
             }
 
             _logger.LogInformation("SimpleTradingBotHostedService stopped");
