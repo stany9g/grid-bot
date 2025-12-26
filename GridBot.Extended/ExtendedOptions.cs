@@ -40,6 +40,16 @@ public sealed class ExtendedOptions
     public string AccountAddress { get; set; } = string.Empty;
 
     /// <summary>
+    /// Vault number for the account (used for deposits/withdrawals).
+    /// </summary>
+    public long VaultNumber { get; set; }
+
+    /// <summary>
+    /// Client ID for the account.
+    /// </summary>
+    public long ClientId { get; set; }
+
+    /// <summary>
     /// Whether this is testnet (affects max order expiry and other behaviors).
     /// </summary>
     public bool IsTestnet { get; set; } = false;
