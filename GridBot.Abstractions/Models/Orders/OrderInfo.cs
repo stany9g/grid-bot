@@ -63,6 +63,11 @@ public sealed record OrderInfo
     public bool ReduceOnly { get; init; }
 
     /// <summary>
+    /// Gets the current order status.
+    /// </summary>
+    public OrderStatus Status { get; init; } = OrderStatus.Open;
+
+    /// <summary>
     /// Gets the timestamp when the order was created.
     /// </summary>
     public required DateTimeOffset CreatedAt { get; init; }
@@ -71,6 +76,11 @@ public sealed record OrderInfo
     /// Gets the timestamp when the order was last updated.
     /// </summary>
     public DateTimeOffset? UpdatedAt { get; init; }
+
+    /// <summary>
+    /// Gets the timestamp when the order expires.
+    /// </summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
 
     /// <summary>
     /// Gets the trigger price for stop/take-profit orders.

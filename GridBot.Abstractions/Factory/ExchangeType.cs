@@ -13,5 +13,10 @@ public enum ExchangeType
     /// <summary>
     /// Hyperliquid - High-performance L1 perpetuals exchange.
     /// </summary>
-    Hyperliquid = 2
+    Hyperliquid = 2,
+
+    /// <summary>
+    /// Extended - Starknet-based perpetuals exchange.
+    /// </summary>
+    Extended = 3
 }

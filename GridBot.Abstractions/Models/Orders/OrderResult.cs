@@ -47,4 +47,14 @@ public sealed record OrderResult
     /// <returns>A failed order result.</returns>
     public static OrderResult Failure(string message, int? code = null) =>
         new() { IsSuccess = false, ErrorMessage = message, ErrorCode = code };
+
+    /// <summary>
+    /// Creates a pending confirmation order result.
+    /// The order was submitted but awaits exchange confirmation.
+    /// </summary>
+    /// <param name="clientOrderId">The client-assigned order identifier.</param>
+    /// <param name="exchangeOrderId">Optional exchange-assigned order identifier.</param>
+    /// <returns>A pending confirmation order result.</returns>
+    public static OrderResult PendingConfirmation(string clientOrderId, string? exchangeOrderId = null) =>
+        new() { IsSuccess = true, OrderId = exchangeOrderId ?? clientOrderId, TransactionHash = "PENDING" };
 }
