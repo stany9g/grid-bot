@@ -1,9 +1,12 @@
+using System.Collections.Concurrent;
 using GridBot.Abstractions.Authentication;
 using GridBot.Abstractions.Communication;
+using GridBot.Abstractions.Extensions;
 using GridBot.Abstractions.Factory;
 using GridBot.Abstractions.Scaling;
 using GridBot.Abstractions.Trading;
 using GridBot.Lighter.Adapters;
+using GridBot.Lighter.Factory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -181,4 +184,194 @@ public static class LighterAbstractionsExtensions
 
         return exchangeClient;
     }
+
+    /// <summary>
+    /// Service key for testnet exchange client.
+    /// </summary>
+    public const string TestnetServiceKey = "lighter-testnet";
+
+    /// <summary>
+    /// Service key for mainnet exchange client.
+    /// </summary>
+    public const string MainnetServiceKey = "lighter-mainnet";
+
+    /// <summary>
+    /// Adds Lighter network configuration and factory services to the service collection.
+    /// This registers <see cref="LighterNetworksOptions"/> and <see cref="INetworkExchangeFactory"/>
+    /// for runtime network switching between testnet and mainnet.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">Configuration containing the "LighterNetworks" and "LighterWebSocket" sections.</param>
+    /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    /// This method registers:
+    /// - LighterNetworksOptions from configuration
+    /// - WebSocketOptions from configuration
+    /// - INetworkExchangeFactory for creating exchange clients per network
+    /// - IExchangeRegistry for managing registered exchange clients
+    /// - HTTP client factory for REST operations
+    ///
+    /// Networks are initialized on-demand when selected via the NetworkSelectionService.
+    /// The factory creates exchange clients lazily and caches them.
+    /// </remarks>
+    public static IServiceCollection AddLighterNetworks(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        // Bind LighterNetworksOptions from configuration
+        services.AddOptions<LighterNetworksOptions>()
+            .Bind(configuration.GetSection(LighterNetworksOptions.SectionName));
+
+        // Bind WebSocket options
+        services.AddOptions<WebSocketOptions>()
+            .Bind(configuration.GetSection(WebSocketOptions.SectionName));
+
+        // Validate native library early to catch platform/architecture issues
+        var nativeError = SignerClient.ValidateNativeLibrary();
+        if (nativeError != null)
+        {
+            throw new InvalidOperationException($"Native library validation failed: {nativeError}");
+        }
+
+        // Register HTTP client for REST operations
+        services.AddHttpClient();
+
+        // Register the exchange registry
+        services.AddExchangeRegistry();
+
+        // Register the network exchange factory
+        services.AddSingleton<INetworkExchangeFactory, NetworkExchangeFactory>();
+
+        // Register forwarding services that delegate to the current exchange client
+        // These services resolve the primary exchange from the registry at call time
+        services.AddScoped<IAccountClient>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().Account;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        services.AddScoped<IMarketDataClient>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().MarketData;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        services.AddScoped<IOrderClient>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().Orders;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        services.AddScoped<IScalingProvider>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().Scaling;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        services.AddScoped<IAuthenticationProvider>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().Auth;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        services.AddScoped<IExchangeConnection>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().Connection;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        services.AddScoped<IRealtimeDataProvider>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary().RealtimeData;
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        // Register forwarding for IExchangeClient (non-keyed)
+        services.AddScoped<IExchangeClient>(sp =>
+        {
+            var registry = sp.GetRequiredService<IExchangeRegistry>();
+            try
+            {
+                return registry.GetPrimary();
+            }
+            catch (InvalidOperationException)
+            {
+                throw new InvalidOperationException(
+                    "No exchange client is registered. Select a network first.");
+            }
+        });
+
+        return services;
+    }
+
+    /// <summary>
+    /// Gets the service key for a network type.
+    /// </summary>
+    /// <param name="network">The network type.</param>
+    /// <returns>The service key for the network.</returns>
+    public static string GetServiceKey(LighterNetworkType network) => network switch
+    {
+        LighterNetworkType.Testnet => TestnetServiceKey,
+        LighterNetworkType.Mainnet => MainnetServiceKey,
+        _ => throw new ArgumentOutOfRangeException(nameof(network), network, "Unknown network type")
+    };
 }

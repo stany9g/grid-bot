@@ -1,9 +1,12 @@
 @using GridBot.ApiService.Services.Bot
 @using GridBot.ApiService.Services.Exchange
+@using GridBot.ApiService.Services.Network
 @using GridBot.Abstractions.Factory
+@using GridBot.Lighter
 @using MudBlazor
 @inject IGridBotControlService BotControl
 @inject IExchangeSelectionService ExchangeSelection
+@inject INetworkSelectionService NetworkSelection
 @inject ISnackbar Snackbar
 @implements IDisposable
 
@@ -22,6 +25,16 @@
             </div>
         </CardHeaderContent>
         <CardHeaderActions>
+            @* Network chip *@
+            <MudChip T="string"
+                     Color="@GetNetworkChipColor()"
+                     Size="Size.Small"
+                     Variant="Variant.Filled"
+                     Icon="@GetNetworkIcon()">
+                @GetNetworkDisplayName()
+            </MudChip>
+
+            @* Exchange chip *@
             @if (ExchangeSelection.CurrentExchangeType.HasValue)
             {
                 <MudChip T="string"
@@ -158,27 +171,49 @@
                     <MudText Typo="Typo.body2">Select a DEX in Settings before starting the bot.</MudText>
                 </MudAlert>
             }
+
+            @* Mainnet warning banner *@
+            @if (NetworkSelection.CurrentNetwork == LighterNetworkType.Mainnet)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Icon="@Icons.Material.Filled.Warning">
+                    <div class="d-flex align-center gap-2">
+                        <MudText Typo="Typo.body2" Style="font-weight: 600;">
+                            MAINNET - Real funds at risk!
+                        </MudText>
+                    </div>
+                </MudAlert>
+            }
         </div>
     </MudCardContent>
 </MudCard>
 
 @code {
     private bool _isProcessing;
+    private bool _disposed;
 
     protected override void OnInitialized()
     {
         BotControl.StatusChanged += OnStatusChanged;
         ExchangeSelection.ExchangeChanged += OnExchangeChanged;
+        NetworkSelection.NetworkChanged += OnNetworkChanged;
     }
 
     private void OnStatusChanged(object? sender, BotStatusChangedEventArgs e)
     {
+        if (_disposed) return;
         _isProcessing = false;
         InvokeAsync(StateHasChanged);
     }
 
     private void OnExchangeChanged(object? sender, ExchangeType e)
     {
+        if (_disposed) return;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnNetworkChanged(object? sender, LighterNetworkType e)
+    {
+        if (_disposed) return;
         InvokeAsync(StateHasChanged);
     }
 
@@ -310,9 +345,32 @@
         };
     }
 
+    private string GetNetworkDisplayName() => NetworkSelection.CurrentNetwork switch
+    {
+        LighterNetworkType.Testnet => "Testnet",
+        LighterNetworkType.Mainnet => "Mainnet",
+        _ => NetworkSelection.CurrentNetwork.ToString()
+    };
+
+    private string GetNetworkIcon() => NetworkSelection.CurrentNetwork switch
+    {
+        LighterNetworkType.Testnet => Icons.Material.Filled.Science,
+        LighterNetworkType.Mainnet => Icons.Material.Filled.Public,
+        _ => Icons.Material.Filled.Cloud
+    };
+
+    private Color GetNetworkChipColor() => NetworkSelection.CurrentNetwork switch
+    {
+        LighterNetworkType.Testnet => Color.Warning,
+        LighterNetworkType.Mainnet => Color.Primary,
+        _ => Color.Default
+    };
+
     public void Dispose()
     {
+        _disposed = true;
         BotControl.StatusChanged -= OnStatusChanged;
         ExchangeSelection.ExchangeChanged -= OnExchangeChanged;
+        NetworkSelection.NetworkChanged -= OnNetworkChanged;
     }
 }

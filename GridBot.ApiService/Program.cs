@@ -5,9 +5,11 @@ using GridBot.ApiService.Extensions;
 using GridBot.ApiService.Services.Bot;
 using GridBot.ApiService.Services.Exchange;
 using GridBot.ApiService.Services.MarketData;
+using GridBot.ApiService.Services.Network;
 using GridBot.Core.Configuration;
 using GridBot.Core.Services.Adaptive;
 using GridBot.Core.Services.Configuration;
+using GridBot.Lighter;
 using GridBot.Lighter.Extensions;
 using Microsoft.AspNetCore.Hosting.StaticWebAssets;
 using Microsoft.Extensions.Options;
@@ -28,8 +30,10 @@ public partial class Program
         builder.AddServiceDefaults();
         builder.AddRedisDistributedCache("cache");
 
-        // Register Lighter DEX with abstraction adapters
-        builder.Services.AddLighterExchange(builder.Configuration, "lighter-main");
+        // Register Lighter network configuration (testnet/mainnet)
+        // This registers the network factory and exchange registry.
+        // The exchange client is created lazily when the network is selected.
+        builder.Services.AddLighterNetworks(builder.Configuration);
 
         builder.Services.AddTradingBot(builder.Configuration);
         builder.Services.AddProblemDetails();
@@ -114,6 +118,51 @@ public partial class Program
                 return Results.BadRequest(new { Success = false, Error = ex.Message });
             }
         }).WithName("SelectExchange");
+
+        // Network selection endpoints (testnet/mainnet)
+        var network = app.MapGroup("/api/network").WithTags("Network");
+
+        network.MapGet("/available", async (INetworkSelectionService networkSelection, CancellationToken ct) =>
+        {
+            await networkSelection.RefreshNetworkStatusAsync(ct);
+            return Results.Ok(networkSelection.AvailableNetworks);
+        }).WithName("GetAvailableNetworks");
+
+        network.MapGet("/current", (INetworkSelectionService networkSelection) =>
+        {
+            return Results.Ok(new
+            {
+                NetworkType = networkSelection.CurrentNetwork.ToString(),
+                DisplayName = GetNetworkDisplayName(networkSelection.CurrentNetwork)
+            });
+        }).WithName("GetCurrentNetwork");
+
+        network.MapPost("/select", async (NetworkSelectRequest request, INetworkSelectionService networkSelection, CancellationToken ct) =>
+        {
+            if (!Enum.TryParse<LighterNetworkType>(request.NetworkType, ignoreCase: true, out var networkType))
+            {
+                return Results.BadRequest(new { Error = $"Invalid network type: {request.NetworkType}. Valid values are: Testnet, Mainnet" });
+            }
+
+            try
+            {
+                await networkSelection.SelectNetworkAsync(networkType, ct);
+                return Results.Ok(new
+                {
+                    Success = true,
+                    NetworkType = networkSelection.CurrentNetwork.ToString(),
+                    DisplayName = GetNetworkDisplayName(networkSelection.CurrentNetwork)
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { Success = false, Error = ex.Message });
+            }
+        }).WithName("SelectNetwork");
 
         // Legacy Lighter endpoints (deprecated, kept for backward compatibility)
         // Now uses abstraction interfaces instead of internal ILighterQueryClient
@@ -312,4 +361,11 @@ public partial class Program
 
         await app.RunAsync();
     }
+
+    private static string GetNetworkDisplayName(LighterNetworkType network) => network switch
+    {
+        LighterNetworkType.Testnet => "Lighter Testnet",
+        LighterNetworkType.Mainnet => "Lighter Mainnet",
+        _ => network.ToString()
+    };
 }

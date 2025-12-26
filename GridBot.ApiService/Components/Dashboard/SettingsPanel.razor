@@ -46,6 +46,11 @@
         </MudAlert>
     }
 
+    @* Network Selector Section *@
+    <MudPaper Elevation="0" Class="pa-3 mb-4" Style="background-color: var(--mud-palette-background-grey);">
+        <NetworkSelector />
+    </MudPaper>
+
     @* Exchange Selector Section *@
     <MudPaper Elevation="0" Class="pa-3 mb-4" Style="background-color: var(--mud-palette-background-grey);">
         <ExchangeSelector />
@@ -327,6 +332,7 @@
     private bool _isLoading = true;
     private bool _isSaving;
     private bool _gridPanelExpanded = true;
+    private bool _disposed;
 
     protected override async Task OnInitializedAsync()
     {
@@ -349,6 +355,7 @@
 
     private void OnConfigChanged(object? sender, RuntimeGridConfig newConfig)
     {
+        if (_disposed) return;
         _config = CloneConfig(newConfig);
         ValidateConfig();
         InvokeAsync(StateHasChanged);
@@ -585,6 +592,7 @@
 
     public void Dispose()
     {
+        _disposed = true;
         ConfigService.ConfigChanged -= OnConfigChanged;
     }
 }

@@ -4,6 +4,7 @@ using GridBot.ApiService.Services.Bot;
 using GridBot.ApiService.Services.Dashboard;
 using GridBot.ApiService.Services.Exchange;
 using GridBot.ApiService.Services.MarketData;
+using GridBot.ApiService.Services.Network;
 using GridBot.ApiService.Services.Telemetry;
 using GridBot.Core.Extensions;
 using GridBot.Core.Services.Adaptive;
@@ -56,6 +57,13 @@ public static class TradingBotExtensions
 
         // Exchange selection service
         services.AddSingleton<IExchangeSelectionService, ExchangeSelectionService>();
+
+        // Network selection service (testnet/mainnet)
+        services.AddSingleton<INetworkSelectionService, NetworkSelectionService>();
+
+        // Network initialization service (initializes default network on startup)
+        // This must run before other hosted services that need exchange client
+        services.AddHostedService<NetworkInitializationService>();
 
         // Trading bot hosted service (no longer auto-starts, controlled by IGridBotControlService)
         services.AddSingleton<SimpleTradingBotHostedService>();

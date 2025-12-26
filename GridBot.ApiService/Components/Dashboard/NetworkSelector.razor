@@ -1,0 +1,249 @@
+@using GridBot.ApiService.Services.Bot
+@using GridBot.ApiService.Services.Network
+@using GridBot.Lighter
+@using MudBlazor
+@inject INetworkSelectionService NetworkSelection
+@inject IGridBotControlService BotControl
+@inject ISnackbar Snackbar
+@implements IDisposable
+
+<div class="d-flex flex-column gap-2">
+    <div class="d-flex align-center gap-2">
+        <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Small" />
+        <MudText Typo="Typo.subtitle2">Network Selection</MudText>
+        @if (_isLoading)
+        {
+            <MudProgressCircular Size="Size.Small" Indeterminate="true" />
+        }
+    </div>
+
+    <MudTooltip Text="@GetDisabledTooltip()" Disabled="@(!IsSelectorDisabled())">
+        <MudSelect T="LighterNetworkType?"
+                   Value="@((LighterNetworkType?)NetworkSelection.CurrentNetwork)"
+                   ValueChanged="OnNetworkSelected"
+                   Variant="Variant.Outlined"
+                   Margin="Margin.Dense"
+                   Label="Select Network"
+                   Disabled="@(IsSelectorDisabled() || _isLoading)"
+                   AnchorOrigin="Origin.BottomCenter"
+                   Class="network-selector">
+            @foreach (var network in NetworkSelection.AvailableNetworks)
+            {
+                <MudSelectItem Value="@((LighterNetworkType?)network.Type)">
+                    <div class="d-flex align-center justify-space-between" style="width: 100%;">
+                        <div class="d-flex align-center gap-2">
+                            <MudIcon Icon="@GetNetworkIcon(network.Type)"
+                                     Color="@GetNetworkIconColor(network.Type)"
+                                     Size="Size.Small" />
+                            <span>@network.DisplayName</span>
+                        </div>
+                        <MudChip T="string"
+                                 Size="Size.Small"
+                                 Color="@(network.IsConfigured ? Color.Success : Color.Error)"
+                                 Variant="Variant.Outlined">
+                            @(network.IsConfigured ? "Configured" : "Not Configured")
+                        </MudChip>
+                    </div>
+                </MudSelectItem>
+            }
+        </MudSelect>
+    </MudTooltip>
+
+    @* Status message for selected network *@
+    @{
+        var currentNetwork = NetworkSelection.AvailableNetworks
+            .FirstOrDefault(n => n.Type == NetworkSelection.CurrentNetwork);
+
+        if (currentNetwork is not null)
+        {
+            @* Show network indicator badge *@
+            <div class="d-flex align-center gap-2 mt-1">
+                <MudChip T="string"
+                         Size="Size.Small"
+                         Color="@GetNetworkChipColor(currentNetwork.Type)"
+                         Variant="Variant.Filled"
+                         Icon="@GetNetworkIcon(currentNetwork.Type)">
+                    @currentNetwork.DisplayName
+                </MudChip>
+                @if (currentNetwork.Type == LighterNetworkType.Mainnet)
+                {
+                    <MudIcon Icon="@Icons.Material.Filled.Warning"
+                             Color="Color.Warning"
+                             Size="Size.Small" />
+                    <MudText Typo="Typo.caption" Color="Color.Warning">
+                        Real funds
+                    </MudText>
+                }
+            </div>
+
+            @if (!string.IsNullOrEmpty(currentNetwork.StatusMessage))
+            {
+                <MudText Typo="Typo.caption"
+                         Color="@(currentNetwork.IsConfigured ? Color.Success : Color.Error)">
+                    @currentNetwork.StatusMessage
+                </MudText>
+            }
+        }
+    }
+
+    @* Refresh button *@
+    <MudButton Variant="Variant.Text"
+               Color="Color.Secondary"
+               Size="Size.Small"
+               StartIcon="@Icons.Material.Filled.Refresh"
+               OnClick="RefreshNetworks"
+               Disabled="@_isLoading">
+        Refresh Status
+    </MudButton>
+</div>
+
+@code {
+    private bool _isLoading;
+    private bool _disposed;
+
+    protected override async Task OnInitializedAsync()
+    {
+        BotControl.StatusChanged += OnBotStatusChanged;
+        NetworkSelection.NetworkChanged += OnNetworkChanged;
+
+        // Initial refresh of available networks
+        await RefreshNetworks();
+    }
+
+    private void OnBotStatusChanged(object? sender, BotStatusChangedEventArgs e)
+    {
+        if (_disposed) return;
+        // Re-render when bot status changes to update disabled state
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnNetworkChanged(object? sender, LighterNetworkType e)
+    {
+        if (_disposed) return;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnNetworkSelected(LighterNetworkType? networkType)
+    {
+        if (!networkType.HasValue)
+            return;
+
+        if (IsSelectorDisabled())
+        {
+            Snackbar.Add("Cannot switch network while bot is running. Stop the bot first.", Severity.Warning);
+            return;
+        }
+
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await NetworkSelection.SelectNetworkAsync(networkType.Value);
+
+            var displayName = GetNetworkDisplayName(networkType.Value);
+            if (networkType.Value == LighterNetworkType.Mainnet)
+            {
+                Snackbar.Add($"Switched to {displayName} - CAUTION: Real funds!", Severity.Warning);
+            }
+            else
+            {
+                Snackbar.Add($"Switched to {displayName}", Severity.Success);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot switch network: {ex.Message}", Severity.Error);
+        }
+        catch (ArgumentException ex)
+        {
+            Snackbar.Add($"Invalid network: {ex.Message}", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to switch network: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task RefreshNetworks()
+    {
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await NetworkSelection.RefreshNetworkStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to refresh networks: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private bool IsSelectorDisabled()
+    {
+        // Disable when bot is in any active state (not stopped or error)
+        return BotControl.Status is BotStatus.Starting
+            or BotStatus.Running
+            or BotStatus.Paused
+            or BotStatus.Stopping;
+    }
+
+    private string GetDisabledTooltip()
+    {
+        if (!IsSelectorDisabled())
+            return string.Empty;
+
+        return BotControl.Status switch
+        {
+            BotStatus.Starting => "Cannot change network while bot is starting",
+            BotStatus.Running => "Stop the bot before switching networks",
+            BotStatus.Paused => "Stop the bot before switching networks",
+            BotStatus.Stopping => "Cannot change network while bot is stopping",
+            _ => "Cannot change network now"
+        };
+    }
+
+    private static string GetNetworkDisplayName(LighterNetworkType networkType) => networkType switch
+    {
+        LighterNetworkType.Testnet => "Testnet",
+        LighterNetworkType.Mainnet => "Mainnet",
+        _ => networkType.ToString()
+    };
+
+    private static string GetNetworkIcon(LighterNetworkType networkType) => networkType switch
+    {
+        LighterNetworkType.Testnet => Icons.Material.Filled.Science,
+        LighterNetworkType.Mainnet => Icons.Material.Filled.Public,
+        _ => Icons.Material.Filled.Cloud
+    };
+
+    private static Color GetNetworkIconColor(LighterNetworkType networkType) => networkType switch
+    {
+        LighterNetworkType.Testnet => Color.Warning,
+        LighterNetworkType.Mainnet => Color.Primary,
+        _ => Color.Default
+    };
+
+    private static Color GetNetworkChipColor(LighterNetworkType networkType) => networkType switch
+    {
+        LighterNetworkType.Testnet => Color.Warning,
+        LighterNetworkType.Mainnet => Color.Primary,
+        _ => Color.Default
+    };
+
+    public void Dispose()
+    {
+        _disposed = true;
+        BotControl.StatusChanged -= OnBotStatusChanged;
+        NetworkSelection.NetworkChanged -= OnNetworkChanged;
+    }
+}

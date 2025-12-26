@@ -1,15 +1,19 @@
 using GridBot.Abstractions.Factory;
 using GridBot.ApiService.Services.Bot;
+using GridBot.ApiService.Services.Network;
+using GridBot.Lighter;
 
 namespace GridBot.ApiService.Services.Exchange;
 
 /// <summary>
 /// Service for managing exchange selection and switching.
 /// Thread-safe implementation that validates bot state before switching.
+/// Subscribes to network changes to update the current client automatically.
 /// </summary>
-public sealed class ExchangeSelectionService : IExchangeSelectionService
+public sealed class ExchangeSelectionService : IExchangeSelectionService, IDisposable
 {
     private readonly IExchangeRegistry _exchangeRegistry;
+    private readonly INetworkSelectionService _networkSelectionService;
     private readonly IGridBotControlService _botControlService;
     private readonly ILogger<ExchangeSelectionService> _logger;
     private readonly object _lock = new();
@@ -17,19 +21,26 @@ public sealed class ExchangeSelectionService : IExchangeSelectionService
     private ExchangeType? _currentExchangeType;
     private IExchangeClient? _currentClient;
     private List<ExchangeInfo> _availableExchanges = [];
+    private bool _disposed;
 
     public ExchangeSelectionService(
         IExchangeRegistry exchangeRegistry,
+        INetworkSelectionService networkSelectionService,
         IGridBotControlService botControlService,
         ILogger<ExchangeSelectionService> logger)
     {
         ArgumentNullException.ThrowIfNull(exchangeRegistry);
+        ArgumentNullException.ThrowIfNull(networkSelectionService);
         ArgumentNullException.ThrowIfNull(botControlService);
         ArgumentNullException.ThrowIfNull(logger);
 
         _exchangeRegistry = exchangeRegistry;
+        _networkSelectionService = networkSelectionService;
         _botControlService = botControlService;
         _logger = logger;
+
+        // Subscribe to network changes
+        _networkSelectionService.NetworkChanged += OnNetworkChanged;
 
         InitializeFromRegistry();
     }
@@ -140,17 +151,42 @@ public sealed class ExchangeSelectionService : IExchangeSelectionService
         return Task.CompletedTask;
     }
 
+    private void OnNetworkChanged(object? sender, LighterNetworkType network)
+    {
+        if (_disposed) return;
+
+        _logger.LogDebug("Network changed to {Network}, updating current exchange client", network);
+
+        // When network changes, the registry should have the new client registered
+        // Re-initialize from registry to pick up the new client
+        InitializeFromRegistry();
+
+        // Fire the ExchangeChanged event since the underlying client changed
+        if (_currentExchangeType.HasValue)
+        {
+            ExchangeChanged?.Invoke(this, _currentExchangeType.Value);
+        }
+    }
+
     private void InitializeFromRegistry()
     {
         try
         {
             var primary = _exchangeRegistry.GetPrimary();
-            _currentExchangeType = primary.ExchangeType;
-            _currentClient = primary;
-            _logger.LogInformation("Initialized with primary exchange: {ExchangeType}", primary.ExchangeType);
+            lock (_lock)
+            {
+                _currentExchangeType = primary.ExchangeType;
+                _currentClient = primary;
+            }
+            _logger.LogInformation("Initialized with primary exchange: {ExchangeType} (ID: {ExchangeId})", primary.ExchangeType, primary.ExchangeId);
         }
         catch (InvalidOperationException)
         {
+            lock (_lock)
+            {
+                _currentExchangeType = null;
+                _currentClient = null;
+            }
             _logger.LogWarning("No exchange registered, selection service initialized without a current exchange");
         }
 
@@ -169,5 +205,13 @@ public sealed class ExchangeSelectionService : IExchangeSelectionService
     {
         var state = client.Connection.State;
         return state.ToString();
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        _networkSelectionService.NetworkChanged -= OnNetworkChanged;
     }
 }
