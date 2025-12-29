@@ -43,6 +43,11 @@ public partial class Program
 
         var app = builder.Build();
 
+        // Initialize the default network before starting the app
+        // This creates the exchange client for the configured default network
+        var networkSelection = app.Services.GetRequiredService<INetworkSelectionService>();
+        await networkSelection.SelectNetworkAsync(networkSelection.CurrentNetwork);
+
         app.UseExceptionHandler();
         app.UseAntiforgery();
         app.MapStaticAssets();

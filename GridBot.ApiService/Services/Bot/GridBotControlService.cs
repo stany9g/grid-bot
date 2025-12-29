@@ -1,5 +1,4 @@
 using GridBot.Abstractions.Factory;
-using GridBot.ApiService.Services.Network;
 using GridBot.Core.Services.Engine;
 
 namespace GridBot.ApiService.Services.Bot;
@@ -12,7 +11,6 @@ public sealed class GridBotControlService : IGridBotControlService
 {
     private readonly ISimpleTradingEngine _engine;
     private readonly IExchangeRegistry _exchangeRegistry;
-    private readonly INetworkSelectionService _networkSelectionService;
     private readonly ILogger<GridBotControlService> _logger;
     private readonly object _lock = new();
 
@@ -22,17 +20,14 @@ public sealed class GridBotControlService : IGridBotControlService
     public GridBotControlService(
         ISimpleTradingEngine engine,
         IExchangeRegistry exchangeRegistry,
-        INetworkSelectionService networkSelectionService,
         ILogger<GridBotControlService> logger)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(exchangeRegistry);
-        ArgumentNullException.ThrowIfNull(networkSelectionService);
         ArgumentNullException.ThrowIfNull(logger);
 
         _engine = engine;
         _exchangeRegistry = exchangeRegistry;
-        _networkSelectionService = networkSelectionService;
         _logger = logger;
     }
 
@@ -105,12 +100,6 @@ public sealed class GridBotControlService : IGridBotControlService
 
     public async Task StartAsync(CancellationToken ct = default)
     {
-        // Check if network switch is in progress before attempting to start
-        if (_networkSelectionService.IsSwitchingNetwork)
-        {
-            throw new InvalidOperationException("Cannot start bot while network switch is in progress");
-        }
-
         BotStatus previousStatus;
 
         lock (_lock)

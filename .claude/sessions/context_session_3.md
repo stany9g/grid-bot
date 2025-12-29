@@ -602,6 +602,59 @@ The testnet/mainnet network selection feature is now fully functional:
 
 ---
 
+## Session 3.4: Fix Circular Dependency Bug (2025-12-29)
+
+### Problem
+The application wouldn't start due to a circular dependency:
+- `GridBotControlService` depended on `INetworkSelectionService` (to check `IsSwitchingNetwork`)
+- `NetworkSelectionService` depended on `IGridBotControlService` (to check `IsRunning`)
+
+Additionally, `NetworkInitializationService` (a hosted service) was unnecessarily complex for simple initialization.
+
+### Root Cause Analysis
+When `NetworkInitializationService` tried to start:
+1. It needed `INetworkSelectionService`
+2. DI constructed `NetworkSelectionService`
+3. That needed `IGridBotControlService`
+4. DI constructed `GridBotControlService`
+5. That needed `INetworkSelectionService` → **circular dependency deadlock**
+
+Without `NetworkInitializationService`, the app would start but fail at runtime because no exchange client was registered (nothing called `SelectNetworkAsync` to populate the registry).
+
+### Solution
+1. **Removed circular dependency** - `GridBotControlService` no longer depends on `INetworkSelectionService`
+   - The `IsSwitchingNetwork` check was unnecessary (network switches already validate bot is stopped)
+   - One-way protection is sufficient
+
+2. **Deleted `NetworkInitializationService`** - Hosted service was overkill for simple initialization
+
+3. **Direct initialization in Program.cs** - Call `SelectNetworkAsync` directly before `app.RunAsync()`
+
+### Files Modified
+
+**`GridBot.ApiService/Services/Bot/GridBotControlService.cs`**
+- Removed `INetworkSelectionService` constructor parameter
+- Removed `_networkSelectionService` field
+- Removed `IsSwitchingNetwork` check in `StartAsync()`
+
+**`GridBot.ApiService/Extensions/TradingBotExtensions.cs`**
+- Removed `services.AddHostedService<NetworkInitializationService>()` registration
+
+**`GridBot.ApiService/Program.cs`**
+- Added direct network initialization after `builder.Build()`:
+  ```csharp
+  var networkSelection = app.Services.GetRequiredService<INetworkSelectionService>();
+  await networkSelection.SelectNetworkAsync(networkSelection.CurrentNetwork);
+  ```
+
+### Files Deleted
+- `GridBot.ApiService/Services/Network/NetworkInitializationService.cs`
+
+### Build Status
+**SUCCESS** - 0 errors, 0 warnings
+
+---
+
 ## Session 3.1: DI Lifetime Mismatch Fix (2025-12-26)
 
 ### Problem

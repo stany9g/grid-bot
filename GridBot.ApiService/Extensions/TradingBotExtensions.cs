@@ -62,10 +62,6 @@ public static class TradingBotExtensions
         // Network selection service (testnet/mainnet)
         services.AddSingleton<INetworkSelectionService, NetworkSelectionService>();
 
-        // Network initialization service (initializes default network on startup)
-        // This must run before other hosted services that need exchange client
-        services.AddHostedService<NetworkInitializationService>();
-
         // Trading bot hosted service (no longer auto-starts, controlled by IGridBotControlService)
         services.AddSingleton<SimpleTradingBotHostedService>();
         services.AddHostedService(sp => sp.GetRequiredService<SimpleTradingBotHostedService>());
