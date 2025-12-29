@@ -118,4 +118,29 @@ internal sealed class DefaultExchangeRegistry : IExchangeRegistry
             return true;
         }
     }
+
+    /// <inheritdoc />
+    public void SetPrimary(string exchangeId)
+    {
+        ArgumentNullException.ThrowIfNull(exchangeId);
+
+        lock (_lock)
+        {
+            var index = _clients.FindIndex(c => c.ExchangeId.Equals(exchangeId, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                throw new ArgumentException($"Exchange '{exchangeId}' is not registered.", nameof(exchangeId));
+            }
+
+            if (index == 0)
+            {
+                return; // Already primary
+            }
+
+            // Move to front of list
+            var client = _clients[index];
+            _clients.RemoveAt(index);
+            _clients.Insert(0, client);
+        }
+    }
 }

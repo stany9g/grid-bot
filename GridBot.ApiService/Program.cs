@@ -9,6 +9,8 @@ using GridBot.ApiService.Services.Network;
 using GridBot.Core.Configuration;
 using GridBot.Core.Services.Adaptive;
 using GridBot.Core.Services.Configuration;
+using GridBot.Extended;
+using GridBot.Extended.Extensions;
 using GridBot.Lighter;
 using GridBot.Lighter.Extensions;
 using Microsoft.AspNetCore.Hosting.StaticWebAssets;
@@ -34,6 +36,13 @@ public partial class Program
         // This registers the network factory and exchange registry.
         // The exchange client is created lazily when the network is selected.
         builder.Services.AddLighterNetworks(builder.Configuration);
+
+        // Register Extended exchange if configured
+        var extendedSection = builder.Configuration.GetSection(ExtendedOptions.SectionName);
+        if (extendedSection.Exists() && !string.IsNullOrWhiteSpace(extendedSection["ApiKey"]))
+        {
+            builder.Services.AddExtendedExchange(builder.Configuration);
+        }
 
         builder.Services.AddTradingBot(builder.Configuration);
         builder.Services.AddProblemDetails();

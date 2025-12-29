@@ -424,3 +424,82 @@ All production blockers from the trading bot audit have been fixed (2025-12-26):
 - Proper `InvokeAsync(StateHasChanged)` for thread-safe UI updates
 - Consistent lock pattern for state protection
 - Proper cancellation token propagation
+
+## Extended DEX UI Hookup (2025-12-29)
+
+### Task
+Hook up the Extended DEX to the exchange selection UI so it appears alongside Lighter DEX and Hyperliquid.
+
+### Changes Made
+
+1. **Added project reference** (`GridBot.ApiService.csproj`)
+   - Added `<ProjectReference Include="..\GridBot.Extended\GridBot.Extended.csproj" />`
+
+2. **Registered Extended exchange** (`GridBot.ApiService/Program.cs`)
+   - Added `using GridBot.Extended;` and `using GridBot.Extended.Extensions;`
+   - Added conditional registration:
+     ```csharp
+     var extendedSection = builder.Configuration.GetSection(ExtendedOptions.SectionName);
+     if (extendedSection.Exists() && !string.IsNullOrWhiteSpace(extendedSection["ApiKey"]))
+     {
+         builder.Services.AddExtendedExchange(builder.Configuration);
+     }
+     ```
+
+3. **Fixed WebSocket configuration path** (`appsettings.json`)
+   - Moved WebSocket config from `ExtendedWebSocket` (root level) to `Extended:WebSocket` (nested)
+   - This matches what `ExtendedServiceExtensions.cs` expects
+
+### Build Status
+- ✅ Full solution builds successfully (0 errors, 0 warnings)
+
+### Result
+Extended DEX will now appear in the exchange selector UI when the configuration is present. The exchange will show as "Connected" once the WebSocket connection is established, or "Disconnected" otherwise.
+
+## Exchange Switching Bug Fix (2025-12-29)
+
+### Issues Identified
+
+1. **Runtime Switching Bug (Critical)**
+   - The abstraction interfaces (`IAccountClient`, `IMarketDataClient`, etc.) were registered as scoped services delegating to `IExchangeRegistry.GetPrimary()`
+   - `GetPrimary()` returned `_clients[0]` (first registered client), not the user-selected exchange
+   - `ExchangeSelectionService._currentClient` was updated correctly, but the registry order was not
+   - **Result:** Trading State and Equity showed wrong exchange's data
+
+2. **Network Selection UI Issue**
+   - Network Selection showed "Lighter Testnet/Mainnet" regardless of which exchange was selected
+   - When Extended was selected, this was confusing and irrelevant
+
+### Fixes Applied
+
+1. **Added `SetPrimary()` to IExchangeRegistry** (`GridBot.Abstractions/Factory/IExchangeRegistry.cs`)
+   - New method to set which exchange is primary
+   - Moves the specified exchange to front of the client list
+
+2. **Implemented SetPrimary in DefaultExchangeRegistry** (`GridBot.Abstractions/Extensions/AbstractionsServiceExtensions.cs`)
+   - Thread-safe implementation that reorders the client list
+   - Validates exchange exists before reordering
+
+3. **Updated ExchangeSelectionService** (`GridBot.ApiService/Services/Exchange/ExchangeSelectionService.cs`)
+   - Now calls `_exchangeRegistry.SetPrimary(client.ExchangeId)` when switching exchanges
+   - Ensures all scoped services resolve to the correct exchange
+
+4. **Updated NetworkSelector component** (`GridBot.ApiService/Components/Dashboard/NetworkSelector.razor`)
+   - Now shows exchange-specific network info:
+     - **Lighter:** Full network selector (Testnet/Mainnet) with runtime switching
+     - **Extended:** Shows current network from config (Testnet/Mainnet) with "Runtime switching requires restart" note
+     - **Other:** Shows "Network selection not available"
+   - Subscribes to `ExchangeSelection.ExchangeChanged` for UI updates
+
+### Files Modified
+- `GridBot.Abstractions/Factory/IExchangeRegistry.cs`
+- `GridBot.Abstractions/Extensions/AbstractionsServiceExtensions.cs`
+- `GridBot.ApiService/Services/Exchange/ExchangeSelectionService.cs`
+- `GridBot.ApiService/Components/Dashboard/NetworkSelector.razor`
+
+### Technical Notes
+- The fix ensures that when you select Extended DEX:
+  1. `ExchangeSelectionService._currentClient` = Extended ✓
+  2. `IExchangeRegistry.GetPrimary()` = Extended ✓ (now!)
+  3. All scoped services (`IAccountClient`, etc.) resolve to Extended's adapters
+  4. Dashboard shows Extended's equity and trading state

@@ -101,6 +101,9 @@ public sealed class ExchangeSelectionService : IExchangeSelectionService, IDispo
                 _logger.LogWarning("Selected exchange {ExchangeType} is not healthy, proceeding anyway", exchangeType);
             }
 
+            // Update the registry's primary exchange so all services use the correct client
+            _exchangeRegistry.SetPrimary(client.ExchangeId);
+
             _currentExchangeType = exchangeType;
             _currentClient = client;
 

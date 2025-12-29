@@ -1,9 +1,15 @@
+@using GridBot.Abstractions.Factory
 @using GridBot.ApiService.Services.Bot
+@using GridBot.ApiService.Services.Exchange
 @using GridBot.ApiService.Services.Network
+@using GridBot.Extended
 @using GridBot.Lighter
+@using Microsoft.Extensions.Options
 @using MudBlazor
 @inject INetworkSelectionService NetworkSelection
+@inject IExchangeSelectionService ExchangeSelection
 @inject IGridBotControlService BotControl
+@inject IOptions<ExtendedOptions> ExtendedOptions
 @inject ISnackbar Snackbar
 @implements IDisposable
 
@@ -17,46 +23,44 @@
         }
     </div>
 
-    <MudTooltip Text="@GetDisabledTooltip()" Disabled="@(!IsSelectorDisabled())">
-        <MudSelect T="LighterNetworkType?"
-                   Value="@((LighterNetworkType?)NetworkSelection.CurrentNetwork)"
-                   ValueChanged="OnNetworkSelected"
-                   Variant="Variant.Outlined"
-                   Margin="Margin.Dense"
-                   Label="Select Network"
-                   Disabled="@(IsSelectorDisabled() || _isLoading)"
-                   AnchorOrigin="Origin.BottomCenter"
-                   Class="network-selector">
-            @foreach (var network in NetworkSelection.AvailableNetworks)
-            {
-                <MudSelectItem Value="@((LighterNetworkType?)network.Type)">
-                    <div class="d-flex align-center justify-space-between" style="width: 100%;">
-                        <div class="d-flex align-center gap-2">
-                            <MudIcon Icon="@GetNetworkIcon(network.Type)"
-                                     Color="@GetNetworkIconColor(network.Type)"
-                                     Size="Size.Small" />
-                            <span>@network.DisplayName</span>
+    @if (ExchangeSelection.CurrentExchangeType == ExchangeType.Lighter)
+    {
+        @* Lighter-specific network selection (Testnet/Mainnet) *@
+        <MudTooltip Text="@GetDisabledTooltip()" Disabled="@(!IsSelectorDisabled())">
+            <MudSelect T="LighterNetworkType?"
+                       Value="@((LighterNetworkType?)NetworkSelection.CurrentNetwork)"
+                       ValueChanged="OnNetworkSelected"
+                       Variant="Variant.Outlined"
+                       Margin="Margin.Dense"
+                       Label="Select Network"
+                       Disabled="@(IsSelectorDisabled() || _isLoading)"
+                       AnchorOrigin="Origin.BottomCenter"
+                       Class="network-selector">
+                @foreach (var network in NetworkSelection.AvailableNetworks)
+                {
+                    <MudSelectItem Value="@((LighterNetworkType?)network.Type)">
+                        <div class="d-flex align-center justify-space-between" style="width: 100%;">
+                            <div class="d-flex align-center gap-2">
+                                <MudIcon Icon="@GetNetworkIcon(network.Type)"
+                                         Color="@GetNetworkIconColor(network.Type)"
+                                         Size="Size.Small" />
+                                <span>@network.DisplayName</span>
+                            </div>
+                            <MudChip T="string"
+                                     Size="Size.Small"
+                                     Color="@(network.IsConfigured ? Color.Success : Color.Error)"
+                                     Variant="Variant.Outlined">
+                                @(network.IsConfigured ? "Configured" : "Not Configured")
+                            </MudChip>
                         </div>
-                        <MudChip T="string"
-                                 Size="Size.Small"
-                                 Color="@(network.IsConfigured ? Color.Success : Color.Error)"
-                                 Variant="Variant.Outlined">
-                            @(network.IsConfigured ? "Configured" : "Not Configured")
-                        </MudChip>
-                    </div>
-                </MudSelectItem>
-            }
-        </MudSelect>
-    </MudTooltip>
+                    </MudSelectItem>
+                }
+            </MudSelect>
+        </MudTooltip>
 
-    @* Status message for selected network *@
-    @{
-        var currentNetwork = NetworkSelection.AvailableNetworks
-            .FirstOrDefault(n => n.Type == NetworkSelection.CurrentNetwork);
-
-        if (currentNetwork is not null)
+        @* Status message for selected network *@
+        @if (GetCurrentLighterNetwork() is { } currentNetwork)
         {
-            @* Show network indicator badge *@
             <div class="d-flex align-center gap-2 mt-1">
                 <MudChip T="string"
                          Size="Size.Small"
@@ -84,17 +88,62 @@
                 </MudText>
             }
         }
-    }
 
-    @* Refresh button *@
-    <MudButton Variant="Variant.Text"
-               Color="Color.Secondary"
-               Size="Size.Small"
-               StartIcon="@Icons.Material.Filled.Refresh"
-               OnClick="RefreshNetworks"
-               Disabled="@_isLoading">
-        Refresh Status
-    </MudButton>
+        @* Refresh button *@
+        <MudButton Variant="Variant.Text"
+                   Color="Color.Secondary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Refresh"
+                   OnClick="RefreshNetworks"
+                   Disabled="@_isLoading">
+            Refresh Status
+        </MudButton>
+    }
+    else if (ExchangeSelection.CurrentExchangeType == ExchangeType.Extended)
+    {
+        @* Extended DEX - show network from configuration *@
+        var extendedOpts = ExtendedOptions.Value;
+        var isTestnet = extendedOpts.IsTestnet;
+
+        <MudText Typo="Typo.body2" Color="Color.Secondary">
+            Network configured in appsettings
+        </MudText>
+        <div class="d-flex align-center gap-2 mt-1">
+            <MudChip T="string"
+                     Size="Size.Small"
+                     Color="@(isTestnet ? Color.Warning : Color.Primary)"
+                     Variant="Variant.Filled"
+                     Icon="@(isTestnet ? Icons.Material.Filled.Science : Icons.Material.Filled.Public)">
+                Extended @(isTestnet ? "Testnet" : "Mainnet")
+            </MudChip>
+            @if (!isTestnet)
+            {
+                <MudIcon Icon="@Icons.Material.Filled.Warning"
+                         Color="Color.Warning"
+                         Size="Size.Small" />
+                <MudText Typo="Typo.caption" Color="Color.Warning">
+                    Real funds
+                </MudText>
+            }
+        </div>
+        <MudText Typo="Typo.caption" Color="Color.Tertiary" Class="mt-1">
+            Runtime switching requires restart
+        </MudText>
+    }
+    else if (ExchangeSelection.CurrentExchangeType.HasValue)
+    {
+        @* Other exchanges - show placeholder *@
+        <MudText Typo="Typo.body2" Color="Color.Secondary">
+            Network selection not available for @ExchangeSelection.CurrentExchangeType.Value
+        </MudText>
+    }
+    else
+    {
+        @* No exchange selected *@
+        <MudText Typo="Typo.body2" Color="Color.Secondary">
+            Select an exchange first
+        </MudText>
+    }
 </div>
 
 @code {
@@ -105,6 +154,7 @@
     {
         BotControl.StatusChanged += OnBotStatusChanged;
         NetworkSelection.NetworkChanged += OnNetworkChanged;
+        ExchangeSelection.ExchangeChanged += OnExchangeChanged;
 
         // Initial refresh of available networks
         await RefreshNetworks();
@@ -121,6 +171,18 @@
     {
         if (_disposed) return;
         InvokeAsync(StateHasChanged);
+    }
+
+    private void OnExchangeChanged(object? sender, ExchangeType e)
+    {
+        if (_disposed) return;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private NetworkInfo? GetCurrentLighterNetwork()
+    {
+        return NetworkSelection.AvailableNetworks
+            .FirstOrDefault(n => n.Type == NetworkSelection.CurrentNetwork);
     }
 
     private async Task OnNetworkSelected(LighterNetworkType? networkType)
@@ -245,5 +307,6 @@
         _disposed = true;
         BotControl.StatusChanged -= OnBotStatusChanged;
         NetworkSelection.NetworkChanged -= OnNetworkChanged;
+        ExchangeSelection.ExchangeChanged -= OnExchangeChanged;
     }
 }

@@ -45,4 +45,11 @@ public interface IExchangeRegistry
     /// <param name="exchangeId">The exchange identifier to unregister.</param>
     /// <returns>True if the client was found and removed, false otherwise.</returns>
     bool Unregister(string exchangeId);
+
+    /// <summary>
+    /// Sets the primary (default) exchange client.
+    /// </summary>
+    /// <param name="exchangeId">The exchange identifier to set as primary.</param>
+    /// <exception cref="ArgumentException">Thrown when the exchange is not registered.</exception>
+    void SetPrimary(string exchangeId);
 }
