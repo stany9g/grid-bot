@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using GridBot.Abstractions.Scaling;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.ApiService.Services.MarketData;
@@ -7,19 +8,21 @@ namespace GridBot.ApiService.Services.MarketData;
 /// <summary>
 /// Service for scaling prices and amounts according to market-specific decimal precision.
 /// Delegates to the abstraction layer's IScalingProvider for core scaling operations.
+/// Uses IServiceScopeFactory to resolve scoped dependencies (IScalingProvider)
+/// since this is a singleton service supporting network switching.
 /// </summary>
 public sealed class MarketScalingService : IMarketScalingService
 {
-    private readonly IScalingProvider _scalingProvider;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<MarketScalingService> _logger;
     private readonly ConcurrentDictionary<int, MarketMetadata> _metadataCache = new();
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     public MarketScalingService(
-        IScalingProvider scalingProvider,
+        IServiceScopeFactory scopeFactory,
         ILogger<MarketScalingService> logger)
     {
-        _scalingProvider = scalingProvider ?? throw new ArgumentNullException(nameof(scalingProvider));
+        _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -29,8 +32,12 @@ public sealed class MarketScalingService : IMarketScalingService
         if (price < 0)
             throw new ArgumentException($"Price cannot be negative: {price}", nameof(price));
 
-        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
-        var result = _scalingProvider.ScalePrice(price, scaling);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var scalingProvider = scope.ServiceProvider.GetRequiredService<IScalingProvider>();
+
+        var marketIdStr = marketId.ToString();
+        var scaling = await scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
+        var result = scalingProvider.ScalePrice(price, scaling);
 
         _logger.LogTrace(
             "Scaled price {Price} to {ScaledPrice} for market {MarketId} (decimals: {Decimals})",
@@ -39,20 +46,18 @@ public sealed class MarketScalingService : IMarketScalingService
         return result;
     }
 
-    private async Task<MarketScaling> GetMarketScalingAsync(int marketId, CancellationToken ct)
-    {
-        var marketIdStr = marketId.ToString();
-        return await _scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
-    }
-
     /// <inheritdoc />
     public async Task<long> ScaleBaseAmountAsync(decimal amount, int marketId, CancellationToken ct = default)
     {
         if (amount < 0)
             throw new ArgumentException($"Amount cannot be negative: {amount}", nameof(amount));
 
-        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
-        var result = _scalingProvider.ScaleAmount(amount, scaling);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var scalingProvider = scope.ServiceProvider.GetRequiredService<IScalingProvider>();
+
+        var marketIdStr = marketId.ToString();
+        var scaling = await scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
+        var result = scalingProvider.ScaleAmount(amount, scaling);
 
         // Additional logging for debugging
         _logger.LogDebug(
@@ -66,15 +71,23 @@ public sealed class MarketScalingService : IMarketScalingService
     /// <inheritdoc />
     public async Task<decimal> UnscalePriceAsync(long scaledPrice, int marketId, CancellationToken ct = default)
     {
-        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
-        return _scalingProvider.UnscalePrice(scaledPrice, scaling);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var scalingProvider = scope.ServiceProvider.GetRequiredService<IScalingProvider>();
+
+        var marketIdStr = marketId.ToString();
+        var scaling = await scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
+        return scalingProvider.UnscalePrice(scaledPrice, scaling);
     }
 
     /// <inheritdoc />
     public async Task<decimal> UnscaleBaseAmountAsync(long scaledAmount, int marketId, CancellationToken ct = default)
     {
-        var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
-        return _scalingProvider.UnscaleAmount(scaledAmount, scaling);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var scalingProvider = scope.ServiceProvider.GetRequiredService<IScalingProvider>();
+
+        var marketIdStr = marketId.ToString();
+        var scaling = await scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
+        return scalingProvider.UnscaleAmount(scaledAmount, scaling);
     }
 
     /// <inheritdoc />
@@ -90,7 +103,11 @@ public sealed class MarketScalingService : IMarketScalingService
             if (_metadataCache.TryGetValue(marketId, out cached))
                 return cached;
 
-            var scaling = await GetMarketScalingAsync(marketId, ct).ConfigureAwait(false);
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var scalingProvider = scope.ServiceProvider.GetRequiredService<IScalingProvider>();
+
+            var marketIdStr = marketId.ToString();
+            var scaling = await scalingProvider.GetMarketScalingAsync(marketIdStr, ct).ConfigureAwait(false);
 
             var metadata = new MarketMetadata
             {

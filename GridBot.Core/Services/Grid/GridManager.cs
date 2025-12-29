@@ -6,6 +6,7 @@ using GridBot.Abstractions.Trading;
 using GridBot.Core.Configuration;
 using GridBot.Core.Models;
 using GridBot.Core.Services.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.Core.Services.Grid;
@@ -14,12 +15,15 @@ namespace GridBot.Core.Services.Grid;
 /// Manages grid trading by placing and maintaining grid orders.
 /// Uses DEX-agnostic abstractions for exchange operations.
 /// </summary>
+/// <remarks>
+/// This is a singleton service that maintains grid state.
+/// It uses IServiceScopeFactory to resolve scoped exchange client dependencies per-operation,
+/// supporting dynamic network switching.
+/// </remarks>
 public sealed class GridManager : IGridManager
 {
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IGridConfigurationService _configService;
-    private readonly IOrderClient _orderClient;
-    private readonly IAccountClient _accountClient;
-    private readonly IScalingProvider _scalingProvider;
     private readonly IGridCalculator _calculator;
     private readonly ILogger<GridManager> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -28,17 +32,13 @@ public sealed class GridManager : IGridManager
     private MarketScaling? _cachedScaling;
 
     public GridManager(
+        IServiceScopeFactory scopeFactory,
         IGridConfigurationService configService,
-        IOrderClient orderClient,
-        IAccountClient accountClient,
-        IScalingProvider scalingProvider,
         IGridCalculator calculator,
         ILogger<GridManager> logger)
     {
+        _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
-        _orderClient = orderClient ?? throw new ArgumentNullException(nameof(orderClient));
-        _accountClient = accountClient ?? throw new ArgumentNullException(nameof(accountClient));
-        _scalingProvider = scalingProvider ?? throw new ArgumentNullException(nameof(scalingProvider));
         _calculator = calculator ?? throw new ArgumentNullException(nameof(calculator));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -50,14 +50,17 @@ public sealed class GridManager : IGridManager
         await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var orderClient = scope.ServiceProvider.GetRequiredService<IOrderClient>();
+
             _logger.LogInformation("Initializing grid at price {Price}", currentPrice);
-            await CancelAllOrdersInternalAsync(cancellationToken).ConfigureAwait(false);
+            await CancelAllOrdersInternalAsync(orderClient, cancellationToken).ConfigureAwait(false);
             var levels = _calculator.CalculateLevels(currentPrice);
             _state.Levels = levels;
             _state.CenterPrice = currentPrice;
             _state.State = TradingState.Active;
             _state.LastUpdated = DateTimeOffset.UtcNow;
-            await PlaceGridOrdersAsync(levels, cancellationToken).ConfigureAwait(false);
+            await PlaceGridOrdersAsync(orderClient, scope, levels, cancellationToken).ConfigureAwait(false);
         }
         finally { _lock.Release(); }
     }
@@ -68,9 +71,14 @@ public sealed class GridManager : IGridManager
         try
         {
             if (_state.State != TradingState.Active) return;
-            await SyncWithExchangeAsync(cancellationToken).ConfigureAwait(false);
+
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var orderClient = scope.ServiceProvider.GetRequiredService<IOrderClient>();
+            var accountClient = scope.ServiceProvider.GetRequiredService<IAccountClient>();
+
+            await SyncWithExchangeAsync(accountClient, cancellationToken).ConfigureAwait(false);
             if (ShouldShiftGrid(currentPrice))
-                await ShiftGridAsync(currentPrice, cancellationToken).ConfigureAwait(false);
+                await ShiftGridAsync(orderClient, scope, currentPrice, cancellationToken).ConfigureAwait(false);
             _state.LastUpdated = DateTimeOffset.UtcNow;
         }
         finally { _lock.Release(); }
@@ -81,8 +89,11 @@ public sealed class GridManager : IGridManager
         await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var orderClient = scope.ServiceProvider.GetRequiredService<IOrderClient>();
+
             _logger.LogWarning("Pausing grid: {Reason}", reason);
-            await CancelAllOrdersInternalAsync(cancellationToken).ConfigureAwait(false);
+            await CancelAllOrdersInternalAsync(orderClient, cancellationToken).ConfigureAwait(false);
             _state.State = TradingState.Paused;
             _state.PauseReason = reason;
             _state.CooldownUntil = DateTimeOffset.UtcNow.AddMinutes(_configService.Current.PauseCooldownMinutes);
@@ -96,13 +107,17 @@ public sealed class GridManager : IGridManager
         try
         {
             if (!_state.IsCooldownExpired) return;
+
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var orderClient = scope.ServiceProvider.GetRequiredService<IOrderClient>();
+
             _state.State = TradingState.Active;
             _state.PauseReason = null;
             _state.CooldownUntil = null;
             var levels = _calculator.CalculateLevels(currentPrice);
             _state.Levels = levels;
             _state.CenterPrice = currentPrice;
-            await PlaceGridOrdersAsync(levels, cancellationToken).ConfigureAwait(false);
+            await PlaceGridOrdersAsync(orderClient, scope, levels, cancellationToken).ConfigureAwait(false);
         }
         finally { _lock.Release(); }
     }
@@ -110,21 +125,27 @@ public sealed class GridManager : IGridManager
     public async Task CancelAllOrdersAsync(CancellationToken cancellationToken = default)
     {
         await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { await CancelAllOrdersInternalAsync(cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var orderClient = scope.ServiceProvider.GetRequiredService<IOrderClient>();
+            await CancelAllOrdersInternalAsync(orderClient, cancellationToken).ConfigureAwait(false);
+        }
         finally { _lock.Release(); }
     }
 
-    private async Task CancelAllOrdersInternalAsync(CancellationToken cancellationToken)
+    private async Task CancelAllOrdersInternalAsync(IOrderClient orderClient, CancellationToken cancellationToken)
     {
         var config = _configService.Current;
-        await _orderClient.CancelAllOrdersAsync(config.Market, cancellationToken).ConfigureAwait(false);
+        await orderClient.CancelAllOrdersAsync(config.Market, cancellationToken).ConfigureAwait(false);
         _state.Levels = _state.Levels.Select(l => l.WithoutOrder()).ToList();
     }
 
-    private async Task PlaceGridOrdersAsync(List<GridLevel> levels, CancellationToken cancellationToken)
+    private async Task PlaceGridOrdersAsync(IOrderClient orderClient, AsyncServiceScope scope, List<GridLevel> levels, CancellationToken cancellationToken)
     {
         var config = _configService.Current;
-        var scaling = await GetScalingAsync(config.Market, cancellationToken).ConfigureAwait(false);
+        var scalingProvider = scope.ServiceProvider.GetRequiredService<IScalingProvider>();
+        var scaling = await GetScalingAsync(scalingProvider, config.Market, cancellationToken).ConfigureAwait(false);
 
         var requests = levels.Select(level => new CreateOrderRequest
         {
@@ -140,13 +161,13 @@ public sealed class GridManager : IGridManager
         }).ToArray();
 
         if (requests.Length == 0) return;
-        await _orderClient.CreateOrderBatchAsync(requests, cancellationToken).ConfigureAwait(false);
+        await orderClient.CreateOrderBatchAsync(requests, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task SyncWithExchangeAsync(CancellationToken cancellationToken)
+    private async Task SyncWithExchangeAsync(IAccountClient accountClient, CancellationToken cancellationToken)
     {
         var config = _configService.Current;
-        var activeOrders = await _accountClient.GetActiveOrdersAsync(config.Market, cancellationToken).ConfigureAwait(false);
+        var activeOrders = await accountClient.GetActiveOrdersAsync(config.Market, cancellationToken).ConfigureAwait(false);
 
         // Build set of active order IDs from the exchange
         var activeOrderIds = new HashSet<long>();
@@ -173,21 +194,21 @@ public sealed class GridManager : IGridManager
         return priceChange >= config.GridSpacingPercent.EffectiveValue / 2;
     }
 
-    private async Task ShiftGridAsync(decimal newCenterPrice, CancellationToken cancellationToken)
+    private async Task ShiftGridAsync(IOrderClient orderClient, AsyncServiceScope scope, decimal newCenterPrice, CancellationToken cancellationToken)
     {
-        await CancelAllOrdersInternalAsync(cancellationToken).ConfigureAwait(false);
+        await CancelAllOrdersInternalAsync(orderClient, cancellationToken).ConfigureAwait(false);
         var levels = _calculator.CalculateLevels(newCenterPrice);
         _state.Levels = levels;
         _state.CenterPrice = newCenterPrice;
-        await PlaceGridOrdersAsync(levels, cancellationToken).ConfigureAwait(false);
+        await PlaceGridOrdersAsync(orderClient, scope, levels, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<MarketScaling> GetScalingAsync(string marketId, CancellationToken cancellationToken)
+    private async Task<MarketScaling> GetScalingAsync(IScalingProvider scalingProvider, string marketId, CancellationToken cancellationToken)
     {
         // Cache the scaling info since it rarely changes
         if (_cachedScaling is null || _cachedScaling.MarketId != marketId)
         {
-            _cachedScaling = await _scalingProvider.GetMarketScalingAsync(marketId, cancellationToken).ConfigureAwait(false);
+            _cachedScaling = await scalingProvider.GetMarketScalingAsync(marketId, cancellationToken).ConfigureAwait(false);
         }
         return _cachedScaling;
     }

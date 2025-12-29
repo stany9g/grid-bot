@@ -59,8 +59,12 @@ public static class CoreServiceExtensions
         // Register configuration service (singleton for runtime config management)
         services.AddSingleton<IGridConfigurationService, GridConfigurationService>();
 
-        // Register trading services
+        // Register stateless calculator as singleton
         services.AddSingleton<IGridCalculator, GridCalculator>();
+
+        // Register trading services as singletons that maintain state
+        // These use IServiceScopeFactory internally to resolve scoped exchange client services,
+        // supporting dynamic network switching while preserving trading state
         services.AddSingleton<IBasicRiskMonitor, BasicRiskMonitor>();
         services.AddSingleton<IGridManager, GridManager>();
         services.AddSingleton<ISimpleTradingEngine, SimpleTradingEngine>();

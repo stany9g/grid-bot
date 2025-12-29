@@ -5,6 +5,7 @@ using GridBot.Core.Services.Adaptive;
 using GridBot.Core.Services.Configuration;
 using GridBot.TrendIntelligence.Models;
 using GridBot.TrendIntelligence.Services.Indicators;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace GridBot.ApiService.Services.Adaptive;
@@ -13,10 +14,15 @@ namespace GridBot.ApiService.Services.Adaptive;
 /// Calculates auto-tuned parameter suggestions based on market conditions.
 /// Uses ATR with EMA smoothing and applies change limiting for stability.
 /// </summary>
+/// <remarks>
+/// This is a singleton service that maintains ATR history for smoothing.
+/// It uses IServiceScopeFactory to resolve scoped exchange client dependencies,
+/// supporting dynamic network switching.
+/// </remarks>
 public sealed class AdaptiveParameterService : IAdaptiveParameterService
 {
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IIndicatorService _indicatorService;
-    private readonly IMarketDataClient _marketDataClient;
     private readonly IGridConfigurationService _configService;
     private readonly ILogger<AdaptiveParameterService> _logger;
 
@@ -30,13 +36,13 @@ public sealed class AdaptiveParameterService : IAdaptiveParameterService
     private static readonly TimeSpan CalculationInterval = TimeSpan.FromSeconds(60);
 
     public AdaptiveParameterService(
+        IServiceScopeFactory scopeFactory,
         IIndicatorService indicatorService,
-        IMarketDataClient marketDataClient,
         IGridConfigurationService configService,
         ILogger<AdaptiveParameterService> logger)
     {
+        _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _indicatorService = indicatorService ?? throw new ArgumentNullException(nameof(indicatorService));
-        _marketDataClient = marketDataClient ?? throw new ArgumentNullException(nameof(marketDataClient));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -56,9 +62,12 @@ public sealed class AdaptiveParameterService : IAdaptiveParameterService
 
         try
         {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var marketDataClient = scope.ServiceProvider.GetRequiredService<IMarketDataClient>();
+
             // Fetch 1-hour candlesticks for ATR calculation (need at least 15 for 14-period ATR)
             var marketIdStr = marketId.ToString();
-            var candles = await _marketDataClient.GetCandlesticksAsync(
+            var candles = await marketDataClient.GetCandlesticksAsync(
                 marketIdStr,
                 resolution: "1h",
                 count: 20,

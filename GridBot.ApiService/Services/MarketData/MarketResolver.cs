@@ -1,5 +1,6 @@
 using GridBot.Abstractions.Trading;
 using GridBot.Core.Services.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 using AbstractionsMarketInfo = GridBot.Abstractions.Models.Market.MarketInfo;
@@ -8,10 +9,12 @@ namespace GridBot.ApiService.Services.MarketData;
 
 /// <summary>
 /// Resolves market symbols to market IDs via the exchange API.
+/// Uses IServiceScopeFactory to resolve scoped dependencies (IMarketDataClient)
+/// since this is a singleton service supporting network switching.
 /// </summary>
 public sealed class MarketResolver : IMarketResolver
 {
-    private readonly IMarketDataClient _marketDataClient;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IGridConfigurationService _configService;
     private readonly ILogger<MarketResolver> _logger;
     private readonly SemaphoreSlim _initializationLock = new(1, 1);
@@ -26,11 +29,11 @@ public sealed class MarketResolver : IMarketResolver
     private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
 
     public MarketResolver(
-        IMarketDataClient marketDataClient,
+        IServiceScopeFactory scopeFactory,
         IGridConfigurationService configService,
         ILogger<MarketResolver> logger)
     {
-        _marketDataClient = marketDataClient ?? throw new ArgumentNullException(nameof(marketDataClient));
+        _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -131,7 +134,10 @@ public sealed class MarketResolver : IMarketResolver
 
         try
         {
-            var markets = await _marketDataClient.GetMarketsAsync(cancellationToken).ConfigureAwait(false);
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var marketDataClient = scope.ServiceProvider.GetRequiredService<IMarketDataClient>();
+
+            var markets = await marketDataClient.GetMarketsAsync(cancellationToken).ConfigureAwait(false);
 
             _cachedMarkets = markets
                 .Select(m => new MarketInfo(

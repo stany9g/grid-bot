@@ -599,3 +599,171 @@ The testnet/mainnet network selection feature is now fully functional:
 1. Move testnet private key from appsettings.json to user secrets
 2. Add mainnet confirmation dialog before switching
 3. Visual testing of UI components
+
+---
+
+## Session 3.1: DI Lifetime Mismatch Fix (2025-12-26)
+
+### Problem
+Runtime exception: `System.AggregateException` with multiple DI validation errors:
+1. `IGridManager` (Singleton) cannot consume `IOrderClient` (Scoped)
+2. `ISimpleTradingEngine` (Singleton) cannot consume `IGridManager` (Scoped)
+3. `ITrendDetector` (Singleton) cannot resolve `IMarketDataProvider` (not registered)
+
+### Root Cause
+The network switching feature (Session 3) made exchange client services Scoped so they can be dynamically resolved per-request based on the current network. However, several singleton services were consuming these scoped services, which violates DI lifetime rules.
+
+### Solution Architecture
+**Pattern**: Singleton services that need state preservation use `IServiceScopeFactory` to resolve scoped dependencies per-operation.
+
+This approach:
+- Maintains trading state across calls (grid levels, ATR history, etc.)
+- Supports dynamic network switching (exchange clients resolved fresh each time)
+- Follows ASP.NET Core DI best practices
+
+### Files Modified
+
+**GridBot.Core/Extensions/CoreServiceExtensions.cs**
+- Changed `IBasicRiskMonitor`, `IGridManager`, `ISimpleTradingEngine` to Singleton
+- Added documentation explaining the IServiceScopeFactory pattern
+
+**GridBot.Core/Services/Engine/SimpleTradingEngine.cs**
+- Replaced direct exchange client dependencies with `IServiceScopeFactory`
+- Each operation creates a scope to resolve `IGridManager`, `IMarketDataClient`, `IAccountClient`
+- Added `_cachedState` with locking for thread-safe state access
+- Maintains `_isRunning` and `_isInitialized` state
+
+**GridBot.Core/Services/Grid/GridManager.cs**
+- Replaced direct exchange client dependencies with `IServiceScopeFactory`
+- Each operation creates a scope to resolve `IOrderClient`, `IAccountClient`, `IScalingProvider`
+- Maintains `_state` (GridState) and `_cachedScaling` internally
+
+**GridBot.TrendIntelligence/Extensions/TrendIntelligenceServiceExtensions.cs**
+- Added new `AddIndicatorService()` method for just `IIndicatorService`
+- `AddTrendIntelligence()` now calls `AddIndicatorService()` first
+- This allows consuming `IIndicatorService` without requiring `ITrendDetector` dependencies
+
+**GridBot.ApiService/Extensions/TradingBotExtensions.cs**
+- Changed from `AddTrendIntelligence()` to `AddIndicatorService()`
+- Only registers what's actually used (IIndicatorService for ATR calculations)
+
+**GridBot.ApiService/Services/Dashboard/DashboardStateService.cs**
+- Changed from direct injection to `IServiceScopeFactory`
+- `BuildDashboardStateAsync` creates scope to resolve `ISimpleTradingEngine`, `IAccountClient`, `IRealtimeDataProvider`
+
+**GridBot.ApiService/Services/MarketData/MarketDataService.cs**
+- Changed from direct injection to `IServiceScopeFactory`
+- Each method creates scope to resolve `IMarketDataClient`, `IRealtimeDataProvider`
+- Maintains `_candleCache` for caching
+
+**GridBot.ApiService/Services/Adaptive/AdaptiveParameterService.cs**
+- Changed from direct injection to `IServiceScopeFactory`
+- `CalculateSuggestionsAsync` creates scope to resolve `IMarketDataClient`
+- Maintains `_atrHistory`, `_cachedSuggestions`, `_lastCalculation` for caching/smoothing
+
+### Build Status
+**SUCCESS** - 0 errors, 0 warnings
+
+### Key Architectural Notes
+
+1. **Singleton Services with State**:
+   - `SimpleTradingEngine` - maintains `_isRunning`, `_isInitialized`, `_cachedState`
+   - `GridManager` - maintains `_state` (GridState), `_cachedScaling`
+   - `BasicRiskMonitor` - maintains price history, daily tracking
+   - `AdaptiveParameterService` - maintains ATR history, cached suggestions
+   - `MarketDataService` - maintains candle cache
+   - `DashboardStateService` - maintains alerts, current state
+
+2. **Scoped Exchange Client Services**:
+   - `IOrderClient`, `IAccountClient`, `IMarketDataClient` - resolve from `IExchangeRegistry`
+   - `IScalingProvider`, `IRealtimeDataProvider`, `IExchangeConnection` - resolve from registry
+   - Fresh instance per scope, always gets current network's client
+
+3. **IServiceScopeFactory Pattern**:
+   ```csharp
+   await using var scope = _scopeFactory.CreateAsyncScope();
+   var client = scope.ServiceProvider.GetRequiredService<IOrderClient>();
+   // Use client within scope
+   // Scope disposes automatically
+   ```
+
+### Verification
+The application should now start without DI validation errors and support:
+- Network switching at runtime (stop bot → switch network → start bot)
+- Persistent trading state across operations
+- Dynamic resolution of exchange clients based on current network
+
+### Session 3.2: Additional DI Lifetime Fixes (2025-12-27)
+
+**Problem:**
+Runtime exception: `System.AggregateException` with DI validation errors:
+1. `IMarketResolver` (Singleton) cannot consume `IMarketDataClient` (Scoped)
+2. `IMarketScalingService` (Singleton) cannot consume `IScalingProvider` (Scoped)
+
+**Root Cause:**
+Same issue as Session 3.1 - `MarketResolver` and `MarketScalingService` were registered as singletons but directly injected scoped exchange client services.
+
+**Files Modified:**
+
+1. **`GridBot.ApiService/Services/MarketData/MarketResolver.cs`**
+   - Replaced `IMarketDataClient` constructor parameter with `IServiceScopeFactory`
+   - Updated `GetAvailableMarketsAsync()` to create scope and resolve `IMarketDataClient` per-call
+   - Maintains cached markets (`_cachedMarkets`) with 5-minute TTL
+
+2. **`GridBot.ApiService/Services/MarketData/MarketScalingService.cs`**
+   - Replaced `IScalingProvider` constructor parameter with `IServiceScopeFactory`
+   - Updated all methods to create scope and resolve `IScalingProvider` per-call:
+     - `ScalePriceAsync()`
+     - `ScaleBaseAmountAsync()`
+     - `UnscalePriceAsync()`
+     - `UnscaleBaseAmountAsync()`
+     - `GetMarketMetadataAsync()`
+   - Maintains cached metadata (`_metadataCache`) as before
+
+**Build Status:** SUCCESS (0 errors, 0 warnings)
+
+**Pattern Applied:**
+Same `IServiceScopeFactory` pattern as Session 3.1:
+```csharp
+await using var scope = _scopeFactory.CreateAsyncScope();
+var client = scope.ServiceProvider.GetRequiredService<IMarketDataClient>();
+// Use client within scope
+// Scope disposes automatically
+```
+
+### Session 3.3: Hostname Resolution Fix (2025-12-27)
+
+**Problem:**
+User reported "app doesn't work when I start it, no dashboard is available".
+
+**Root Cause:**
+1. `GridBot.AppHost/Properties/launchSettings.json` used custom hostname `gridbot.dev.localhost` which could not be resolved by DNS
+2. The `.localhost` subdomain should auto-resolve to 127.0.0.1 but doesn't work reliably on all systems
+
+**Fix Applied:**
+
+**File Modified: `GridBot.AppHost/Properties/launchSettings.json`**
+- Changed all occurrences of `gridbot.dev.localhost` to `localhost`
+- Affected profiles: `https`, `PROD`, `http`
+
+Before:
+```json
+"applicationUrl": "https://gridbot.dev.localhost:17018;http://gridbot.dev.localhost:15225"
+```
+
+After:
+```json
+"applicationUrl": "https://localhost:17018;http://localhost:15225"
+```
+
+**Additional Finding:**
+HTTPS port 17018 for Aspire dashboard fails to bind silently (log says "Now listening on:" but netstat shows no listener). This is a Kestrel edge case - possibly SSL certificate binding issue specific to that port.
+
+**Workaround:**
+Use HTTP endpoint for Aspire dashboard.
+
+**Working URLs:**
+- **Grid Bot Blazor Dashboard:** `https://localhost:7452`
+- **Aspire Infrastructure Dashboard:** `http://localhost:15225`
+
+**Build Status:** SUCCESS (0 errors, 0 warnings)

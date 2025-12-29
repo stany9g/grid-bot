@@ -9,9 +9,7 @@ namespace GridBot.ApiService.Services.Dashboard;
 
 public sealed class DashboardStateService : BackgroundService, IDashboardStateService
 {
-    private readonly ISimpleTradingEngine _engine;
-    private readonly IAccountClient _accountClient;
-    private readonly IRealtimeDataProvider _realtimeProvider;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly SimpleGridConfig _config;
     private readonly ILogger<DashboardStateService> _logger;
 
@@ -27,15 +25,11 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
     public DashboardState CurrentState => _currentState;
 
     public DashboardStateService(
-        ISimpleTradingEngine engine,
-        IAccountClient accountClient,
-        IRealtimeDataProvider realtimeProvider,
+        IServiceScopeFactory scopeFactory,
         IOptions<SimpleGridConfig> config,
         ILogger<DashboardStateService> logger)
     {
-        _engine = engine;
-        _accountClient = accountClient;
-        _realtimeProvider = realtimeProvider;
+        _scopeFactory = scopeFactory;
         _config = config.Value;
         _logger = logger;
     }
@@ -98,13 +92,18 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
 
     private async Task<DashboardState> BuildDashboardStateAsync(CancellationToken ct)
     {
-        var engineState = _engine.State;
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var engine = scope.ServiceProvider.GetRequiredService<ISimpleTradingEngine>();
+        var accountClient = scope.ServiceProvider.GetRequiredService<IAccountClient>();
+        var realtimeProvider = scope.ServiceProvider.GetRequiredService<IRealtimeDataProvider>();
+
+        var engineState = engine.State;
         var marketId = _config.MarketIndex;
         var marketIdStr = marketId.ToString();
         decimal currentPrice = 0;
 
         // Try realtime data first
-        var realtimePrice = _realtimeProvider.GetCurrentPrice(marketIdStr);
+        var realtimePrice = realtimeProvider.GetCurrentPrice(marketIdStr);
         if (realtimePrice.HasValue && realtimePrice.Value > 0)
         {
             currentPrice = realtimePrice.Value;
@@ -112,13 +111,13 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
         else
         {
             // Fall back to REST API via account client (no direct market data client here)
-            var orderBook = _realtimeProvider.GetOrderBook(marketIdStr);
+            var orderBook = realtimeProvider.GetOrderBook(marketIdStr);
             currentPrice = orderBook?.MidPrice ?? 0;
         }
 
         decimal equity = 0, positionSize = 0, unrealizedPnl = 0;
-        var wsAccount = _realtimeProvider.GetAccount();
-        if (wsAccount != null && _realtimeProvider.IsConnected)
+        var wsAccount = realtimeProvider.GetAccount();
+        if (wsAccount != null && realtimeProvider.IsConnected)
         {
             equity = wsAccount.Collateral;
             if (wsAccount.Positions.TryGetValue(marketIdStr, out var p))
@@ -129,7 +128,7 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
         }
         else
         {
-            var account = await _accountClient.GetAccountAsync(ct);
+            var account = await accountClient.GetAccountAsync(ct);
             equity = account.Collateral;
             if (account.Positions.TryGetValue(marketIdStr, out var pos))
             {
@@ -148,7 +147,7 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
             TrendState = "Neutral",
             MarketId = marketId,
             RecoveryPhase = "None",
-            OperationalCapacity = _engine.IsRunning ? 100 : 0,
+            OperationalCapacity = engine.IsRunning ? 100 : 0,
             CurrentPrice = currentPrice,
             PositionSize = positionSize,
             Equity = equity,
@@ -167,7 +166,7 @@ public sealed class DashboardStateService : BackgroundService, IDashboardStateSe
                     Status = l.OrderId.HasValue ? "Active" : "Pending"
                 }).ToList()
             },
-            RiskInfo = new RiskInfo { TradingAllowed = _engine.IsRunning },
+            RiskInfo = new RiskInfo { TradingAllowed = engine.IsRunning },
             RecentAlerts = alertsCopy.OrderByDescending(a => a.Timestamp).ToList(),
             LastUpdated = DateTimeOffset.UtcNow
         };

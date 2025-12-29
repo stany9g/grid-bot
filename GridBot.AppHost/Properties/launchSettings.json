@@ -5,7 +5,7 @@
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
-      "applicationUrl": "https://gridbot.dev.localhost:17018;http://gridbot.dev.localhost:15225",
+      "applicationUrl": "https://localhost:17018;http://localhost:15225",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "DOTNET_ENVIRONMENT": "Development",
@@ -18,7 +18,7 @@
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
-      "applicationUrl": "https://gridbot.dev.localhost:17018;http://gridbot.dev.localhost:15225",
+      "applicationUrl": "https://localhost:17018;http://localhost:15225",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Production",
         "DOTNET_ENVIRONMENT": "Production",
@@ -31,7 +31,7 @@
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
-      "applicationUrl": "http://gridbot.dev.localhost:15225",
+      "applicationUrl": "http://localhost:15225",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "DOTNET_ENVIRONMENT": "Development",

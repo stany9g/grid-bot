@@ -35,8 +35,9 @@ public static class TradingBotExtensions
         // Core trading engine from GridBot.Core
         services.AddGridBotCore(configuration);
 
-        // TrendIntelligence for IIndicatorService (used by AdaptiveParameterService)
-        services.AddTrendIntelligence();
+        // Only register IIndicatorService (used by AdaptiveParameterService)
+        // Full TrendIntelligence (ITrendDetector) requires additional dependencies not yet implemented
+        services.AddIndicatorService();
 
         // Adaptive parameter service for auto-tuning suggestions
         services.AddSingleton<IAdaptiveParameterService, AdaptiveParameterService>();
