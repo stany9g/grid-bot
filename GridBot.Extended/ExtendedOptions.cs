@@ -16,7 +16,7 @@ public sealed class ExtendedOptions
     /// Mainnet: https://api.starknet.extended.exchange/api/v1
     /// Testnet: https://api.starknet.sepolia.extended.exchange/api/v1
     /// </summary>
-    public string ApiUrl { get; set; } = "https://api.starknet.extended.exchange/api/v1";
+    public string ApiUrl { get; set; } = "https://starknet.sepolia.extended.exchange/api/v1";
 
     /// <summary>
     /// API key for authentication.

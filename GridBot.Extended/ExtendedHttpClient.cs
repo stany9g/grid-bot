@@ -263,6 +263,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
             {
                 _rateLimiter.RecordSuccessfulRequest();
 
+                 var s = await response.Content.ReadAsStringAsync(ct);
                 if (response.StatusCode == HttpStatusCode.NoContent)
                 {
                     return default;
