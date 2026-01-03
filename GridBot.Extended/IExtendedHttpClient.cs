@@ -67,11 +67,11 @@ public interface IExtendedHttpClient
     Task<AccountInfoResponse> GetAccountInfoAsync(CancellationToken ct = default);
 
     /// <summary>
-    /// Gets account balances.
+    /// Gets account balance.
     /// </summary>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>List of balances.</returns>
-    Task<IReadOnlyList<BalanceResponse>> GetBalancesAsync(CancellationToken ct = default);
+    /// <returns>Account balance.</returns>
+    Task<BalanceResponse?> GetBalanceAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Gets all open positions.

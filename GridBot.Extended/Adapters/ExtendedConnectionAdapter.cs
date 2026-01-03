@@ -79,9 +79,13 @@ internal sealed class ExtendedConnectionAdapter : IExchangeConnection
             // Step 1: Initialize market mapper
             await _marketMapper.InitializeAsync(_httpClient, ct);
 
-            // Step 2: Sync nonce from server
-            var accountInfo = await _httpClient.GetAccountInfoAsync(ct);
-            _nonceManager.SyncFromServer(accountInfo.Nonce);
+            // Step 2: Ensure nonce manager is initialized (uses InitialNonce from config)
+            // Note: Extended API doesn't return nonce in account info, so we rely on config
+            if (!_nonceManager.IsInitialized)
+            {
+                _logger.LogInformation("NonceManager using initial nonce from configuration");
+                _nonceManager.SyncFromServer(0); // Will be overwritten by config value if set
+            }
 
             // Step 3: Connect WebSocket
             await _wsClient.ConnectAsync(ct);

@@ -76,34 +76,22 @@ internal sealed class ExtendedAuthAdapter : IAuthenticationProvider
     }
 
     /// <inheritdoc />
-    public async Task SyncNonceAsync(CancellationToken ct = default)
+    public Task SyncNonceAsync(CancellationToken ct = default)
     {
-        const int maxRetries = ExtendedConstants.MaxNonceSyncRetries;
-        var delay = TimeSpan.FromMilliseconds(100);
-
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        // Extended API doesn't return nonce in account info.
+        // Nonce is managed locally using InitialNonce from configuration.
+        if (_nonceManager.IsInitialized)
         {
-            try
-            {
-                var accountInfo = await _httpClient.GetAccountInfoAsync(ct);
-                _nonceManager.SyncFromServer(accountInfo.Nonce);
-
-                _logger.LogInformation("Nonce synchronized from server: {Nonce}", accountInfo.Nonce);
-                return;
-            }
-            catch (Exception ex) when (attempt < maxRetries)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Nonce sync attempt {Attempt}/{Max} failed, retrying in {Delay}ms",
-                    attempt, maxRetries, delay.TotalMilliseconds);
-
-                await Task.Delay(delay, ct);
-                delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 2000));
-            }
+            _logger.LogDebug("Nonce already initialized: {Nonce}", _nonceManager.CurrentNonce);
+        }
+        else
+        {
+            // Initialize with 0 (or use InitialNonce from config if set)
+            _nonceManager.SyncFromServer(0);
+            _logger.LogInformation("Nonce initialized to: {Nonce}", _nonceManager.CurrentNonce);
         }
 
-        throw new InvalidOperationException($"Failed to sync nonce after {maxRetries} attempts");
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -150,9 +138,12 @@ internal sealed class ExtendedAuthAdapter : IAuthenticationProvider
         return new Models.Api.SettlementObject
         {
             StarkKey = _options.StarkPublicKey,
-            R = "0x0", // Placeholder
-            S = "0x0", // Placeholder
-            Nonce = nonce
+            CollateralPosition = _options.L2Vault,
+            Signature = new Models.Api.SignatureObject
+            {
+                R = "0x0", // Placeholder
+                S = "0x0"  // Placeholder
+            }
         };
     }
 }

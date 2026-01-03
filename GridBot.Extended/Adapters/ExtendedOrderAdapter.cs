@@ -9,6 +9,7 @@ using GridBot.Extended.Models.Api;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using CreateOrderRequest = GridBot.Abstractions.Models.Orders.CreateOrderRequest;
+using ApiCreateOrderRequest = GridBot.Extended.Models.Api.CreateOrderRequest;
 
 namespace GridBot.Extended.Adapters;
 
@@ -55,6 +56,7 @@ internal sealed class ExtendedOrderAdapter : IOrderClient, IDisposable
     private const int CleanupIntervalSeconds = 30;
     private const int IdempotencyWindowMinutes = 1;
     private const int IdempotencyKeyExpiryMinutes = 5;
+    private const int MarketCacheExpiryMinutes = 60;
 
     private readonly IExtendedHttpClient _httpClient;
     private readonly NonceManager _nonceManager;
@@ -64,6 +66,8 @@ internal sealed class ExtendedOrderAdapter : IOrderClient, IDisposable
     private readonly ILogger<ExtendedOrderAdapter> _logger;
     private readonly ConcurrentDictionary<string, LocalOrderInfo> _pendingOrders = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentIdempotencyKeys = new();
+    private readonly ConcurrentDictionary<string, MarketInfo> _marketInfoCache = new();
+    private DateTimeOffset _marketCacheExpiry = DateTimeOffset.MinValue;
     private Timer? _cleanupTimer;
     private bool _disposed;
 
@@ -130,11 +134,11 @@ internal sealed class ExtendedOrderAdapter : IOrderClient, IDisposable
         }
         _recentIdempotencyKeys[idempotencyKey] = DateTimeOffset.UtcNow;
 
+        // Generate client order ID (outside try for catch access)
+        var clientOrderId = Guid.NewGuid().ToString("N");
+
         try
         {
-            // Generate client order ID
-            var clientOrderId = Guid.NewGuid().ToString("N");
-
             // Create local order tracking
             var localOrder = new LocalOrderInfo
             {
@@ -145,41 +149,34 @@ internal sealed class ExtendedOrderAdapter : IOrderClient, IDisposable
             };
             _pendingOrders[clientOrderId] = localOrder;
 
-            // Build Extended-specific request
-            var extendedRequest = BuildOrderRequest(request, clientOrderId);
+            // Build Extended-specific request (async for market info fetch)
+            var extendedRequest = await BuildOrderRequestAsync(request, clientOrderId, ct);
 
             // Mark as pending before submission
             localOrder.State = LocalOrderState.PendingConfirmation;
 
             var response = await _httpClient.CreateOrderAsync(extendedRequest, ct);
 
-            if (response.Success && response.Order != null)
-            {
-                localOrder.ExchangeOrderId = response.Order.Id;
+            // If we get here, the order was accepted (errors throw ExtendedApiException)
+            localOrder.ExchangeOrderId = response.Id.ToString();
 
-                // CRITICAL: HTTP 200 does NOT mean order is active!
-                // Keep in PendingConfirmation until WebSocket confirms
-                _logger.LogInformation(
-                    "Order {ClientOrderId} submitted, awaiting confirmation. Exchange ID: {ExchangeId}",
-                    clientOrderId, response.Order.Id);
+            // CRITICAL: HTTP 200 does NOT mean order is active!
+            // Keep in PendingConfirmation until WebSocket confirms
+            _logger.LogInformation(
+                "Order {ClientOrderId} submitted, awaiting confirmation. Exchange ID: {ExchangeId}",
+                clientOrderId, response.Id);
 
-                return OrderResult.PendingConfirmation(clientOrderId, response.Order.Id);
-            }
-            else
-            {
-                localOrder.State = LocalOrderState.Rejected;
-                localOrder.ErrorMessage = response.Error ?? "Unknown error";
-
-                _logger.LogWarning(
-                    "Order {ClientOrderId} rejected: {Error}",
-                    clientOrderId, response.Error);
-
-                return OrderResult.Failure(response.Error ?? "Order rejected");
-            }
+            return OrderResult.PendingConfirmation(clientOrderId, response.Id.ToString());
         }
         catch (ExtendedApiException ex)
         {
-            _logger.LogError(ex, "API error creating order for {Market}", request.MarketId);
+            if (_pendingOrders.TryGetValue(clientOrderId, out var order))
+            {
+                order.State = LocalOrderState.Rejected;
+                order.ErrorMessage = ex.Message;
+            }
+
+            _logger.LogWarning(ex, "Order {ClientOrderId} rejected: {Error}", clientOrderId, ex.Message);
             return OrderResult.Failure(ex.Message);
         }
     }
@@ -434,60 +431,130 @@ internal sealed class ExtendedOrderAdapter : IOrderClient, IDisposable
         return Convert.ToHexString(hash)[..16]; // First 16 chars
     }
 
-    private Models.Api.CreateOrderRequest BuildOrderRequest(CreateOrderRequest request, string clientOrderId)
+    private async Task<ApiCreateOrderRequest> BuildOrderRequestAsync(CreateOrderRequest request, string clientOrderId, CancellationToken ct)
     {
-        // Get nonce for this order
-        var nonce = _nonceManager.GetNextNonce();
+        // Get market info for L2Config (needed for signing)
+        var marketInfo = await GetMarketInfoAsync(request.MarketId, ct);
+        if (marketInfo?.L2Config == null)
+        {
+            throw new InvalidOperationException($"Market {request.MarketId} L2Config not available");
+        }
+
+        var l2Config = marketInfo.L2Config;
+        var isBuy = request.Side == OrderSide.Buy;
+
+        // Generate random nonce (32-bit) per Python SDK
+        var nonce = StarkAmountCalculator.GenerateNonce();
 
         // Calculate expiry
         var maxExpiry = TimeSpan.FromDays(_options.MaxOrderExpiryDays);
         var expiryMs = DateTimeOffset.UtcNow.Add(maxExpiry).ToUnixTimeMilliseconds();
 
-        // Format price and quantity
+        // Calculate settlement expiration (order expiry + 14 days, in seconds)
+        var settlementExpiration = StarkAmountCalculator.CalcSettlementExpiration(expiryMs);
+
+        // Calculate Stark amounts using market resolutions
+        var (baseAmount, quoteAmount, feeAmount) = StarkAmountCalculator.CalculateStarkAmounts(
+            request.Size,
+            request.Price,
+            ExtendedConstants.DefaultFeeRate,
+            isBuy,
+            l2Config.SyntheticResolution,
+            l2Config.CollateralResolution);
+
+        // Parse L2Vault to position ID
+        var positionId = long.Parse(_options.L2Vault);
+
+        // Build StarkEx order parameters for signing
+        var orderParams = new StarkExOrderParams
+        {
+            PositionId = positionId,
+            BaseAmount = baseAmount,
+            QuoteAmount = quoteAmount,
+            FeeAmount = feeAmount,
+            Nonce = nonce,
+            ExpirationSeconds = settlementExpiration
+        };
+
+        // Sign the order using Extended DEX algorithm (includes domain params)
+        var (r, s) = _starkSigner.SignOrder(orderParams, l2Config, _options.IsTestnet);
+
+        // Format price and quantity for API
         var priceStr = _scalingAdapter.FormatPrice(request.Price, request.MarketId);
         var qtyStr = _scalingAdapter.FormatQuantity(request.Size, request.MarketId);
 
-        // Build order message for signing
-        var orderMessage = new ExtendedOrderMessage
-        {
-            Market = request.MarketId,
-            Side = request.Side == OrderSide.Buy ? "BUY" : "SELL",
-            Type = request.Type == OrderType.Market ? "market" : "limit",
-            Price = request.Price,
-            Quantity = request.Size,
-            Fee = ExtendedConstants.DefaultFeeRate,
-            Nonce = nonce,
-            ExpiryEpochMillis = expiryMs,
-            ReduceOnly = request.ReduceOnly,
-            TimeInForce = MapTimeInForce(request.TimeInForce)
-        };
+        _logger.LogDebug(
+            "Built order: Market={Market}, Side={Side}, Qty={Qty}, Price={Price}, " +
+            "BaseAmount={BaseAmount}, QuoteAmount={QuoteAmount}, Fee={FeeAmount}, " +
+            "PositionId={PositionId}, Nonce={Nonce}, Expiration={Expiration}",
+            request.MarketId, request.Side, qtyStr, priceStr,
+            baseAmount, quoteAmount, feeAmount, positionId, nonce, settlementExpiration);
 
-        // Sign the order using Stark signature
-        var (r, s) = _starkSigner.SignOrder(orderMessage);
-
-        // Build settlement object with actual Stark signature
+        // Build settlement object with nested signature per Python SDK
         var settlement = new SettlementObject
         {
             StarkKey = _starkSigner.StarkPublicKey ?? _options.StarkPublicKey,
-            R = r,
-            S = s,
-            Nonce = nonce
+            CollateralPosition = _options.L2Vault,
+            Signature = new SignatureObject
+            {
+                R = r,
+                S = s
+            }
         };
 
-        return new Models.Api.CreateOrderRequest
+        return new ApiCreateOrderRequest
         {
             Id = clientOrderId,
             Market = request.MarketId,
-            Type = request.Type == OrderType.Market ? "market" : "limit",
-            Side = request.Side == OrderSide.Buy ? "BUY" : "SELL",
+            Type = "LIMIT", // Always LIMIT per Python SDK
+            Side = isBuy ? "BUY" : "SELL",
             Qty = qtyStr,
-            Price = request.Type == OrderType.Limit ? priceStr : null,
+            Price = priceStr,
             Fee = ExtendedConstants.DefaultFeeRate.ToString(CultureInfo.InvariantCulture),
             ExpiryEpochMillis = expiryMs,
             TimeInForce = MapTimeInForce(request.TimeInForce),
-            ReduceOnly = request.ReduceOnly ? true : null,
+            ReduceOnly = request.ReduceOnly,
+            PostOnly = false,
+            Nonce = nonce.ToString(),
+            SelfTradeProtectionLevel = "ACCOUNT",
             Settlement = settlement
         };
+    }
+
+    /// <summary>
+    /// Gets market info from cache or API.
+    /// </summary>
+    private async Task<MarketInfo?> GetMarketInfoAsync(string marketId, CancellationToken ct)
+    {
+        // Check if cache is expired
+        if (DateTimeOffset.UtcNow > _marketCacheExpiry)
+        {
+            _marketInfoCache.Clear();
+            _marketCacheExpiry = DateTimeOffset.UtcNow.AddMinutes(MarketCacheExpiryMinutes);
+        }
+
+        // Check cache first
+        if (_marketInfoCache.TryGetValue(marketId, out var cachedInfo))
+        {
+            return cachedInfo;
+        }
+
+        // Fetch from API
+        try
+        {
+            var markets = await _httpClient.GetMarketsAsync(ct);
+            foreach (var market in markets)
+            {
+                _marketInfoCache[market.Name] = market;
+            }
+
+            return _marketInfoCache.GetValueOrDefault(marketId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch market info for {MarketId}", marketId);
+            return null;
+        }
     }
 
     private static string MapTimeInForce(TimeInForce tif)

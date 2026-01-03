@@ -4,6 +4,7 @@ namespace GridBot.Extended.Models.Api;
 
 /// <summary>
 /// Request to create an order on Extended.
+/// Based on Python SDK's NewOrderModel in x10/perpetual/orders.py
 /// </summary>
 public sealed record CreateOrderRequest
 {
@@ -20,7 +21,7 @@ public sealed record CreateOrderRequest
     public required string Market { get; init; }
 
     /// <summary>
-    /// Order type: "limit", "market".
+    /// Order type: "LIMIT" (uppercase required).
     /// </summary>
     [JsonPropertyName("type")]
     public required string Type { get; init; }
@@ -41,10 +42,10 @@ public sealed record CreateOrderRequest
     /// Order price (required for limit orders).
     /// </summary>
     [JsonPropertyName("price")]
-    public string? Price { get; init; }
+    public required string Price { get; init; }
 
     /// <summary>
-    /// Fee rate (decimal, e.g., 0.0002 = 0.02%).
+    /// Fee rate (decimal, e.g., 0.0006 = 0.06%).
     /// </summary>
     [JsonPropertyName("fee")]
     public required string Fee { get; init; }
@@ -56,20 +57,38 @@ public sealed record CreateOrderRequest
     public required long ExpiryEpochMillis { get; init; }
 
     /// <summary>
-    /// Time in force: "GTT", "IOC", "FOK", "POST_ONLY".
+    /// Time in force: "GTT", "IOC".
+    /// Note: FOK is NOT supported for new orders per Python SDK.
     /// </summary>
     [JsonPropertyName("timeInForce")]
-    public string? TimeInForce { get; init; }
+    public required string TimeInForce { get; init; }
 
     /// <summary>
     /// Whether this is a reduce-only order.
     /// </summary>
     [JsonPropertyName("reduceOnly")]
-    public bool? ReduceOnly { get; init; }
+    public bool ReduceOnly { get; init; }
+
+    /// <summary>
+    /// Whether this is a post-only order.
+    /// </summary>
+    [JsonPropertyName("postOnly")]
+    public bool PostOnly { get; init; }
+
+    /// <summary>
+    /// Nonce for this transaction (must be at order root, not in settlement).
+    /// </summary>
+    [JsonPropertyName("nonce")]
+    public required string Nonce { get; init; }
+
+    /// <summary>
+    /// Self-trade protection level: "ACCOUNT", "CLIENT", or "DISABLED".
+    /// </summary>
+    [JsonPropertyName("selfTradeProtectionLevel")]
+    public required string SelfTradeProtectionLevel { get; init; }
 
     /// <summary>
     /// Settlement object containing Stark signature components.
-    /// Required for authenticated order submission.
     /// </summary>
     [JsonPropertyName("settlement")]
     public required SettlementObject Settlement { get; init; }
@@ -77,42 +96,44 @@ public sealed record CreateOrderRequest
 
 /// <summary>
 /// Settlement object containing Stark signature for order authentication.
+/// Based on Python SDK's StarkSettlementModel in x10/perpetual/orders.py
 /// </summary>
 public sealed record SettlementObject
 {
     /// <summary>
-    /// Stark public key (hex string).
+    /// Stark public key (hex string with 0x prefix).
     /// </summary>
     [JsonPropertyName("starkKey")]
     public required string StarkKey { get; init; }
 
     /// <summary>
-    /// Signature R component (hex string).
+    /// Collateral position (vault ID from account info's l2Vault).
+    /// </summary>
+    [JsonPropertyName("collateralPosition")]
+    public required string CollateralPosition { get; init; }
+
+    /// <summary>
+    /// Signature object containing R and S components.
+    /// </summary>
+    [JsonPropertyName("signature")]
+    public required SignatureObject Signature { get; init; }
+}
+
+/// <summary>
+/// Stark signature components.
+/// Based on Python SDK's SettlementSignatureModel in x10/utils/model.py
+/// </summary>
+public sealed record SignatureObject
+{
+    /// <summary>
+    /// Signature R component (hex string with 0x prefix).
     /// </summary>
     [JsonPropertyName("r")]
     public required string R { get; init; }
 
     /// <summary>
-    /// Signature S component (hex string).
+    /// Signature S component (hex string with 0x prefix).
     /// </summary>
     [JsonPropertyName("s")]
     public required string S { get; init; }
-
-    /// <summary>
-    /// Nonce for this transaction.
-    /// </summary>
-    [JsonPropertyName("nonce")]
-    public required long Nonce { get; init; }
-
-    /// <summary>
-    /// Collateral amount (string representation).
-    /// </summary>
-    [JsonPropertyName("collateral")]
-    public string? Collateral { get; init; }
-
-    /// <summary>
-    /// Position type.
-    /// </summary>
-    [JsonPropertyName("positionType")]
-    public string? PositionType { get; init; }
 }

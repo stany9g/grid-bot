@@ -8,80 +8,212 @@ namespace GridBot.Extended.Models.Api;
 public sealed record MarketInfo
 {
     /// <summary>
-    /// Market identifier (e.g., "BTC-USD-PERP").
+    /// Market name/identifier (e.g., "BTC-USD").
     /// </summary>
-    [JsonPropertyName("market")]
-    public required string Market { get; init; }
+    [JsonPropertyName("name")]
+    public required string Name { get; init; }
 
     /// <summary>
-    /// Base asset symbol (e.g., "BTC").
+    /// UI display name (e.g., "BTC-USD").
     /// </summary>
-    [JsonPropertyName("baseAsset")]
-    public required string BaseAsset { get; init; }
+    [JsonPropertyName("uiName")]
+    public string? UiName { get; init; }
 
     /// <summary>
-    /// Quote asset symbol (e.g., "USD").
+    /// Market category (e.g., "L1", "Meme", "DeFi").
     /// </summary>
-    [JsonPropertyName("quoteAsset")]
-    public required string QuoteAsset { get; init; }
+    [JsonPropertyName("category")]
+    public string? Category { get; init; }
 
     /// <summary>
-    /// Minimum order size in base asset.
+    /// Base asset name (e.g., "BTC").
     /// </summary>
+    [JsonPropertyName("assetName")]
+    public required string AssetName { get; init; }
+
+    /// <summary>
+    /// Base asset decimal precision.
+    /// </summary>
+    [JsonPropertyName("assetPrecision")]
+    public int AssetPrecision { get; init; }
+
+    /// <summary>
+    /// Collateral asset name (e.g., "USD").
+    /// </summary>
+    [JsonPropertyName("collateralAssetName")]
+    public required string CollateralAssetName { get; init; }
+
+    /// <summary>
+    /// Collateral asset decimal precision.
+    /// </summary>
+    [JsonPropertyName("collateralAssetPrecision")]
+    public int CollateralAssetPrecision { get; init; }
+
+    /// <summary>
+    /// Whether the market is active.
+    /// </summary>
+    [JsonPropertyName("active")]
+    public bool Active { get; init; }
+
+    /// <summary>
+    /// Market status (e.g., "ACTIVE").
+    /// </summary>
+    [JsonPropertyName("status")]
+    public string? Status { get; init; }
+
+    /// <summary>
+    /// Market statistics.
+    /// </summary>
+    [JsonPropertyName("marketStats")]
+    public MarketStatsInfo? MarketStats { get; init; }
+
+    /// <summary>
+    /// Trading configuration.
+    /// </summary>
+    [JsonPropertyName("tradingConfig")]
+    public TradingConfigInfo? TradingConfig { get; init; }
+
+    /// <summary>
+    /// L2 configuration for StarkEx.
+    /// </summary>
+    [JsonPropertyName("l2Config")]
+    public L2ConfigInfo? L2Config { get; init; }
+
+    /// <summary>
+    /// Whether the market is visible on the UI.
+    /// </summary>
+    [JsonPropertyName("visibleOnUi")]
+    public bool VisibleOnUi { get; init; }
+
+    /// <summary>
+    /// Market creation timestamp (milliseconds).
+    /// </summary>
+    [JsonPropertyName("createdAt")]
+    public long CreatedAt { get; init; }
+}
+
+/// <summary>
+/// Market statistics information.
+/// </summary>
+public sealed record MarketStatsInfo
+{
+    [JsonPropertyName("dailyVolume")]
+    public string? DailyVolume { get; init; }
+
+    [JsonPropertyName("dailyVolumeBase")]
+    public string? DailyVolumeBase { get; init; }
+
+    [JsonPropertyName("dailyPriceChange")]
+    public string? DailyPriceChange { get; init; }
+
+    [JsonPropertyName("dailyPriceChangePercentage")]
+    public string? DailyPriceChangePercentage { get; init; }
+
+    [JsonPropertyName("dailyLow")]
+    public string? DailyLow { get; init; }
+
+    [JsonPropertyName("dailyHigh")]
+    public string? DailyHigh { get; init; }
+
+    [JsonPropertyName("lastPrice")]
+    public string? LastPrice { get; init; }
+
+    [JsonPropertyName("askPrice")]
+    public string? AskPrice { get; init; }
+
+    [JsonPropertyName("bidPrice")]
+    public string? BidPrice { get; init; }
+
+    [JsonPropertyName("markPrice")]
+    public string? MarkPrice { get; init; }
+
+    [JsonPropertyName("indexPrice")]
+    public string? IndexPrice { get; init; }
+
+    [JsonPropertyName("fundingRate")]
+    public string? FundingRate { get; init; }
+
+    [JsonPropertyName("nextFundingRate")]
+    public long? NextFundingRate { get; init; }
+
+    [JsonPropertyName("openInterest")]
+    public string? OpenInterest { get; init; }
+
+    [JsonPropertyName("openInterestBase")]
+    public string? OpenInterestBase { get; init; }
+}
+
+/// <summary>
+/// Trading configuration for a market.
+/// </summary>
+public sealed record TradingConfigInfo
+{
     [JsonPropertyName("minOrderSize")]
-    public required string MinOrderSize { get; init; }
+    public string? MinOrderSize { get; init; }
 
-    /// <summary>
-    /// Maximum order size in base asset.
-    /// </summary>
-    [JsonPropertyName("maxOrderSize")]
-    public string? MaxOrderSize { get; init; }
+    [JsonPropertyName("minOrderSizeChange")]
+    public string? MinOrderSizeChange { get; init; }
 
-    /// <summary>
-    /// Minimum price tick size.
-    /// </summary>
-    [JsonPropertyName("tickSize")]
-    public required string TickSize { get; init; }
+    [JsonPropertyName("minPriceChange")]
+    public string? MinPriceChange { get; init; }
 
-    /// <summary>
-    /// Minimum quantity step size.
-    /// </summary>
-    [JsonPropertyName("stepSize")]
-    public required string StepSize { get; init; }
+    [JsonPropertyName("maxMarketOrderValue")]
+    public string? MaxMarketOrderValue { get; init; }
 
-    /// <summary>
-    /// Maximum leverage allowed.
-    /// </summary>
+    [JsonPropertyName("maxLimitOrderValue")]
+    public string? MaxLimitOrderValue { get; init; }
+
+    [JsonPropertyName("maxPositionValue")]
+    public string? MaxPositionValue { get; init; }
+
     [JsonPropertyName("maxLeverage")]
-    public required int MaxLeverage { get; init; }
+    public string? MaxLeverage { get; init; }
 
-    /// <summary>
-    /// Initial margin requirement (decimal, e.g., 0.1 = 10%).
-    /// </summary>
-    [JsonPropertyName("initialMarginFraction")]
-    public string? InitialMarginFraction { get; init; }
+    [JsonPropertyName("maxNumOrders")]
+    public string? MaxNumOrders { get; init; }
 
-    /// <summary>
-    /// Maintenance margin requirement (decimal).
-    /// </summary>
-    [JsonPropertyName("maintenanceMarginFraction")]
-    public string? MaintenanceMarginFraction { get; init; }
+    [JsonPropertyName("limitPriceCap")]
+    public string? LimitPriceCap { get; init; }
 
-    /// <summary>
-    /// Whether the market is currently active.
-    /// </summary>
-    [JsonPropertyName("isActive")]
-    public bool IsActive { get; init; }
+    [JsonPropertyName("limitPriceFloor")]
+    public string? LimitPriceFloor { get; init; }
 
-    /// <summary>
-    /// Price decimal places for display.
-    /// </summary>
-    [JsonPropertyName("priceDecimals")]
-    public int PriceDecimals { get; init; }
+    [JsonPropertyName("riskFactorConfig")]
+    public IReadOnlyList<RiskFactorConfig>? RiskFactorConfig { get; init; }
+}
 
-    /// <summary>
-    /// Size decimal places for display.
-    /// </summary>
-    [JsonPropertyName("sizeDecimals")]
-    public int SizeDecimals { get; init; }
+/// <summary>
+/// Risk factor configuration entry.
+/// </summary>
+public sealed record RiskFactorConfig
+{
+    [JsonPropertyName("upperBound")]
+    public string? UpperBound { get; init; }
+
+    [JsonPropertyName("riskFactor")]
+    public string? RiskFactor { get; init; }
+
+    [JsonPropertyName("isAvailableForUsers")]
+    public bool IsAvailableForUsers { get; init; }
+}
+
+/// <summary>
+/// L2 configuration for StarkEx.
+/// </summary>
+public sealed record L2ConfigInfo
+{
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    [JsonPropertyName("collateralId")]
+    public string? CollateralId { get; init; }
+
+    [JsonPropertyName("syntheticId")]
+    public string? SyntheticId { get; init; }
+
+    [JsonPropertyName("syntheticResolution")]
+    public long SyntheticResolution { get; init; }
+
+    [JsonPropertyName("collateralResolution")]
+    public long CollateralResolution { get; init; }
 }

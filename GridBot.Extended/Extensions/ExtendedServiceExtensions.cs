@@ -1,9 +1,11 @@
 using GridBot.Abstractions.Authentication;
 using GridBot.Abstractions.Communication;
+using GridBot.Abstractions.Extensions;
 using GridBot.Abstractions.Factory;
 using GridBot.Abstractions.Scaling;
 using GridBot.Abstractions.Trading;
 using GridBot.Extended.Adapters;
+using GridBot.Extended.Factory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -204,4 +206,68 @@ internal sealed class ExtendedExchangeRegistrationService : Microsoft.Extensions
 
         return Task.CompletedTask;
     }
+}
+
+/// <summary>
+/// Extended network service extensions for multi-network support.
+/// </summary>
+public static class ExtendedNetworkServiceExtensions
+{
+    /// <summary>
+    /// Service key for testnet exchange client.
+    /// </summary>
+    public const string TestnetServiceKey = "extended-testnet";
+
+    /// <summary>
+    /// Service key for mainnet exchange client.
+    /// </summary>
+    public const string MainnetServiceKey = "extended-mainnet";
+
+    /// <summary>
+    /// Adds Extended network configuration and factory services to the service collection.
+    /// This registers <see cref="ExtendedNetworksOptions"/> and <see cref="IExtendedNetworkExchangeFactory"/>
+    /// for runtime network switching between testnet and mainnet.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">Configuration containing the "ExtendedNetworks" section.</param>
+    /// <returns>The service collection for chaining.</returns>
+    public static IServiceCollection AddExtendedNetworks(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        // Bind ExtendedNetworksOptions from configuration
+        services.AddOptions<ExtendedNetworksOptions>()
+            .Bind(configuration.GetSection(ExtendedNetworksOptions.SectionName));
+
+        // Register HTTP client factory
+        services.AddHttpClient();
+
+        // Register the exchange registry if not already registered
+        services.AddExchangeRegistry();
+
+        // Register the network exchange factory
+        services.AddSingleton<IExtendedNetworkExchangeFactory, ExtendedNetworkExchangeFactory>();
+
+        // Register forwarding services that delegate to the current exchange client
+        // These services resolve the primary exchange from the registry at call time
+        // Note: These are already registered by AddLighterNetworks, so we skip if already registered
+        // The registry-based forwarding in LighterAbstractionsExtensions handles both exchanges
+
+        return services;
+    }
+
+    /// <summary>
+    /// Gets the service key for a network type.
+    /// </summary>
+    /// <param name="network">The network type.</param>
+    /// <returns>The service key for the network.</returns>
+    public static string GetServiceKey(ExtendedNetworkType network) => network switch
+    {
+        ExtendedNetworkType.Testnet => TestnetServiceKey,
+        ExtendedNetworkType.Mainnet => MainnetServiceKey,
+        _ => throw new ArgumentOutOfRangeException(nameof(network), network, "Unknown network type")
+    };
 }

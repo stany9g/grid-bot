@@ -8,50 +8,56 @@ namespace GridBot.Extended.Models.Api;
 public sealed record AccountInfoResponse
 {
     /// <summary>
-    /// Account address.
+    /// Unique account identifier.
     /// </summary>
-    [JsonPropertyName("address")]
-    public required string Address { get; init; }
+    [JsonPropertyName("accountId")]
+    public long AccountId { get; init; }
 
     /// <summary>
-    /// Stark public key.
+    /// Account description.
     /// </summary>
-    [JsonPropertyName("starkKey")]
-    public string? StarkKey { get; init; }
+    [JsonPropertyName("description")]
+    public string? Description { get; init; }
 
     /// <summary>
-    /// Current nonce for signing.
+    /// Account index.
     /// </summary>
-    [JsonPropertyName("nonce")]
-    public long Nonce { get; init; }
+    [JsonPropertyName("accountIndex")]
+    public int AccountIndex { get; init; }
 
     /// <summary>
-    /// Account status: "active", "suspended", etc.
+    /// Account status: "ACTIVE", "SUSPENDED", etc.
     /// </summary>
     [JsonPropertyName("status")]
     public string? Status { get; init; }
 
     /// <summary>
-    /// Whether the account is a market maker.
+    /// L2 key for the account.
     /// </summary>
-    [JsonPropertyName("isMarketMaker")]
-    public bool IsMarketMaker { get; init; }
+    [JsonPropertyName("l2Key")]
+    public string? L2Key { get; init; }
 
     /// <summary>
-    /// Account tier for fee discounts.
+    /// L2 vault identifier.
     /// </summary>
-    [JsonPropertyName("tier")]
-    public string? Tier { get; init; }
+    [JsonPropertyName("l2Vault")]
+    public string? L2Vault { get; init; }
 
     /// <summary>
-    /// Maker fee rate.
+    /// Bridge Starknet address.
     /// </summary>
-    [JsonPropertyName("makerFee")]
-    public string? MakerFee { get; init; }
+    [JsonPropertyName("bridgeStarknetAddress")]
+    public string? BridgeStarknetAddress { get; init; }
 
     /// <summary>
-    /// Taker fee rate.
+    /// API keys associated with the account.
     /// </summary>
-    [JsonPropertyName("takerFee")]
-    public string? TakerFee { get; init; }
+    [JsonPropertyName("apiKeys")]
+    public IReadOnlyList<string>? ApiKeys { get; init; }
+
+    /// <summary>
+    /// Account index used for key generation.
+    /// </summary>
+    [JsonPropertyName("accountIndexForKeyGeneration")]
+    public int AccountIndexForKeyGeneration { get; init; }
 }

@@ -4,12 +4,11 @@
 @using GridBot.ApiService.Services.Network
 @using GridBot.Extended
 @using GridBot.Lighter
-@using Microsoft.Extensions.Options
 @using MudBlazor
 @inject INetworkSelectionService NetworkSelection
 @inject IExchangeSelectionService ExchangeSelection
 @inject IGridBotControlService BotControl
-@inject IOptions<ExtendedOptions> ExtendedOptions
+@inject IServiceProvider ServiceProvider
 @inject ISnackbar Snackbar
 @implements IDisposable
 
@@ -99,36 +98,81 @@
             Refresh Status
         </MudButton>
     }
-    else if (ExchangeSelection.CurrentExchangeType == ExchangeType.Extended)
+    else if (ExchangeSelection.CurrentExchangeType == ExchangeType.Extended && _extendedNetworkSelection != null)
     {
-        @* Extended DEX - show network from configuration *@
-        var extendedOpts = ExtendedOptions.Value;
-        var isTestnet = extendedOpts.IsTestnet;
+        @* Extended DEX - full network selection *@
+        <MudTooltip Text="@GetDisabledTooltip()" Disabled="@(!IsSelectorDisabled())">
+            <MudSelect T="ExtendedNetworkType?"
+                       Value="@((ExtendedNetworkType?)_extendedNetworkSelection.CurrentNetwork)"
+                       ValueChanged="OnExtendedNetworkSelected"
+                       Variant="Variant.Outlined"
+                       Margin="Margin.Dense"
+                       Label="Select Network"
+                       Disabled="@(IsSelectorDisabled() || _isLoading)"
+                       AnchorOrigin="Origin.BottomCenter"
+                       Class="network-selector">
+                @foreach (var network in _extendedNetworkSelection.AvailableNetworks)
+                {
+                    <MudSelectItem Value="@((ExtendedNetworkType?)network.Type)">
+                        <div class="d-flex align-center justify-space-between" style="width: 100%;">
+                            <div class="d-flex align-center gap-2">
+                                <MudIcon Icon="@GetExtendedNetworkIcon(network.Type)"
+                                         Color="@GetExtendedNetworkIconColor(network.Type)"
+                                         Size="Size.Small" />
+                                <span>@network.DisplayName</span>
+                            </div>
+                            <MudChip T="string"
+                                     Size="Size.Small"
+                                     Color="@(network.IsConfigured ? Color.Success : Color.Error)"
+                                     Variant="Variant.Outlined">
+                                @(network.IsConfigured ? "Configured" : "Not Configured")
+                            </MudChip>
+                        </div>
+                    </MudSelectItem>
+                }
+            </MudSelect>
+        </MudTooltip>
 
-        <MudText Typo="Typo.body2" Color="Color.Secondary">
-            Network configured in appsettings
-        </MudText>
-        <div class="d-flex align-center gap-2 mt-1">
-            <MudChip T="string"
-                     Size="Size.Small"
-                     Color="@(isTestnet ? Color.Warning : Color.Primary)"
-                     Variant="Variant.Filled"
-                     Icon="@(isTestnet ? Icons.Material.Filled.Science : Icons.Material.Filled.Public)">
-                Extended @(isTestnet ? "Testnet" : "Mainnet")
-            </MudChip>
-            @if (!isTestnet)
+        @* Status message for selected Extended network *@
+        @if (GetCurrentExtendedNetwork() is { } currentExtendedNetwork)
+        {
+            <div class="d-flex align-center gap-2 mt-1">
+                <MudChip T="string"
+                         Size="Size.Small"
+                         Color="@GetExtendedNetworkChipColor(currentExtendedNetwork.Type)"
+                         Variant="Variant.Filled"
+                         Icon="@GetExtendedNetworkIcon(currentExtendedNetwork.Type)">
+                    @currentExtendedNetwork.DisplayName
+                </MudChip>
+                @if (currentExtendedNetwork.Type == ExtendedNetworkType.Mainnet)
+                {
+                    <MudIcon Icon="@Icons.Material.Filled.Warning"
+                             Color="Color.Warning"
+                             Size="Size.Small" />
+                    <MudText Typo="Typo.caption" Color="Color.Warning">
+                        Real funds
+                    </MudText>
+                }
+            </div>
+
+            @if (!string.IsNullOrEmpty(currentExtendedNetwork.StatusMessage))
             {
-                <MudIcon Icon="@Icons.Material.Filled.Warning"
-                         Color="Color.Warning"
-                         Size="Size.Small" />
-                <MudText Typo="Typo.caption" Color="Color.Warning">
-                    Real funds
+                <MudText Typo="Typo.caption"
+                         Color="@(currentExtendedNetwork.IsConfigured ? Color.Success : Color.Error)">
+                    @currentExtendedNetwork.StatusMessage
                 </MudText>
             }
-        </div>
-        <MudText Typo="Typo.caption" Color="Color.Tertiary" Class="mt-1">
-            Runtime switching requires restart
-        </MudText>
+        }
+
+        @* Refresh button *@
+        <MudButton Variant="Variant.Text"
+                   Color="Color.Secondary"
+                   Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Refresh"
+                   OnClick="RefreshExtendedNetworks"
+                   Disabled="@_isLoading">
+            Refresh Status
+        </MudButton>
     }
     else if (ExchangeSelection.CurrentExchangeType.HasValue)
     {
@@ -149,15 +193,28 @@
 @code {
     private bool _isLoading;
     private bool _disposed;
+    private IExtendedNetworkSelectionService? _extendedNetworkSelection;
 
     protected override async Task OnInitializedAsync()
     {
+        // Get optional Extended network selection service
+        _extendedNetworkSelection = ServiceProvider.GetService<IExtendedNetworkSelectionService>();
+
         BotControl.StatusChanged += OnBotStatusChanged;
         NetworkSelection.NetworkChanged += OnNetworkChanged;
         ExchangeSelection.ExchangeChanged += OnExchangeChanged;
 
+        if (_extendedNetworkSelection != null)
+        {
+            _extendedNetworkSelection.NetworkChanged += OnExtendedNetworkChanged;
+        }
+
         // Initial refresh of available networks
         await RefreshNetworks();
+        if (_extendedNetworkSelection != null)
+        {
+            await RefreshExtendedNetworks();
+        }
     }
 
     private void OnBotStatusChanged(object? sender, BotStatusChangedEventArgs e)
@@ -173,6 +230,12 @@
         InvokeAsync(StateHasChanged);
     }
 
+    private void OnExtendedNetworkChanged(object? sender, ExtendedNetworkType e)
+    {
+        if (_disposed) return;
+        InvokeAsync(StateHasChanged);
+    }
+
     private void OnExchangeChanged(object? sender, ExchangeType e)
     {
         if (_disposed) return;
@@ -183,6 +246,12 @@
     {
         return NetworkSelection.AvailableNetworks
             .FirstOrDefault(n => n.Type == NetworkSelection.CurrentNetwork);
+    }
+
+    private ExtendedNetworkInfo? GetCurrentExtendedNetwork()
+    {
+        return _extendedNetworkSelection?.AvailableNetworks
+            .FirstOrDefault(n => n.Type == _extendedNetworkSelection.CurrentNetwork);
     }
 
     private async Task OnNetworkSelected(LighterNetworkType? networkType)
@@ -250,6 +319,74 @@
         }
     }
 
+    private async Task OnExtendedNetworkSelected(ExtendedNetworkType? networkType)
+    {
+        if (!networkType.HasValue || _extendedNetworkSelection == null)
+            return;
+
+        if (IsSelectorDisabled())
+        {
+            Snackbar.Add("Cannot switch network while bot is running. Stop the bot first.", Severity.Warning);
+            return;
+        }
+
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await _extendedNetworkSelection.SelectNetworkAsync(networkType.Value);
+
+            var displayName = GetExtendedNetworkDisplayName(networkType.Value);
+            if (networkType.Value == ExtendedNetworkType.Mainnet)
+            {
+                Snackbar.Add($"Switched to {displayName} - CAUTION: Real funds!", Severity.Warning);
+            }
+            else
+            {
+                Snackbar.Add($"Switched to {displayName}", Severity.Success);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add($"Cannot switch network: {ex.Message}", Severity.Error);
+        }
+        catch (ArgumentException ex)
+        {
+            Snackbar.Add($"Invalid network: {ex.Message}", Severity.Error);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to switch network: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task RefreshExtendedNetworks()
+    {
+        if (_extendedNetworkSelection == null)
+            return;
+
+        _isLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            await _extendedNetworkSelection.RefreshNetworkStatusAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to refresh Extended networks: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
     private bool IsSelectorDisabled()
     {
         // Disable when bot is in any active state (not stopped or error)
@@ -302,11 +439,45 @@
         _ => Color.Default
     };
 
+    // Extended network helper methods
+    private static string GetExtendedNetworkDisplayName(ExtendedNetworkType networkType) => networkType switch
+    {
+        ExtendedNetworkType.Testnet => "Testnet",
+        ExtendedNetworkType.Mainnet => "Mainnet",
+        _ => networkType.ToString()
+    };
+
+    private static string GetExtendedNetworkIcon(ExtendedNetworkType networkType) => networkType switch
+    {
+        ExtendedNetworkType.Testnet => Icons.Material.Filled.Science,
+        ExtendedNetworkType.Mainnet => Icons.Material.Filled.Public,
+        _ => Icons.Material.Filled.Cloud
+    };
+
+    private static Color GetExtendedNetworkIconColor(ExtendedNetworkType networkType) => networkType switch
+    {
+        ExtendedNetworkType.Testnet => Color.Warning,
+        ExtendedNetworkType.Mainnet => Color.Primary,
+        _ => Color.Default
+    };
+
+    private static Color GetExtendedNetworkChipColor(ExtendedNetworkType networkType) => networkType switch
+    {
+        ExtendedNetworkType.Testnet => Color.Warning,
+        ExtendedNetworkType.Mainnet => Color.Primary,
+        _ => Color.Default
+    };
+
     public void Dispose()
     {
         _disposed = true;
         BotControl.StatusChanged -= OnBotStatusChanged;
         NetworkSelection.NetworkChanged -= OnNetworkChanged;
         ExchangeSelection.ExchangeChanged -= OnExchangeChanged;
+
+        if (_extendedNetworkSelection != null)
+        {
+            _extendedNetworkSelection.NetworkChanged -= OnExtendedNetworkChanged;
+        }
     }
 }

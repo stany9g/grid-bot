@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using GridBot.Extended.Models.Api;
@@ -36,8 +37,9 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
-        // Configure base address and default headers
+        // Configure base address and default headers (matching Python SDK)
         _httpClient.BaseAddress = new Uri(_options.ApiUrl);
+        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         _httpClient.DefaultRequestHeaders.Add(ExtendedConstants.ApiKeyHeader, _options.ApiKey);
         _httpClient.DefaultRequestHeaders.Add("User-Agent", _options.UserAgent);
     }
@@ -45,12 +47,12 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
     /// <inheritdoc />
     public async Task<IReadOnlyList<MarketInfo>> GetMarketsAsync(CancellationToken ct = default)
     {
-        var response = await SendAsync<IReadOnlyList<MarketInfo>>(
+        var response = await SendAsync<ApiResponse<IReadOnlyList<MarketInfo>>>(
             HttpMethod.Get,
-            "/info/markets",
+            "info/markets",
             RequestPriority.Low,
             ct);
-        return response ?? [];
+        return response?.Data ?? [];
     }
 
     /// <inheritdoc />
@@ -59,7 +61,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         ArgumentException.ThrowIfNullOrWhiteSpace(market);
         return await SendAsync<MarketStats>(
             HttpMethod.Get,
-            $"/info/markets/{Uri.EscapeDataString(market)}/stats",
+            $"info/markets/{Uri.EscapeDataString(market)}/stats",
             RequestPriority.Low,
             ct) ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
     }
@@ -70,7 +72,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         ArgumentException.ThrowIfNullOrWhiteSpace(market);
         return await SendAsync<OrderBookResponse>(
             HttpMethod.Get,
-            $"/info/markets/{Uri.EscapeDataString(market)}/orderbook?depth={depth}",
+            $"info/markets/{Uri.EscapeDataString(market)}/orderbook?depth={depth}",
             RequestPriority.Low,
             ct) ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
     }
@@ -89,7 +91,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
 
         var response = await SendAsync<IReadOnlyList<CandleResponse>>(
             HttpMethod.Get,
-            $"/info/candles/{Uri.EscapeDataString(market)}/{Uri.EscapeDataString(candleType)}?interval={Uri.EscapeDataString(interval)}&limit={limit}",
+            $"info/candles/{Uri.EscapeDataString(market)}/{Uri.EscapeDataString(candleType)}?interval={Uri.EscapeDataString(interval)}&limit={limit}",
             RequestPriority.Low,
             ct);
         return response ?? [];
@@ -101,7 +103,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         ArgumentException.ThrowIfNullOrWhiteSpace(market);
         return await SendAsync<FundingRateResponse>(
             HttpMethod.Get,
-            $"/info/{Uri.EscapeDataString(market)}/funding",
+            $"info/{Uri.EscapeDataString(market)}/funding",
             RequestPriority.Low,
             ct) ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
     }
@@ -109,60 +111,100 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
     /// <inheritdoc />
     public async Task<AccountInfoResponse> GetAccountInfoAsync(CancellationToken ct = default)
     {
-        return await SendAsync<AccountInfoResponse>(
+        var response = await SendAsync<ApiResponse<AccountInfoResponse>>(
             HttpMethod.Get,
-            "/user/account/info",
+            "user/account/info",
             RequestPriority.Medium,
-            ct) ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
+            ct);
+        return response?.Data ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<BalanceResponse>> GetBalancesAsync(CancellationToken ct = default)
+    /// <remarks>
+    /// Extended API returns 404 when balance is 0 (per API docs).
+    /// This is handled by returning a zero balance response.
+    /// </remarks>
+    public async Task<BalanceResponse?> GetBalanceAsync(CancellationToken ct = default)
     {
-        var response = await SendAsync<IReadOnlyList<BalanceResponse>>(
-            HttpMethod.Get,
-            "/user/balance",
-            RequestPriority.Medium,
-            ct);
-        return response ?? [];
+        try
+        {
+            var response = await SendAsync<ApiResponse<BalanceResponse>>(
+                HttpMethod.Get,
+                "user/balance",
+                RequestPriority.Medium,
+                ct);
+            return response?.Data;
+        }
+        catch (ExtendedApiException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Per Extended API docs: "Returns a 404 error if the user's balance is 0"
+            _logger.LogDebug("Balance endpoint returned 404, treating as zero balance");
+            return new BalanceResponse
+            {
+                CollateralName = "USDC",
+                Balance = 0m,
+                Equity = 0m,
+                AvailableForTrade = 0m,
+                AvailableForWithdrawal = 0m,
+                UnrealisedPnl = 0m,
+                InitialMargin = 0m,
+                MarginRatio = 0m,
+                UpdatedTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            };
+        }
     }
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<PositionResponse>> GetPositionsAsync(CancellationToken ct = default)
     {
-        var response = await SendAsync<IReadOnlyList<PositionResponse>>(
+        var response = await SendAsync<ApiResponse<IReadOnlyList<PositionResponse>>>(
             HttpMethod.Get,
-            "/user/positions",
+            "user/positions",
             RequestPriority.Critical, // Critical for risk management
             ct);
-        return response ?? [];
+        return response?.Data ?? [];
     }
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<OrderResponse>> GetOrdersAsync(string? market = null, CancellationToken ct = default)
     {
         var path = string.IsNullOrWhiteSpace(market)
-            ? "/user/orders"
-            : $"/user/orders?market={Uri.EscapeDataString(market)}";
+            ? "user/orders"
+            : $"user/orders?market={Uri.EscapeDataString(market)}";
 
-        var response = await SendAsync<IReadOnlyList<OrderResponse>>(
+        var response = await SendAsync<ApiResponse<IReadOnlyList<OrderResponse>>>(
             HttpMethod.Get,
             path,
             RequestPriority.Medium,
             ct);
-        return response ?? [];
+        return response?.Data ?? [];
     }
 
     /// <inheritdoc />
     public async Task<CreateOrderResponse> CreateOrderAsync(CreateOrderRequest request, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return await SendAsync<CreateOrderResponse>(
+
+        var response = await SendAsync<ApiResponse<CreateOrderResponse>>(
             HttpMethod.Post,
-            "/user/order",
+            "user/order",
             RequestPriority.High,
             ct,
-            request) ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
+            request);
+
+        if (response == null)
+        {
+            throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
+        }
+
+        if (!response.IsSuccess || response.Error != null)
+        {
+            var errorMessage = response.Error?.ToString() ?? "Unknown error";
+            _logger.LogWarning("Order creation failed: {Error}", errorMessage);
+            throw new ExtendedApiException(errorMessage, HttpStatusCode.BadRequest, response.Error?.Message);
+        }
+
+        return response.Data ?? throw new ExtendedApiException("Response OK but no data", HttpStatusCode.OK);
     }
 
     /// <inheritdoc />
@@ -174,7 +216,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         {
             await SendAsync<object>(
                 HttpMethod.Delete,
-                $"/user/order/{Uri.EscapeDataString(orderId)}",
+                $"user/order/{Uri.EscapeDataString(orderId)}",
                 RequestPriority.Critical,
                 ct);
             return true;
@@ -193,7 +235,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         ArgumentNullException.ThrowIfNull(request);
         return await SendAsync<MassCancelResponse>(
             HttpMethod.Post,
-            "/user/order/massCancel",
+            "user/order/massCancel",
             RequestPriority.Critical,
             ct,
             request) ?? throw new ExtendedApiException("Empty response", HttpStatusCode.OK);
@@ -205,7 +247,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         ArgumentException.ThrowIfNullOrWhiteSpace(market);
         var response = await SendAsync<LeverageResponse>(
             HttpMethod.Get,
-            $"/user/leverage?market={Uri.EscapeDataString(market)}",
+            $"user/leverage?market={Uri.EscapeDataString(market)}",
             RequestPriority.Medium,
             ct);
         return response?.Leverage ?? 1;
@@ -220,7 +262,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         {
             await SendAsync<object>(
                 HttpMethod.Patch,
-                "/user/leverage",
+                "user/leverage",
                 RequestPriority.High,
                 ct,
                 new { market, leverage });
@@ -246,6 +288,7 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         // CRITICAL: Record request BEFORE sending to account for in-flight requests
         _rateLimiter.RecordRequest();
 
+        HttpResponseMessage? response = null ;
         try
         {
             using var request = new HttpRequestMessage(method, path);
@@ -257,14 +300,14 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
 
             _logger.LogDebug("Sending {Method} {Path}", method, path);
 
-            using var response = await _httpClient.SendAsync(request, ct);
+            response = await _httpClient.SendAsync(request, ct);
 
             if (response.IsSuccessStatusCode)
             {
                 _rateLimiter.RecordSuccessfulRequest();
 
-                 var s = await response.Content.ReadAsStringAsync(ct);
-                if (response.StatusCode == HttpStatusCode.NoContent)
+                if (response.StatusCode == HttpStatusCode.NoContent ||
+                    response.Content.Headers.ContentLength == 0)
                 {
                     return default;
                 }
@@ -283,13 +326,16 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
             var errorContent = await response.Content.ReadAsStringAsync(ct);
             ErrorResponse? errorResponse = null;
 
-            try
+            if (!string.IsNullOrWhiteSpace(errorContent))
             {
-                errorResponse = JsonSerializer.Deserialize<ErrorResponse>(errorContent, ExtendedJsonOptions.Default);
-            }
-            catch
-            {
-                // Ignore deserialization errors for error response
+                try
+                {
+                    errorResponse = JsonSerializer.Deserialize<ErrorResponse>(errorContent, ExtendedJsonOptions.Default);
+                }
+                catch
+                {
+                    // Ignore deserialization errors for error response
+                }
             }
 
             var errorMessage = errorResponse?.Error ?? errorContent ?? response.ReasonPhrase ?? "Unknown error";
@@ -311,6 +357,11 @@ public sealed class ExtendedHttpClient : IExtendedHttpClient
         }
         catch (Exception ex)
         {
+            if(response != null)
+            {
+
+                var errorContent = await response.Content.ReadAsStringAsync(ct);
+            }
             _logger.LogError(ex, "HTTP request failed: {Method} {Path}", method, path);
             throw new ExtendedApiException(ex.Message, HttpStatusCode.InternalServerError, null, ex);
         }

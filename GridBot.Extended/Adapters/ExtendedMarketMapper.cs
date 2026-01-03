@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using GridBot.Extended.Models.Api;
 using Microsoft.Extensions.Logging;
 
@@ -55,7 +56,8 @@ internal sealed class ExtendedMarketMapper
     public decimal GetTickSize(string marketId)
     {
         var info = GetMarketInfo(marketId);
-        return info != null && decimal.TryParse(info.TickSize, out var tickSize)
+        var minPriceChange = info?.TradingConfig?.MinPriceChange;
+        return minPriceChange != null && decimal.TryParse(minPriceChange, NumberStyles.Any, CultureInfo.InvariantCulture, out var tickSize)
             ? tickSize
             : 0.01m;
     }
@@ -68,7 +70,8 @@ internal sealed class ExtendedMarketMapper
     public decimal GetStepSize(string marketId)
     {
         var info = GetMarketInfo(marketId);
-        return info != null && decimal.TryParse(info.StepSize, out var stepSize)
+        var minOrderSizeChange = info?.TradingConfig?.MinOrderSizeChange;
+        return minOrderSizeChange != null && decimal.TryParse(minOrderSizeChange, NumberStyles.Any, CultureInfo.InvariantCulture, out var stepSize)
             ? stepSize
             : 0.001m;
     }
@@ -81,7 +84,8 @@ internal sealed class ExtendedMarketMapper
     public decimal GetMinOrderSize(string marketId)
     {
         var info = GetMarketInfo(marketId);
-        return info != null && decimal.TryParse(info.MinOrderSize, out var minSize)
+        var minOrderSize = info?.TradingConfig?.MinOrderSize;
+        return minOrderSize != null && decimal.TryParse(minOrderSize, NumberStyles.Any, CultureInfo.InvariantCulture, out var minSize)
             ? minSize
             : 0.001m;
     }
@@ -102,7 +106,7 @@ internal sealed class ExtendedMarketMapper
         _marketCache.Clear();
         foreach (var market in markets)
         {
-            _marketCache[market.Market] = market;
+            _marketCache[market.Name] = market;
         }
 
         _isInitialized = true;
@@ -110,7 +114,7 @@ internal sealed class ExtendedMarketMapper
         _logger.LogInformation(
             "Market mapper initialized with {Count} markets: {Markets}",
             markets.Count,
-            string.Join(", ", markets.Select(m => m.Market).Take(10)) + (markets.Count > 10 ? "..." : ""));
+            string.Join(", ", markets.Select(m => m.Name).Take(10)) + (markets.Count > 10 ? "..." : ""));
     }
 
     /// <summary>
@@ -120,7 +124,7 @@ internal sealed class ExtendedMarketMapper
     public void UpdateMarket(MarketInfo market)
     {
         ArgumentNullException.ThrowIfNull(market);
-        _marketCache[market.Market] = market;
+        _marketCache[market.Name] = market;
     }
 
     /// <summary>
@@ -131,7 +135,7 @@ internal sealed class ExtendedMarketMapper
     public bool IsValidMarket(string marketId)
     {
         var info = GetMarketInfo(marketId);
-        return info?.IsActive == true;
+        return info?.Active == true;
     }
 
     /// <summary>
@@ -141,7 +145,9 @@ internal sealed class ExtendedMarketMapper
     /// <returns>Number of price decimals.</returns>
     public int GetPriceDecimals(string marketId)
     {
-        return GetMarketInfo(marketId)?.PriceDecimals ?? 2;
+        var info = GetMarketInfo(marketId);
+        // Use collateral asset precision for price decimals
+        return info?.CollateralAssetPrecision ?? 2;
     }
 
     /// <summary>
@@ -151,7 +157,9 @@ internal sealed class ExtendedMarketMapper
     /// <returns>Number of size decimals.</returns>
     public int GetSizeDecimals(string marketId)
     {
-        return GetMarketInfo(marketId)?.SizeDecimals ?? 4;
+        var info = GetMarketInfo(marketId);
+        // Use asset precision for size decimals
+        return info?.AssetPrecision ?? 4;
     }
 
     /// <summary>
@@ -161,6 +169,12 @@ internal sealed class ExtendedMarketMapper
     /// <returns>Maximum leverage, or 20 as default.</returns>
     public int GetMaxLeverage(string marketId)
     {
-        return GetMarketInfo(marketId)?.MaxLeverage ?? 20;
+        var info = GetMarketInfo(marketId);
+        var maxLeverageStr = info?.TradingConfig?.MaxLeverage;
+        if (maxLeverageStr != null && decimal.TryParse(maxLeverageStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var maxLeverage))
+        {
+            return (int)maxLeverage;
+        }
+        return 20;
     }
 }

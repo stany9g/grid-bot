@@ -45,6 +45,12 @@ public sealed class ExtendedOptions
     public long VaultNumber { get; set; }
 
     /// <summary>
+    /// L2 Vault ID from account info (collateralPosition for orders).
+    /// This is populated at runtime after connecting to the exchange.
+    /// </summary>
+    public string L2Vault { get; set; } = string.Empty;
+
+    /// <summary>
     /// Client ID for the account.
     /// </summary>
     public long ClientId { get; set; }

@@ -1,5 +1,4 @@
-using System.Globalization;
-using System.Numerics;
+using GridBot.Extended.Models.Api;
 using GridBot.Extended.Native;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -8,7 +7,7 @@ namespace GridBot.Extended;
 
 /// <summary>
 /// High-level Stark signature client for Extended DEX order signing.
-/// Handles message hash construction and signature generation.
+/// Uses Poseidon hash with SNIP-12 typed structured data (same as Python SDK).
 /// </summary>
 public sealed class StarkSigner : IDisposable
 {
@@ -81,21 +80,23 @@ public sealed class StarkSigner : IDisposable
     }
 
     /// <summary>
-    /// Signs an order for the Extended DEX.
+    /// Signs an order for the Extended DEX using SNIP-12 typed structured data with Poseidon hash.
     /// </summary>
     /// <param name="order">The order parameters to sign.</param>
+    /// <param name="marketInfo">Market L2 configuration for asset IDs.</param>
+    /// <param name="isTestnet">Whether this is testnet (affects domain chain ID).</param>
     /// <returns>The signature components (R, S).</returns>
-    public (string R, string S) SignOrder(ExtendedOrderMessage order)
+    public (string R, string S) SignOrder(StarkExOrderParams order, L2ConfigInfo marketInfo, bool isTestnet = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         EnsureInitialized();
 
-        // Compute message hash using Pedersen hash chain
-        var messageHash = ComputeOrderMessageHash(order);
+        // Compute message hash using native library (Poseidon + SNIP-12)
+        var messageHash = ComputeOrderHash(order, marketInfo, isTestnet);
 
         _logger.LogDebug(
-            "Signing order: Market={Market}, Side={Side}, Qty={Qty}, Price={Price}, Nonce={Nonce}",
-            order.Market, order.Side, order.Quantity, order.Price, order.Nonce);
+            "Signing order: PositionId={PositionId}, BaseAmount={BaseAmount}, QuoteAmount={QuoteAmount}, Fee={Fee}, Nonce={Nonce}, Hash={Hash}",
+            order.PositionId, order.BaseAmount, order.QuoteAmount, order.FeeAmount, order.Nonce, TruncateKey(messageHash));
 
         // Sign the message hash
         var (r, s) = StarkNativeMethods.Sign(_starkPrivateKey, messageHash);
@@ -106,129 +107,57 @@ public sealed class StarkSigner : IDisposable
     }
 
     /// <summary>
-    /// Computes the Pedersen hash for an order message.
-    /// Extended DEX uses SNIP-12 style typed data hashing.
+    /// Computes the Extended DEX order hash using SNIP-12 typed structured data.
+    /// Uses the same algorithm as the Python SDK (Poseidon hash).
     /// </summary>
-    private string ComputeOrderMessageHash(ExtendedOrderMessage order)
+    private string ComputeOrderHash(StarkExOrderParams order, L2ConfigInfo marketInfo, bool isTestnet)
     {
-        // Extended order hash structure (SNIP-12 compatible):
-        // hash = pedersen(pedersen(pedersen(pedersen(pedersen(
-        //   domain_hash,
-        //   stark_key),
-        //   market_hash),
-        //   order_params_hash),
-        //   nonce),
-        //   expiry)
-
-        // Step 1: Domain separator (Extended DEX specific)
-        var domainHash = ComputeDomainHash();
-
-        // Step 2: Hash with stark key
-        var hash1 = StarkNativeMethods.PedersenHash(domainHash, _starkPublicKey!);
-
-        // Step 3: Market identifier hash
-        var marketHash = ComputeStringHash(order.Market);
-        var hash2 = StarkNativeMethods.PedersenHash(hash1, marketHash);
-
-        // Step 4: Order parameters hash
-        var paramsHash = ComputeOrderParamsHash(order);
-        var hash3 = StarkNativeMethods.PedersenHash(hash2, paramsHash);
-
-        // Step 5: Nonce
-        var nonceHex = ToFelt(order.Nonce);
-        var hash4 = StarkNativeMethods.PedersenHash(hash3, nonceHex);
-
-        // Step 6: Expiry
-        var expiryHex = ToFelt(order.ExpiryEpochMillis);
-        var finalHash = StarkNativeMethods.PedersenHash(hash4, expiryHex);
-
-        return finalHash;
-    }
-
-    /// <summary>
-    /// Computes the domain separator hash for Extended DEX.
-    /// </summary>
-    private string ComputeDomainHash()
-    {
-        // Domain: "Extended DEX" + chain ID + version
-        var domainName = ComputeStringHash("Extended DEX");
-        var chainId = ToFelt(_options.IsTestnet ? 300 : 304);
-        var version = ToFelt(1);
-
-        return StarkNativeMethods.PedersenHashMany(domainName, chainId, version);
-    }
-
-    /// <summary>
-    /// Computes the hash of order parameters.
-    /// </summary>
-    private string ComputeOrderParamsHash(ExtendedOrderMessage order)
-    {
-        var sideValue = order.Side.Equals("BUY", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
-        var typeValue = order.Type.Equals("market", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-
-        // Convert decimal values to scaled integers
-        var priceScaled = ScaleDecimal(order.Price, 8); // 8 decimal places
-        var qtyScaled = ScaleDecimal(order.Quantity, 8);
-        var feeScaled = ScaleDecimal(order.Fee, 8);
-
-        return StarkNativeMethods.PedersenHashMany(
-            ToFelt(sideValue),
-            ToFelt(typeValue),
-            ToFelt(priceScaled),
-            ToFelt(qtyScaled),
-            ToFelt(feeScaled),
-            ToFelt(order.ReduceOnly ? 1 : 0)
-        );
-    }
-
-    /// <summary>
-    /// Computes Pedersen hash of a string (as felt array).
-    /// </summary>
-    private static string ComputeStringHash(string value)
-    {
-        // Convert string to felt representation (each char as felt, then hash chain)
-        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
-        var hash = "0x0";
-
-        foreach (var b in bytes)
+        // Validate required L2 config fields
+        if (string.IsNullOrEmpty(marketInfo.SyntheticId))
         {
-            hash = StarkNativeMethods.PedersenHash(hash, ToFelt(b));
+            throw new ArgumentException("L2Config SyntheticId is required for order signing", nameof(marketInfo));
         }
+        if (string.IsNullOrEmpty(marketInfo.CollateralId))
+        {
+            throw new ArgumentException("L2Config CollateralId is required for order signing", nameof(marketInfo));
+        }
+
+        // Domain parameters for Extended DEX
+        const string domainName = "Perpetuals";
+        const string domainVersion = "v0";
+        const string domainRevision = "1";
+        var domainChainId = isTestnet ? "SN_SEPOLIA" : "SN_MAIN";
+
+        _logger.LogDebug(
+            "Computing order hash: positionId={PositionId}, baseAssetId={BaseAssetId}, " +
+            "baseAmount={BaseAmount}, quoteAssetId={QuoteAssetId}, quoteAmount={QuoteAmount}, " +
+            "feeAssetId={FeeAssetId}, feeAmount={FeeAmount}, expiration={Exp}, nonce={Nonce}, " +
+            "publicKey={PublicKey}, chainId={ChainId}",
+            order.PositionId, marketInfo.SyntheticId, order.BaseAmount,
+            marketInfo.CollateralId, order.QuoteAmount, marketInfo.CollateralId,
+            order.FeeAmount, order.ExpirationSeconds, order.Nonce,
+            TruncateKey(_starkPublicKey!), domainChainId);
+
+        // Call native library to compute hash using Poseidon + SNIP-12
+        var hash = StarkNativeMethods.GetOrderHash(
+            positionId: order.PositionId.ToString(),
+            baseAssetIdHex: marketInfo.SyntheticId,
+            baseAmount: order.BaseAmount.ToString(),
+            quoteAssetIdHex: marketInfo.CollateralId,
+            quoteAmount: order.QuoteAmount.ToString(),
+            feeAssetIdHex: marketInfo.CollateralId,  // Fee asset = collateral
+            feeAmount: order.FeeAmount.ToString(),
+            expiration: order.ExpirationSeconds.ToString(),
+            salt: order.Nonce.ToString(),
+            userPublicKeyHex: _starkPublicKey!,
+            domainName: domainName,
+            domainVersion: domainVersion,
+            domainChainId: domainChainId,
+            domainRevision: domainRevision);
+
+        _logger.LogDebug("Computed order hash: {Hash}", TruncateKey(hash));
 
         return hash;
-    }
-
-    /// <summary>
-    /// Converts a long value to a hex felt string.
-    /// </summary>
-    private static string ToFelt(long value)
-    {
-        if (value < 0)
-        {
-            throw new ArgumentException("Felt values must be non-negative", nameof(value));
-        }
-        return $"0x{value:x}";
-    }
-
-    /// <summary>
-    /// Converts a BigInteger to a hex felt string.
-    /// </summary>
-    private static string ToFelt(BigInteger value)
-    {
-        if (value < 0)
-        {
-            throw new ArgumentException("Felt values must be non-negative", nameof(value));
-        }
-        return $"0x{value:x}";
-    }
-
-    /// <summary>
-    /// Scales a decimal value to an integer with the specified precision.
-    /// </summary>
-    private static BigInteger ScaleDecimal(decimal value, int decimals)
-    {
-        var scale = (decimal)Math.Pow(10, decimals);
-        return new BigInteger(Math.Floor(value * scale));
     }
 
     private void EnsureInitialized()
@@ -262,57 +191,124 @@ public sealed class StarkSigner : IDisposable
 }
 
 /// <summary>
-/// Order message structure for signing.
+/// Parameters for Extended DEX order signing.
 /// </summary>
-public sealed class ExtendedOrderMessage
+public sealed class StarkExOrderParams
 {
     /// <summary>
-    /// Market identifier (e.g., "BTC-USD-PERP").
+    /// Position/vault ID from account L2Vault.
     /// </summary>
-    public required string Market { get; init; }
+    public required long PositionId { get; init; }
 
     /// <summary>
-    /// Order side: "BUY" or "SELL".
+    /// Synthetic (base) amount in Stark units.
+    /// Positive for BUY, negative for SELL.
     /// </summary>
-    public required string Side { get; init; }
+    public required long BaseAmount { get; init; }
 
     /// <summary>
-    /// Order type: "limit" or "market".
+    /// Collateral (quote) amount in Stark units.
+    /// Negative for BUY, positive for SELL.
     /// </summary>
-    public required string Type { get; init; }
+    public required long QuoteAmount { get; init; }
 
     /// <summary>
-    /// Order price (for limit orders).
+    /// Max fee amount in Stark units (always positive).
     /// </summary>
-    public required decimal Price { get; init; }
+    public required long FeeAmount { get; init; }
 
     /// <summary>
-    /// Order quantity.
-    /// </summary>
-    public required decimal Quantity { get; init; }
-
-    /// <summary>
-    /// Fee rate.
-    /// </summary>
-    public required decimal Fee { get; init; }
-
-    /// <summary>
-    /// Order nonce.
+    /// Nonce/salt for the order.
     /// </summary>
     public required long Nonce { get; init; }
 
     /// <summary>
-    /// Order expiry in epoch milliseconds.
+    /// Expiration timestamp in Unix seconds (with 14-day buffer).
     /// </summary>
-    public required long ExpiryEpochMillis { get; init; }
+    public required long ExpirationSeconds { get; init; }
 
     /// <summary>
-    /// Whether the order is reduce-only.
+    /// Whether this is a BUY order.
     /// </summary>
-    public bool ReduceOnly { get; init; }
+    public bool IsBuy => BaseAmount > 0;
+}
+
+/// <summary>
+/// Helper for calculating Stark amounts.
+/// </summary>
+public static class StarkAmountCalculator
+{
+    /// <summary>
+    /// Calculates Stark amounts for an order.
+    /// </summary>
+    /// <param name="quantity">Human-readable quantity (e.g., 0.001 BTC).</param>
+    /// <param name="price">Price per unit.</param>
+    /// <param name="feeRate">Fee rate (e.g., 0.00025 for 0.025%).</param>
+    /// <param name="isBuy">Whether this is a BUY order.</param>
+    /// <param name="syntheticResolution">Synthetic asset resolution (e.g., 1,000,000).</param>
+    /// <param name="collateralResolution">Collateral asset resolution (e.g., 1,000,000).</param>
+    /// <returns>Tuple of (baseAmount, quoteAmount, feeAmount) in Stark units.</returns>
+    public static (long BaseAmount, long QuoteAmount, long FeeAmount) CalculateStarkAmounts(
+        decimal quantity,
+        decimal price,
+        decimal feeRate,
+        bool isBuy,
+        long syntheticResolution,
+        long collateralResolution)
+    {
+        // Calculate human amounts
+        var collateralValue = quantity * price;
+        var feeValue = feeRate * collateralValue;
+
+        // Convert to Stark amounts with appropriate rounding
+        // BUY: round UP (pay more), SELL: round DOWN (receive less)
+        var baseAmount = isBuy
+            ? (long)Math.Ceiling(quantity * syntheticResolution)
+            : (long)Math.Floor(quantity * syntheticResolution);
+
+        var quoteAmount = isBuy
+            ? (long)Math.Ceiling(collateralValue * collateralResolution)
+            : (long)Math.Floor(collateralValue * collateralResolution);
+
+        // Fee always rounds UP
+        var feeAmount = (long)Math.Ceiling(feeValue * collateralResolution);
+
+        // Apply sign convention
+        // BUY: positive base (receive synthetic), negative quote (pay collateral)
+        // SELL: negative base (pay synthetic), positive quote (receive collateral)
+        if (isBuy)
+        {
+            quoteAmount = -quoteAmount;
+        }
+        else
+        {
+            baseAmount = -baseAmount;
+        }
+
+        return (baseAmount, quoteAmount, feeAmount);
+    }
 
     /// <summary>
-    /// Time-in-force setting.
+    /// Calculates settlement expiration (order expiry + 14 days, in seconds).
     /// </summary>
-    public string? TimeInForce { get; init; }
+    /// <param name="orderExpiryMillis">Order expiry in Unix milliseconds.</param>
+    /// <returns>Settlement expiration in Unix seconds.</returns>
+    public static long CalcSettlementExpiration(long orderExpiryMillis)
+    {
+        // Add 14 days buffer
+        const long fourteenDaysMillis = 14L * 24 * 60 * 60 * 1000;
+        var withBuffer = orderExpiryMillis + fourteenDaysMillis;
+
+        // Convert to seconds (ceiling)
+        return (long)Math.Ceiling(withBuffer / 1000.0);
+    }
+
+    /// <summary>
+    /// Generates a random 32-bit nonce.
+    /// </summary>
+    /// <returns>Random nonce value.</returns>
+    public static long GenerateNonce()
+    {
+        return Random.Shared.NextInt64(1, uint.MaxValue);
+    }
 }

@@ -5,7 +5,7 @@ namespace GridBot.Extended.Native;
 
 /// <summary>
 /// P/Invoke declarations for the Stark native signing library.
-/// Handles platform-specific library loading and marshaling between C# and native code.
+/// Uses rust-crypto-lib-base for Poseidon hash and SNIP-12 typed structured data.
 /// </summary>
 internal static partial class StarkNativeMethods
 {
@@ -22,8 +22,9 @@ internal static partial class StarkNativeMethods
     public const int ErrNullPointer = -1;
     public const int ErrInvalidUtf8 = -2;
     public const int ErrInvalidHex = -3;
-    public const int ErrSigningFailed = -4;
+    public const int ErrComputationFailed = -4;
     public const int ErrBufferTooSmall = -5;
+    public const int ErrSigningFailed = -6;
 
     static StarkNativeMethods()
     {
@@ -147,6 +148,30 @@ internal static partial class StarkNativeMethods
         }
     }
 
+    #region Native Function Imports
+
+    /// <summary>
+    /// Computes Extended DEX order hash using SNIP-12 typed structured data with Poseidon.
+    /// </summary>
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern int stark_get_order_hash(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string positionId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string baseAssetIdHex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string baseAmount,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string quoteAssetIdHex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string quoteAmount,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string feeAssetIdHex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string feeAmount,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string expiration,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string salt,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string userPublicKeyHex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string domainName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string domainVersion,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string domainChainId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string domainRevision,
+        StringBuilder outHash,
+        nuint outLen);
+
     /// <summary>
     /// Signs a message hash with a Stark private key.
     /// </summary>
@@ -169,30 +194,76 @@ internal static partial class StarkNativeMethods
         nuint outLen);
 
     /// <summary>
-    /// Computes the Pedersen hash of two field elements.
-    /// </summary>
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    private static extern int stark_pedersen_hash(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string a,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string b,
-        StringBuilder outHash,
-        nuint outLen);
-
-    /// <summary>
-    /// Computes the Pedersen hash of multiple field elements.
-    /// </summary>
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-    private static extern int stark_pedersen_hash_many(
-        IntPtr elements,
-        nuint count,
-        StringBuilder outHash,
-        nuint outLen);
-
-    /// <summary>
     /// Gets the error message for a given error code.
     /// </summary>
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private static extern IntPtr stark_get_error_message(int errorCode);
+
+    #endregion
+
+    #region High-Level Wrappers
+
+    /// <summary>
+    /// High-level wrapper: Computes Extended DEX order hash using SNIP-12.
+    /// </summary>
+    /// <param name="positionId">Position/vault ID (decimal string)</param>
+    /// <param name="baseAssetIdHex">Base (synthetic) asset ID (hex with 0x prefix)</param>
+    /// <param name="baseAmount">Base amount (signed decimal: positive for BUY, negative for SELL)</param>
+    /// <param name="quoteAssetIdHex">Quote (collateral) asset ID (hex with 0x prefix)</param>
+    /// <param name="quoteAmount">Quote amount (signed decimal: negative for BUY, positive for SELL)</param>
+    /// <param name="feeAssetIdHex">Fee asset ID (hex with 0x prefix, typically same as quote)</param>
+    /// <param name="feeAmount">Fee amount (unsigned decimal)</param>
+    /// <param name="expiration">Expiration timestamp in Unix seconds</param>
+    /// <param name="salt">Nonce/salt (decimal string)</param>
+    /// <param name="userPublicKeyHex">User's Stark public key (hex with 0x prefix)</param>
+    /// <param name="domainName">Domain name (e.g., "Perpetuals")</param>
+    /// <param name="domainVersion">Domain version (e.g., "v0")</param>
+    /// <param name="domainChainId">Chain ID (e.g., "SN_MAIN" or "SN_SEPOLIA")</param>
+    /// <param name="domainRevision">Domain revision (e.g., "1")</param>
+    /// <returns>Order hash as hex string with 0x prefix</returns>
+    public static string GetOrderHash(
+        string positionId,
+        string baseAssetIdHex,
+        string baseAmount,
+        string quoteAssetIdHex,
+        string quoteAmount,
+        string feeAssetIdHex,
+        string feeAmount,
+        string expiration,
+        string salt,
+        string userPublicKeyHex,
+        string domainName,
+        string domainVersion,
+        string domainChainId,
+        string domainRevision)
+    {
+        var outHash = new StringBuilder(BufferSize);
+
+        var result = stark_get_order_hash(
+            positionId,
+            baseAssetIdHex,
+            baseAmount,
+            quoteAssetIdHex,
+            quoteAmount,
+            feeAssetIdHex,
+            feeAmount,
+            expiration,
+            salt,
+            userPublicKeyHex,
+            domainName,
+            domainVersion,
+            domainChainId,
+            domainRevision,
+            outHash,
+            (nuint)BufferSize);
+
+        if (result != Success)
+        {
+            throw new StarkSigningException(GetErrorMessage(result), result);
+        }
+
+        return outHash.ToString();
+    }
 
     /// <summary>
     /// High-level wrapper: Signs a message hash and returns (r, s) or throws.
@@ -230,77 +301,6 @@ internal static partial class StarkNativeMethods
     }
 
     /// <summary>
-    /// High-level wrapper: Computes Pedersen hash of two elements.
-    /// </summary>
-    public static string PedersenHash(string a, string b)
-    {
-        var outHash = new StringBuilder(BufferSize);
-
-        var result = stark_pedersen_hash(a, b, outHash, (nuint)BufferSize);
-
-        if (result != Success)
-        {
-            throw new StarkSigningException(GetErrorMessage(result), result);
-        }
-
-        return outHash.ToString();
-    }
-
-    /// <summary>
-    /// High-level wrapper: Computes chained Pedersen hash of multiple elements.
-    /// </summary>
-    public static string PedersenHashMany(params string[] elements)
-    {
-        if (elements.Length == 0)
-        {
-            return "0x0";
-        }
-
-        // Allocate array of pointers to null-terminated strings
-        var ptrs = new IntPtr[elements.Length];
-        try
-        {
-            for (int i = 0; i < elements.Length; i++)
-            {
-                ptrs[i] = Marshal.StringToHGlobalAnsi(elements[i]);
-            }
-
-            // Pin the pointer array and get its address
-            var handle = GCHandle.Alloc(ptrs, GCHandleType.Pinned);
-            try
-            {
-                var outHash = new StringBuilder(BufferSize);
-                var result = stark_pedersen_hash_many(
-                    handle.AddrOfPinnedObject(),
-                    (nuint)elements.Length,
-                    outHash,
-                    (nuint)BufferSize);
-
-                if (result != Success)
-                {
-                    throw new StarkSigningException(GetErrorMessage(result), result);
-                }
-
-                return outHash.ToString();
-            }
-            finally
-            {
-                handle.Free();
-            }
-        }
-        finally
-        {
-            foreach (var ptr in ptrs)
-            {
-                if (ptr != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(ptr);
-                }
-            }
-        }
-    }
-
-    /// <summary>
     /// Gets the error message for a native error code.
     /// </summary>
     public static string GetErrorMessage(int errorCode)
@@ -318,12 +318,15 @@ internal static partial class StarkNativeMethods
                 ErrNullPointer => "Null pointer provided",
                 ErrInvalidUtf8 => "Invalid UTF-8 string",
                 ErrInvalidHex => "Invalid hexadecimal value",
-                ErrSigningFailed => "Signing operation failed",
+                ErrComputationFailed => "Hash computation failed",
                 ErrBufferTooSmall => "Output buffer too small",
+                ErrSigningFailed => "Signing operation failed",
                 _ => $"Unknown error code: {errorCode}"
             };
         }
     }
+
+    #endregion
 }
 
 /// <summary>

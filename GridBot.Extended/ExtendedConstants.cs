@@ -76,9 +76,10 @@ public static class ExtendedConstants
     public const int FeePrecision = 4;
 
     /// <summary>
-    /// Default fee rate for orders (0.02% = 0.0002).
+    /// Default taker fee rate for orders (0.025% = 0.00025).
+    /// Maker fee is 0%. Use taker fee when creating orders.
     /// </summary>
-    public const decimal DefaultFeeRate = 0.0002m;
+    public const decimal DefaultFeeRate = 0.00025m;
 
     /// <summary>
     /// Maximum fee rate before warning (1% = 0.01).

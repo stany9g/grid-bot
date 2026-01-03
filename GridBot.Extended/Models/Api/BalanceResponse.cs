@@ -4,36 +4,93 @@ namespace GridBot.Extended.Models.Api;
 
 /// <summary>
 /// Balance information from Extended API.
+/// Matches the Python SDK BalanceModel from x10/perpetual/balances.py.
+/// Note: API returns numeric values as strings, so we use JsonNumberHandling.
 /// </summary>
+[JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
 public sealed record BalanceResponse
 {
     /// <summary>
-    /// Asset symbol (e.g., "USDC").
+    /// Collateral asset name (e.g., "USD").
     /// </summary>
-    [JsonPropertyName("asset")]
-    public required string Asset { get; init; }
+    [JsonPropertyName("collateralName")]
+    public required string CollateralName { get; init; }
+
+    /// <summary>
+    /// Account status (e.g., "ACTIVE").
+    /// </summary>
+    [JsonPropertyName("status")]
+    public string? Status { get; init; }
 
     /// <summary>
     /// Total balance.
     /// </summary>
-    [JsonPropertyName("total")]
-    public required string Total { get; init; }
+    [JsonPropertyName("balance")]
+    public required decimal Balance { get; init; }
 
     /// <summary>
-    /// Available balance (not locked in orders or positions).
+    /// Equity (balance + unrealized PnL).
     /// </summary>
-    [JsonPropertyName("available")]
-    public required string Available { get; init; }
+    [JsonPropertyName("equity")]
+    public required decimal Equity { get; init; }
 
     /// <summary>
-    /// Locked balance (in open orders).
+    /// Spot equity.
     /// </summary>
-    [JsonPropertyName("locked")]
-    public string? Locked { get; init; }
+    [JsonPropertyName("spotEquity")]
+    public decimal SpotEquity { get; init; }
 
     /// <summary>
-    /// Balance in positions (margin).
+    /// Spot equity available for trade.
     /// </summary>
-    [JsonPropertyName("inPositions")]
-    public string? InPositions { get; init; }
+    [JsonPropertyName("spotEquityForAvailableForTrade")]
+    public decimal SpotEquityForAvailableForTrade { get; init; }
+
+    /// <summary>
+    /// Available for trade (can be used for new positions).
+    /// </summary>
+    [JsonPropertyName("availableForTrade")]
+    public required decimal AvailableForTrade { get; init; }
+
+    /// <summary>
+    /// Available for withdrawal.
+    /// </summary>
+    [JsonPropertyName("availableForWithdrawal")]
+    public required decimal AvailableForWithdrawal { get; init; }
+
+    /// <summary>
+    /// Unrealized profit and loss from open positions.
+    /// </summary>
+    [JsonPropertyName("unrealisedPnl")]
+    public required decimal UnrealisedPnl { get; init; }
+
+    /// <summary>
+    /// Initial margin required for positions.
+    /// </summary>
+    [JsonPropertyName("initialMargin")]
+    public required decimal InitialMargin { get; init; }
+
+    /// <summary>
+    /// Margin ratio (for liquidation calculations).
+    /// </summary>
+    [JsonPropertyName("marginRatio")]
+    public required decimal MarginRatio { get; init; }
+
+    /// <summary>
+    /// Timestamp of last update (Unix milliseconds).
+    /// </summary>
+    [JsonPropertyName("updatedTime")]
+    public required long UpdatedTime { get; init; }
+
+    /// <summary>
+    /// Position exposure.
+    /// </summary>
+    [JsonPropertyName("exposure")]
+    public decimal Exposure { get; init; }
+
+    /// <summary>
+    /// Account leverage.
+    /// </summary>
+    [JsonPropertyName("leverage")]
+    public decimal Leverage { get; init; }
 }

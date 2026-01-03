@@ -105,32 +105,19 @@ public sealed record OrderResponse
 }
 
 /// <summary>
-/// Response for order creation.
+/// Response for order creation (the data inside ApiResponse wrapper).
 /// </summary>
 public sealed record CreateOrderResponse
 {
     /// <summary>
-    /// Whether the order was accepted for processing.
-    /// Note: This does NOT mean the order is active - wait for WebSocket confirmation.
+    /// Exchange-assigned order ID (numeric).
     /// </summary>
-    [JsonPropertyName("success")]
-    public bool Success { get; init; }
+    [JsonPropertyName("id")]
+    public long Id { get; init; }
 
     /// <summary>
-    /// Order details (if accepted).
+    /// External order ID (the hash/signature based ID).
     /// </summary>
-    [JsonPropertyName("order")]
-    public OrderResponse? Order { get; init; }
-
-    /// <summary>
-    /// Error message (if rejected).
-    /// </summary>
-    [JsonPropertyName("error")]
-    public string? Error { get; init; }
-
-    /// <summary>
-    /// Error code (if rejected).
-    /// </summary>
-    [JsonPropertyName("errorCode")]
-    public string? ErrorCode { get; init; }
+    [JsonPropertyName("externalId")]
+    public string? ExternalId { get; init; }
 }

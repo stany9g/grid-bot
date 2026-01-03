@@ -154,7 +154,6 @@ public sealed class ExtendedWebSocketClient : IExtendedWebSocketClient
             _logger.LogInformation("Connecting to WebSocket at {Url}", wsUrl);
 
             await _webSocket.ConnectAsync(new Uri(wsUrl), ct);
-
             _receiveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             _receiveTask = Task.Run(() => ReceiveLoopAsync(_receiveCts.Token), _receiveCts.Token);
             _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_receiveCts.Token), _receiveCts.Token);
@@ -208,36 +207,47 @@ public sealed class ExtendedWebSocketClient : IExtendedWebSocketClient
     }
 
     /// <inheritdoc />
-    public async Task SubscribeOrderBookAsync(string market, CancellationToken ct = default)
+    public Task SubscribeOrderBookAsync(string market, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(market);
-        var channel = $"/orderbooks/{market}";
-        await SubscribeAsync(channel, ct);
+
+        // Extended DEX uses endpoint-based subscriptions.
+        // Order book streaming requires connecting to a SEPARATE endpoint:
+        // /stream.extended.exchange/v1/orderbooks/{market}
+        // This client currently connects to /account for private data.
+        // TODO: Add support for multiple WebSocket connections for order book streaming.
+        _logger.LogWarning(
+            "Order book subscription for {Market} not supported with current connection. " +
+            "Extended requires separate WebSocket connection to /orderbooks/{Market} endpoint",
+            market, market);
+
+        _subscriptions[$"/orderbooks/{market}"] = false;
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
-    public async Task SubscribeAccountAsync(CancellationToken ct = default)
+    public Task SubscribeAccountAsync(CancellationToken ct = default)
     {
-        var channel = "/account";
-        await SubscribeAsync(channel, ct);
+        // Extended DEX uses endpoint-based subscriptions.
+        // Connecting to /stream.extended.exchange/v1/account IS the subscription.
+        // No subscribe message is needed - data flows automatically once connected.
+        _logger.LogDebug("Account subscription active (connection-based, no message needed)");
+        _subscriptions["/account"] = true;
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
-    public async Task UnsubscribeAsync(string channel, CancellationToken ct = default)
+    public Task UnsubscribeAsync(string channel, CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_webSocket?.State != WebSocketState.Open)
-        {
-            _logger.LogWarning("Cannot unsubscribe when not connected");
-            return;
-        }
-
-        var message = new { type = "unsubscribe", channel };
-        await SendMessageAsync(message, ct);
+        // Extended DEX uses endpoint-based subscriptions.
+        // To unsubscribe, disconnect the WebSocket connection.
+        // Since this client connects to /account, unsubscribing from account
+        // would require disconnecting entirely.
         _subscriptions.TryRemove(channel, out _);
-
-        _logger.LogDebug("Unsubscribed from {Channel}", channel);
+        _logger.LogDebug("Marked {Channel} as unsubscribed (disconnect to fully stop)", channel);
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -291,15 +301,40 @@ public sealed class ExtendedWebSocketClient : IExtendedWebSocketClient
         _logger.LogInformation("WebSocket client disposed");
     }
 
-    private string GetWebSocketUrl()
+    private string GetWebSocketUrl(string? endpoint = null)
+    {
+        // Get base WebSocket URL (without path)
+        var baseUrl = GetBaseWebSocketUrl();
+
+        // Build full URL with endpoint path
+        // Extended expects connections directly to specific endpoints like:
+        // /stream.extended.exchange/v1/account
+        // /stream.extended.exchange/v1/orderbooks/{market}
+        var path = endpoint ?? "/stream.extended.exchange/v1/account";
+
+        // Ensure path starts with /
+        if (!path.StartsWith('/'))
+            path = "/" + path;
+
+        return baseUrl.TrimEnd('/') + path;
+    }
+
+    private string GetBaseWebSocketUrl()
     {
         if (!string.IsNullOrEmpty(_wsOptions.WebSocketUrl))
-            return _wsOptions.WebSocketUrl;
+        {
+            // If configured URL contains /stream, extract just the base
+            var url = _wsOptions.WebSocketUrl;
+            var streamIndex = url.IndexOf("/stream", StringComparison.OrdinalIgnoreCase);
+            if (streamIndex > 0)
+                return url[..streamIndex];
+            return url;
+        }
 
-        // Derive WebSocket URL based on environment
+        // Derive base WebSocket URL based on environment
         return _options.IsTestnet
-            ? "wss://starknet.sepolia.extended.exchange/stream.extended.exchange/v1"
-            : "wss://api.starknet.extended.exchange/stream.extended.exchange/v1";
+            ? "wss://starknet.sepolia.extended.exchange"
+            : "wss://api.starknet.extended.exchange";
     }
 
     private async Task SubscribeAsync(string channel, CancellationToken ct)
@@ -319,20 +354,14 @@ public sealed class ExtendedWebSocketClient : IExtendedWebSocketClient
         _logger.LogDebug("Subscribed to {Channel}", channel);
     }
 
-    private async Task ResubscribeAllAsync(CancellationToken ct)
+    private Task ResubscribeAllAsync(CancellationToken ct)
     {
-        var subscriptions = _subscriptions.Keys.ToArray();
-        foreach (var channel in subscriptions)
-        {
-            try
-            {
-                await SubscribeAsync(channel, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to resubscribe to {Channel}", channel);
-            }
-        }
+        // Extended DEX uses endpoint-based subscriptions.
+        // Reconnecting to the same endpoint automatically resumes data flow.
+        // No subscribe messages are needed.
+        _logger.LogDebug("Account subscription restored via reconnection");
+        _subscriptions["/account"] = true;
+        return Task.CompletedTask;
     }
 
     private async Task SendMessageAsync(object message, CancellationToken ct)

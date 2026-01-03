@@ -160,11 +160,12 @@ Only exposed in Development environment.
 We want to leverage subagents as much as possible
 Workflow should be to
 1. Translate User requirements $ARGUMENT of prompt into the tasks and enriching it with the `"trading-risk-manager"`
-2. If we need something specific with the Ligther DEX we leverage `"lighter-api-specialist"`
-3. Create implementation plan
-4. Pass the plan to the `"dotnet-feature-builder"`
-5. Review the code with `"csharp-code-reviewer"` all the critical findings should be immediately worked on by the `"dotnet-feature-builder"` again and basically reiterate 4. and 5. until no critical findings
-6. Passing the changes as well overall code the `"trading-bot-auditor"` which should evaluate correctness of the code from the view of crypto trading and evalute system as a whole
-7. Phase done, update all .md doc files
+2. If we need something specific with the Lighter DEX we leverage `"lighter-api-specialist"`
+3. If we need something specific with the Extended DEX (X10) we leverage `"extended-api-specialist"` - this agent uses the Python SDK at `.claude/repos/python_sdk` as reference for translating to C#
+4. Create implementation plan
+5. Pass the plan to the `"dotnet-feature-builder"`
+6. Review the code with `"csharp-code-reviewer"` all the critical findings should be immediately worked on by the `"dotnet-feature-builder"` again and basically reiterate 5. and 6. until no critical findings
+7. Passing the changes as well overall code the `"trading-bot-auditor"` which should evaluate correctness of the code from the view of crypto trading and evalute system as a whole
+8. Phase done, update all .md doc files
 
 

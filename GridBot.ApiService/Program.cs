@@ -11,6 +11,7 @@ using GridBot.Core.Services.Adaptive;
 using GridBot.Core.Services.Configuration;
 using GridBot.Extended;
 using GridBot.Extended.Extensions;
+using GridBot.Extended.Factory;
 using GridBot.Lighter;
 using GridBot.Lighter.Extensions;
 using Microsoft.AspNetCore.Hosting.StaticWebAssets;
@@ -37,11 +38,14 @@ public partial class Program
         // The exchange client is created lazily when the network is selected.
         builder.Services.AddLighterNetworks(builder.Configuration);
 
-        // Register Extended exchange if configured
-        var extendedSection = builder.Configuration.GetSection(ExtendedOptions.SectionName);
-        if (extendedSection.Exists() && !string.IsNullOrWhiteSpace(extendedSection["ApiKey"]))
+        // Register Extended network configuration (testnet/mainnet)
+        // This registers the network factory for runtime network switching.
+        // The exchange client is created lazily when the network is selected.
+        var extendedNetworksSection = builder.Configuration.GetSection(ExtendedNetworksOptions.SectionName);
+        if (extendedNetworksSection.Exists())
         {
-            builder.Services.AddExtendedExchange(builder.Configuration);
+            builder.Services.AddExtendedNetworks(builder.Configuration);
+            builder.Services.AddSingleton<IExtendedNetworkSelectionService, ExtendedNetworkSelectionService>();
         }
 
         builder.Services.AddTradingBot(builder.Configuration);
@@ -52,10 +56,17 @@ public partial class Program
 
         var app = builder.Build();
 
-        // Initialize the default network before starting the app
+        // Initialize the default Lighter network before starting the app
         // This creates the exchange client for the configured default network
-        var networkSelection = app.Services.GetRequiredService<INetworkSelectionService>();
-        await networkSelection.SelectNetworkAsync(networkSelection.CurrentNetwork);
+        var lighterNetworkSelection = app.Services.GetRequiredService<INetworkSelectionService>();
+        await lighterNetworkSelection.SelectNetworkAsync(lighterNetworkSelection.CurrentNetwork);
+
+        // Initialize the default Extended network if configured
+        var extendedNetworkSelection = app.Services.GetService<IExtendedNetworkSelectionService>();
+        if (extendedNetworkSelection != null)
+        {
+            await extendedNetworkSelection.SelectNetworkAsync(extendedNetworkSelection.CurrentNetwork);
+        }
 
         app.UseExceptionHandler();
         app.UseAntiforgery();
@@ -369,6 +380,390 @@ public partial class Program
             await configService.SaveAsync(ct);
             return Results.Ok(configService.Current);
         }).WithName("ApplySuggestions");
+
+        // Debug endpoints for Extended DEX order testing
+        // These endpoints bypass abstractions for direct API testing
+        var extendedDebug = app.MapGroup("/api/debug/extended").WithTags("Extended DEX Debug");
+
+        extendedDebug.MapGet("/status", async (IServiceProvider sp, CancellationToken ct) =>
+        {
+            var factory = sp.GetService<IExtendedNetworkExchangeFactory>();
+            if (factory == null)
+            {
+                return Results.BadRequest(new { Error = "Extended DEX not configured. Add ExtendedNetworks section to appsettings.json" });
+            }
+
+            var httpClient = factory.GetHttpClient();
+            if (httpClient == null)
+            {
+                return Results.BadRequest(new
+                {
+                    Error = "Extended network not initialized. Select Extended network first.",
+                    CurrentNetwork = factory.GetCurrentNetwork()?.ToString() ?? "None",
+                    Hint = "Call POST /api/debug/extended/init to initialize"
+                });
+            }
+
+            try
+            {
+                var accountTask = httpClient.GetAccountInfoAsync(ct);
+                var balanceTask = httpClient.GetBalanceAsync(ct);
+                var marketsTask = httpClient.GetMarketsAsync(ct);
+                var ordersTask = httpClient.GetOrdersAsync(null, ct);
+
+                await Task.WhenAll(accountTask, balanceTask, marketsTask, ordersTask);
+
+                var btcMarket = (await marketsTask).FirstOrDefault(m =>
+                    m.Name?.Contains("BTC", StringComparison.OrdinalIgnoreCase) == true);
+
+                return Results.Ok(new
+                {
+                    Network = factory.GetCurrentNetwork()?.ToString(),
+                    Account = await accountTask,
+                    Balance = await balanceTask,
+                    BtcMarket = btcMarket,
+                    OpenOrders = await ordersTask,
+                    AvailableMarkets = (await marketsTask).Select(m => m.Name).ToList()
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { Error = ex.Message, Type = ex.GetType().Name });
+            }
+        }).WithName("ExtendedDebugStatus");
+
+        extendedDebug.MapPost("/init/{network}", async (string network, IServiceProvider sp, CancellationToken ct) =>
+        {
+            var factory = sp.GetService<IExtendedNetworkExchangeFactory>();
+            if (factory == null)
+            {
+                return Results.BadRequest(new { Error = "Extended DEX not configured" });
+            }
+
+            if (!Enum.TryParse<ExtendedNetworkType>(network, ignoreCase: true, out var networkType))
+            {
+                return Results.BadRequest(new { Error = $"Invalid network: {network}. Use 'testnet' or 'mainnet'" });
+            }
+
+            try
+            {
+                await factory.CreateForNetworkAsync(networkType, ct);
+                return Results.Ok(new
+                {
+                    Success = true,
+                    Network = networkType.ToString(),
+                    Message = $"Extended {networkType} initialized"
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { Error = ex.Message, Type = ex.GetType().Name });
+            }
+        }).WithName("ExtendedDebugInit");
+
+        extendedDebug.MapPost("/limit-order", async (IServiceProvider sp, CancellationToken ct) =>
+        {
+            // Hardcoded limit order: BUY minimum BTC
+            // Minimum for BTC-USD is 0.0001 BTC (~$10 at $95k)
+            const string market = "BTC-USD";
+            const decimal quantity = 0.0001m;  // Minimum order size for BTC-USD (~$10 notional)
+            const decimal price = 80000m;      // Below market - won't fill immediately
+            const bool isBuy = true;
+
+            var factory = sp.GetService<IExtendedNetworkExchangeFactory>();
+            if (factory == null)
+            {
+                return Results.BadRequest(new { Error = "Extended DEX not configured" });
+            }
+
+            var httpClient = factory.GetHttpClient();
+            var starkSigner = factory.GetStarkSigner();
+            var options = factory.GetCurrentOptions();
+
+            if (httpClient == null || starkSigner == null || options == null)
+            {
+                return Results.BadRequest(new { Error = "Extended network not initialized. Call POST /api/debug/extended/init first." });
+            }
+
+            try
+            {
+                // Get account info to retrieve vault ID (collateralPosition)
+                var accountInfo = await httpClient.GetAccountInfoAsync(ct);
+                if (string.IsNullOrEmpty(accountInfo.L2Vault))
+                {
+                    return Results.BadRequest(new { Error = "Account has no L2 vault configured" });
+                }
+                var positionId = long.Parse(accountInfo.L2Vault);
+
+                // Get market info for L2Config (required for signing)
+                var markets = await httpClient.GetMarketsAsync(ct);
+                var marketInfo = markets.FirstOrDefault(m => m.Name == market);
+                if (marketInfo?.L2Config == null)
+                {
+                    return Results.BadRequest(new { Error = $"Market {market} L2Config not found" });
+                }
+                var l2Config = marketInfo.L2Config;
+
+                // Generate random nonce (32-bit) per Python SDK
+                var nonce = StarkAmountCalculator.GenerateNonce();
+                var expiryMs = DateTimeOffset.UtcNow.AddDays(7).ToUnixTimeMilliseconds();
+                var clientOrderId = Guid.NewGuid().ToString("N");
+
+                // Calculate settlement expiration (order expiry + 14 days, in seconds)
+                var settlementExpiration = StarkAmountCalculator.CalcSettlementExpiration(expiryMs);
+
+                // Calculate Stark amounts using market resolutions
+                var (baseAmount, quoteAmount, feeAmount) = StarkAmountCalculator.CalculateStarkAmounts(
+                    quantity,
+                    price,
+                    ExtendedConstants.DefaultFeeRate,
+                    isBuy,
+                    l2Config.SyntheticResolution,
+                    l2Config.CollateralResolution);
+
+                // Build StarkEx order parameters for signing
+                var orderParams = new StarkExOrderParams
+                {
+                    PositionId = positionId,
+                    BaseAmount = baseAmount,
+                    QuoteAmount = quoteAmount,
+                    FeeAmount = feeAmount,
+                    Nonce = nonce,
+                    ExpirationSeconds = settlementExpiration
+                };
+
+                // Sign the order using Extended DEX algorithm (includes domain params)
+                var isTestnet = factory.GetCurrentNetwork() == ExtendedNetworkType.Testnet;
+                var (r, s) = starkSigner.SignOrder(orderParams, l2Config, isTestnet);
+
+                // Build the request with corrected structure per Python SDK
+                var request = new GridBot.Extended.Models.Api.CreateOrderRequest
+                {
+                    Id = clientOrderId,
+                    Market = market,
+                    Type = "LIMIT",  // Uppercase required
+                    Side = "BUY",
+                    Qty = quantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Price = price.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Fee = ExtendedConstants.DefaultFeeRate.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ExpiryEpochMillis = expiryMs,
+                    TimeInForce = "GTT",
+                    ReduceOnly = false,
+                    PostOnly = false,
+                    Nonce = nonce.ToString(),  // At order root level, as string
+                    SelfTradeProtectionLevel = "ACCOUNT",
+                    Settlement = new GridBot.Extended.Models.Api.SettlementObject
+                    {
+                        StarkKey = starkSigner.StarkPublicKey ?? options.StarkPublicKey,
+                        CollateralPosition = accountInfo.L2Vault,  // Vault ID
+                        Signature = new GridBot.Extended.Models.Api.SignatureObject
+                        {
+                            R = r,
+                            S = s
+                        }
+                    }
+                };
+
+                var response = await httpClient.CreateOrderAsync(request, ct);
+
+                return Results.Ok(new
+                {
+                    Request = new
+                    {
+                        market,
+                        side = "BUY",
+                        Type = "LIMIT",
+                        quantity,
+                        price,
+                        nonce,
+                        clientOrderId,
+                        vaultId = accountInfo.L2Vault,
+                        baseAmount,
+                        quoteAmount,
+                        feeAmount,
+                        settlementExpiration,
+                        syntheticResolution = l2Config.SyntheticResolution,
+                        collateralResolution = l2Config.CollateralResolution
+                    },
+                    Response = response
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { Error = ex.Message, Type = ex.GetType().Name, StackTrace = ex.StackTrace });
+            }
+        }).WithName("ExtendedDebugLimitOrder");
+
+        extendedDebug.MapPost("/market-order", async (IServiceProvider sp, CancellationToken ct) =>
+        {
+            // Hardcoded market order: BUY minimum BTC
+            // Extended uses LIMIT + IOC to simulate market orders
+            // Minimum for BTC-USD is 0.0001 BTC (~$10 at $95k)
+            const string market = "BTC-USD";
+            const decimal quantity = 0.0001m;  // Minimum order size for BTC-USD (~$10 notional)
+            const bool isBuy = true;
+
+            var factory = sp.GetService<IExtendedNetworkExchangeFactory>();
+            if (factory == null)
+            {
+                return Results.BadRequest(new { Error = "Extended DEX not configured" });
+            }
+
+            var httpClient = factory.GetHttpClient();
+            var starkSigner = factory.GetStarkSigner();
+            var options = factory.GetCurrentOptions();
+
+            if (httpClient == null || starkSigner == null || options == null)
+            {
+                return Results.BadRequest(new { Error = "Extended network not initialized. Call POST /api/debug/extended/init first." });
+            }
+
+            try
+            {
+                // Get account info to retrieve vault ID (collateralPosition)
+                var accountInfo = await httpClient.GetAccountInfoAsync(ct);
+                if (string.IsNullOrEmpty(accountInfo.L2Vault))
+                {
+                    return Results.BadRequest(new { Error = "Account has no L2 vault configured" });
+                }
+                var positionId = long.Parse(accountInfo.L2Vault);
+
+                // Get market info for L2Config (required for signing)
+                var markets = await httpClient.GetMarketsAsync(ct);
+                var marketInfo = markets.FirstOrDefault(m => m.Name == market);
+                if (marketInfo?.L2Config == null)
+                {
+                    return Results.BadRequest(new { Error = $"Market {market} L2Config not found" });
+                }
+                var l2Config = marketInfo.L2Config;
+
+                // Get current market price from order book
+                var orderBook = await httpClient.GetOrderBookAsync(market, 5, ct);
+                var bestAsk = orderBook.Asks?.FirstOrDefault();
+                if (bestAsk == null)
+                {
+                    return Results.BadRequest(new { Error = "No asks in order book" });
+                }
+
+                // Parse best ask price and add 1% slippage for market buy
+                if (!decimal.TryParse(bestAsk.Price, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var askPrice))
+                {
+                    return Results.BadRequest(new { Error = "Failed to parse ask price", RawPrice = bestAsk.Price });
+                }
+                var marketPrice = askPrice * 1.01m; // 1% above best ask for slippage
+
+                // Generate random nonce (32-bit) per Python SDK
+                var nonce = StarkAmountCalculator.GenerateNonce();
+                var expiryMs = DateTimeOffset.UtcNow.AddMinutes(1).ToUnixTimeMilliseconds(); // Short expiry for IOC
+                var clientOrderId = Guid.NewGuid().ToString("N");
+
+                // Calculate settlement expiration (order expiry + 14 days, in seconds)
+                var settlementExpiration = StarkAmountCalculator.CalcSettlementExpiration(expiryMs);
+
+                // Calculate Stark amounts using market resolutions
+                var (baseAmount, quoteAmount, feeAmount) = StarkAmountCalculator.CalculateStarkAmounts(
+                    quantity,
+                    marketPrice,
+                    ExtendedConstants.DefaultFeeRate,
+                    isBuy,
+                    l2Config.SyntheticResolution,
+                    l2Config.CollateralResolution);
+
+                // Build StarkEx order parameters for signing
+                var orderParams = new StarkExOrderParams
+                {
+                    PositionId = positionId,
+                    BaseAmount = baseAmount,
+                    QuoteAmount = quoteAmount,
+                    FeeAmount = feeAmount,
+                    Nonce = nonce,
+                    ExpirationSeconds = settlementExpiration
+                };
+
+                // Sign the order using Extended DEX algorithm (includes domain params)
+                var isTestnet = factory.GetCurrentNetwork() == ExtendedNetworkType.Testnet;
+                var (r, s) = starkSigner.SignOrder(orderParams, l2Config, isTestnet);
+
+                // Build the request with corrected structure per Python SDK
+                var request = new GridBot.Extended.Models.Api.CreateOrderRequest
+                {
+                    Id = clientOrderId,
+                    Market = market,
+                    Type = "LIMIT",  // Uppercase required
+                    Side = "BUY",
+                    Qty = quantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Price = marketPrice.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Fee = ExtendedConstants.DefaultFeeRate.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ExpiryEpochMillis = expiryMs,
+                    TimeInForce = "IOC",
+                    ReduceOnly = false,
+                    PostOnly = false,
+                    Nonce = nonce.ToString(),  // At order root level, as string
+                    SelfTradeProtectionLevel = "ACCOUNT",
+                    Settlement = new GridBot.Extended.Models.Api.SettlementObject
+                    {
+                        StarkKey = starkSigner.StarkPublicKey ?? options.StarkPublicKey,
+                        CollateralPosition = accountInfo.L2Vault,  // Vault ID
+                        Signature = new GridBot.Extended.Models.Api.SignatureObject
+                        {
+                            R = r,
+                            S = s
+                        }
+                    }
+                };
+
+                var response = await httpClient.CreateOrderAsync(request, ct);
+
+                return Results.Ok(new
+                {
+                    OrderBookBestAsk = askPrice,
+                    Request = new
+                    {
+                        market,
+                        side = "BUY",
+                        Type = "LIMIT (IOC)",
+                        quantity,
+                        price = marketPrice,
+                        nonce,
+                        clientOrderId,
+                        vaultId = accountInfo.L2Vault,
+                        baseAmount,
+                        quoteAmount,
+                        feeAmount,
+                        settlementExpiration
+                    },
+                    Response = response
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { Error = ex.Message, Type = ex.GetType().Name, StackTrace = ex.StackTrace });
+            }
+        }).WithName("ExtendedDebugMarketOrder");
+
+        extendedDebug.MapDelete("/cancel-all", async (IServiceProvider sp, CancellationToken ct) =>
+        {
+            const string market = "BTC-USD";
+
+            var factory = sp.GetService<IExtendedNetworkExchangeFactory>();
+            var httpClient = factory?.GetHttpClient();
+            if (httpClient == null)
+            {
+                return Results.BadRequest(new { Error = "Extended network not initialized. Call POST /api/debug/extended/init first." });
+            }
+
+            try
+            {
+                var response = await httpClient.MassCancelOrdersAsync(
+                    new GridBot.Extended.Models.Api.MassCancelRequest { Market = market }, ct);
+                return Results.Ok(new { Market = market, Response = response });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { Error = ex.Message, Type = ex.GetType().Name });
+            }
+        }).WithName("ExtendedDebugCancelAll");
 
         app.MapDefaultEndpoints();
         app.MapRazorComponents<App>().AddInteractiveServerRenderMode();

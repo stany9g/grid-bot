@@ -3,6 +3,7 @@ using GridBot.Abstractions.Models.Market;
 using GridBot.Abstractions.Models.OrderBook;
 using GridBot.Abstractions.Trading;
 using Microsoft.Extensions.Logging;
+using ApiMarketInfo = GridBot.Extended.Models.Api.MarketInfo;
 
 namespace GridBot.Extended.Adapters;
 
@@ -130,21 +131,22 @@ internal sealed class ExtendedMarketDataAdapter : IMarketDataClient
 
         return markets.Select(m =>
         {
-            var minOrderSize = decimal.TryParse(m.MinOrderSize, NumberStyles.Any, CultureInfo.InvariantCulture, out var min) ? min : 0.001m;
-            var tickSize = decimal.TryParse(m.TickSize, NumberStyles.Any, CultureInfo.InvariantCulture, out var tick) ? tick : 0.01m;
-            var stepSize = decimal.TryParse(m.StepSize, NumberStyles.Any, CultureInfo.InvariantCulture, out var step) ? step : 0.001m;
+            var minOrderSize = decimal.TryParse(m.TradingConfig?.MinOrderSize, NumberStyles.Any, CultureInfo.InvariantCulture, out var min) ? min : 0.001m;
+            var tickSize = decimal.TryParse(m.TradingConfig?.MinPriceChange, NumberStyles.Any, CultureInfo.InvariantCulture, out var tick) ? tick : 0.01m;
+            var stepSize = decimal.TryParse(m.TradingConfig?.MinOrderSizeChange, NumberStyles.Any, CultureInfo.InvariantCulture, out var step) ? step : 0.001m;
+            var maxLeverage = decimal.TryParse(m.TradingConfig?.MaxLeverage, NumberStyles.Any, CultureInfo.InvariantCulture, out var lev) ? (int)lev : 20;
 
             return new MarketInfo
             {
-                MarketId = m.Market,
-                Symbol = $"{m.BaseAsset}/{m.QuoteAsset}",
-                BaseAsset = m.BaseAsset,
-                QuoteAsset = m.QuoteAsset,
+                MarketId = m.Name,
+                Symbol = $"{m.AssetName}/{m.CollateralAssetName}",
+                BaseAsset = m.AssetName,
+                QuoteAsset = m.CollateralAssetName,
                 MinOrderSize = minOrderSize,
                 TickSize = tickSize,
                 StepSize = stepSize,
-                MaxLeverage = m.MaxLeverage,
-                IsActive = m.IsActive
+                MaxLeverage = maxLeverage,
+                IsActive = m.Active
             };
         }).ToList();
     }

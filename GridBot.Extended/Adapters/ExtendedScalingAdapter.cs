@@ -1,3 +1,4 @@
+using System.Globalization;
 using GridBot.Abstractions.Scaling;
 using Microsoft.Extensions.Logging;
 
@@ -36,13 +37,13 @@ internal sealed class ExtendedScalingAdapter : IScalingProvider
             throw new InvalidOperationException($"Market {marketId} not found. Ensure market mapper is initialized.");
         }
 
-        var priceDecimals = marketInfo.PriceDecimals;
-        var amountDecimals = marketInfo.SizeDecimals;
+        var priceDecimals = marketInfo.CollateralAssetPrecision;
+        var amountDecimals = marketInfo.AssetPrecision;
         var priceScale = (long)Math.Pow(10, priceDecimals);
         var amountScale = (long)Math.Pow(10, amountDecimals);
-        var minTickSize = decimal.TryParse(marketInfo.TickSize, out var tick) ? tick : 0.01m;
-        var minStepSize = decimal.TryParse(marketInfo.StepSize, out var step) ? step : 0.001m;
-        var minOrderSize = decimal.TryParse(marketInfo.MinOrderSize, out var minSize) ? minSize : 0.001m;
+        var minTickSize = decimal.TryParse(marketInfo.TradingConfig?.MinPriceChange, NumberStyles.Any, CultureInfo.InvariantCulture, out var tick) ? tick : 0.01m;
+        var minStepSize = decimal.TryParse(marketInfo.TradingConfig?.MinOrderSizeChange, NumberStyles.Any, CultureInfo.InvariantCulture, out var step) ? step : 0.001m;
+        var minOrderSize = decimal.TryParse(marketInfo.TradingConfig?.MinOrderSize, NumberStyles.Any, CultureInfo.InvariantCulture, out var minSize) ? minSize : 0.001m;
 
         var scaling = new MarketScaling
         {

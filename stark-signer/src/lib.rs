@@ -1,370 +1,557 @@
-//! Native Stark signature library for GridBot.Extended
-//!
-//! Provides C ABI exports for Stark curve cryptographic operations:
-//! - ECDSA signing with Stark private keys
-//! - Public key derivation
-//! - Pedersen hashing for message construction
-//!
-//! # Safety
-//! All exported functions use raw pointers for C interop.
-//! Callers must ensure valid UTF-8 strings and sufficient buffer sizes.
+use hex;
+use num_bigint::BigUint;
+use sha2::{Digest, Sha256};
+use starknet::core::crypto::ecdsa_sign;
+use starknet::core::types::Felt;
+use std::str::FromStr;
 
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use crate::starknet_messages::{
+    AssetId, LimitOrder, OffChainMessage, Order, PositionId, StarknetDomain, Timestamp,
+    TransferArgs,
+};
+pub mod starknet_messages;
+pub mod ffi;
 
-use starknet_crypto::{pedersen_hash, sign, get_public_key, Felt};
-
-/// Result codes for native operations
-const SUCCESS: i32 = 0;
-const ERR_NULL_POINTER: i32 = -1;
-const ERR_INVALID_UTF8: i32 = -2;
-const ERR_INVALID_HEX: i32 = -3;
-const ERR_SIGNING_FAILED: i32 = -4;
-const ERR_BUFFER_TOO_SMALL: i32 = -5;
-
-/// Signs a message hash with a Stark private key.
-///
-/// # Arguments
-/// * `private_key` - Hex-encoded private key (with or without 0x prefix)
-/// * `message_hash` - Hex-encoded message hash to sign
-/// * `out_r` - Output buffer for signature r component (must be at least 67 bytes)
-/// * `out_s` - Output buffer for signature s component (must be at least 67 bytes)
-/// * `out_r_len` - Size of out_r buffer
-/// * `out_s_len` - Size of out_s buffer
-///
-/// # Returns
-/// * 0 on success
-/// * Negative error code on failure
-#[no_mangle]
-pub unsafe extern "C" fn stark_sign(
-    private_key: *const c_char,
-    message_hash: *const c_char,
-    out_r: *mut c_char,
-    out_s: *mut c_char,
-    out_r_len: usize,
-    out_s_len: usize,
-) -> i32 {
-    // Validate inputs
-    if private_key.is_null() || message_hash.is_null() || out_r.is_null() || out_s.is_null() {
-        return ERR_NULL_POINTER;
-    }
-
-    // Parse private key
-    let pk_str = match CStr::from_ptr(private_key).to_str() {
-        Ok(s) => s.trim_start_matches("0x"),
-        Err(_) => return ERR_INVALID_UTF8,
-    };
-
-    let private_key_felt = match Felt::from_hex(pk_str) {
-        Ok(f) => f,
-        Err(_) => return ERR_INVALID_HEX,
-    };
-
-    // Parse message hash
-    let hash_str = match CStr::from_ptr(message_hash).to_str() {
-        Ok(s) => s.trim_start_matches("0x"),
-        Err(_) => return ERR_INVALID_UTF8,
-    };
-
-    let message_hash_felt = match Felt::from_hex(hash_str) {
-        Ok(f) => f,
-        Err(_) => return ERR_INVALID_HEX,
-    };
-
-    // Sign the message
-    let signature = match sign(&private_key_felt, &message_hash_felt, &Felt::from(1u64)) {
-        Ok(sig) => sig,
-        Err(_) => return ERR_SIGNING_FAILED,
-    };
-
-    // Format outputs as hex with 0x prefix
-    let r_hex = format!("0x{:064x}", signature.r);
-    let s_hex = format!("0x{:064x}", signature.s);
-
-    // Check buffer sizes
-    if out_r_len < r_hex.len() + 1 || out_s_len < s_hex.len() + 1 {
-        return ERR_BUFFER_TOO_SMALL;
-    }
-
-    // Write outputs
-    let r_cstr = match CString::new(r_hex) {
-        Ok(s) => s,
-        Err(_) => return ERR_SIGNING_FAILED,
-    };
-    let s_cstr = match CString::new(s_hex) {
-        Ok(s) => s,
-        Err(_) => return ERR_SIGNING_FAILED,
-    };
-
-    std::ptr::copy_nonoverlapping(r_cstr.as_ptr(), out_r, r_cstr.as_bytes_with_nul().len());
-    std::ptr::copy_nonoverlapping(s_cstr.as_ptr(), out_s, s_cstr.as_bytes_with_nul().len());
-
-    SUCCESS
+pub struct StarkSignature {
+    pub r: Felt,
+    pub s: Felt,
+    pub v: Felt,
 }
 
-/// Derives the public key from a Stark private key.
-///
-/// # Arguments
-/// * `private_key` - Hex-encoded private key (with or without 0x prefix)
-/// * `out_public_key` - Output buffer for public key (must be at least 67 bytes)
-/// * `out_len` - Size of output buffer
-///
-/// # Returns
-/// * 0 on success
-/// * Negative error code on failure
-#[no_mangle]
-pub unsafe extern "C" fn stark_get_public_key(
-    private_key: *const c_char,
-    out_public_key: *mut c_char,
-    out_len: usize,
-) -> i32 {
-    if private_key.is_null() || out_public_key.is_null() {
-        return ERR_NULL_POINTER;
-    }
+fn grind_key(key_seed: BigUint) -> BigUint {
+    let two_256 = BigUint::from_str(
+        "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+    )
+    .unwrap();
+    let key_value_limit = BigUint::from_str(
+        "3618502788666131213697322783095070105526743751716087489154079457884512865583",
+    )
+    .unwrap();
 
-    let pk_str = match CStr::from_ptr(private_key).to_str() {
-        Ok(s) => s.trim_start_matches("0x"),
-        Err(_) => return ERR_INVALID_UTF8,
-    };
+    let max_allowed_value = two_256.clone() - (two_256.clone() % (&key_value_limit));
+    let mut index = BigUint::ZERO;
+    loop {
+        let hash_input = {
+            let mut input = Vec::new();
+            input.extend_from_slice(&key_seed.to_bytes_be());
+            input.extend_from_slice(&index.to_bytes_be());
+            input
+        };
+        let hash_result = Sha256::digest(&hash_input);
+        let hash = hash_result.as_slice();
+        let key = BigUint::from_bytes_be(&hash);
 
-    let private_key_felt = match Felt::from_hex(pk_str) {
-        Ok(f) => f,
-        Err(_) => return ERR_INVALID_HEX,
-    };
-
-    let public_key = get_public_key(&private_key_felt);
-    let pub_hex = format!("0x{:064x}", public_key);
-
-    if out_len < pub_hex.len() + 1 {
-        return ERR_BUFFER_TOO_SMALL;
-    }
-
-    let pub_cstr = match CString::new(pub_hex) {
-        Ok(s) => s,
-        Err(_) => return ERR_SIGNING_FAILED,
-    };
-
-    std::ptr::copy_nonoverlapping(pub_cstr.as_ptr(), out_public_key, pub_cstr.as_bytes_with_nul().len());
-
-    SUCCESS
-}
-
-/// Computes the Pedersen hash of two field elements.
-///
-/// # Arguments
-/// * `a` - First hex-encoded field element
-/// * `b` - Second hex-encoded field element
-/// * `out_hash` - Output buffer for hash result (must be at least 67 bytes)
-/// * `out_len` - Size of output buffer
-///
-/// # Returns
-/// * 0 on success
-/// * Negative error code on failure
-#[no_mangle]
-pub unsafe extern "C" fn stark_pedersen_hash(
-    a: *const c_char,
-    b: *const c_char,
-    out_hash: *mut c_char,
-    out_len: usize,
-) -> i32 {
-    if a.is_null() || b.is_null() || out_hash.is_null() {
-        return ERR_NULL_POINTER;
-    }
-
-    let a_str = match CStr::from_ptr(a).to_str() {
-        Ok(s) => s.trim_start_matches("0x"),
-        Err(_) => return ERR_INVALID_UTF8,
-    };
-
-    let b_str = match CStr::from_ptr(b).to_str() {
-        Ok(s) => s.trim_start_matches("0x"),
-        Err(_) => return ERR_INVALID_UTF8,
-    };
-
-    let a_felt = match Felt::from_hex(a_str) {
-        Ok(f) => f,
-        Err(_) => return ERR_INVALID_HEX,
-    };
-
-    let b_felt = match Felt::from_hex(b_str) {
-        Ok(f) => f,
-        Err(_) => return ERR_INVALID_HEX,
-    };
-
-    let hash = pedersen_hash(&a_felt, &b_felt);
-    let hash_hex = format!("0x{:064x}", hash);
-
-    if out_len < hash_hex.len() + 1 {
-        return ERR_BUFFER_TOO_SMALL;
-    }
-
-    let hash_cstr = match CString::new(hash_hex) {
-        Ok(s) => s,
-        Err(_) => return ERR_SIGNING_FAILED,
-    };
-
-    std::ptr::copy_nonoverlapping(hash_cstr.as_ptr(), out_hash, hash_cstr.as_bytes_with_nul().len());
-
-    SUCCESS
-}
-
-/// Computes the Pedersen hash of multiple field elements.
-/// Uses the standard chained Pedersen hash: h(h(h(0, a), b), c)...
-///
-/// # Arguments
-/// * `elements` - Array of hex-encoded field elements (null-terminated strings)
-/// * `count` - Number of elements in the array
-/// * `out_hash` - Output buffer for hash result (must be at least 67 bytes)
-/// * `out_len` - Size of output buffer
-///
-/// # Returns
-/// * 0 on success
-/// * Negative error code on failure
-#[no_mangle]
-pub unsafe extern "C" fn stark_pedersen_hash_many(
-    elements: *const *const c_char,
-    count: usize,
-    out_hash: *mut c_char,
-    out_len: usize,
-) -> i32 {
-    if elements.is_null() || out_hash.is_null() {
-        return ERR_NULL_POINTER;
-    }
-
-    let mut result = Felt::ZERO;
-
-    for i in 0..count {
-        let elem_ptr = *elements.add(i);
-        if elem_ptr.is_null() {
-            return ERR_NULL_POINTER;
+        if key < max_allowed_value {
+            return key % (&key_value_limit);
         }
 
-        let elem_str = match CStr::from_ptr(elem_ptr).to_str() {
-            Ok(s) => s.trim_start_matches("0x"),
-            Err(_) => return ERR_INVALID_UTF8,
-        };
-
-        let elem_felt = match Felt::from_hex(elem_str) {
-            Ok(f) => f,
-            Err(_) => return ERR_INVALID_HEX,
-        };
-
-        result = pedersen_hash(&result, &elem_felt);
+        index += BigUint::from_str("1").unwrap();
     }
-
-    let hash_hex = format!("0x{:064x}", result);
-
-    if out_len < hash_hex.len() + 1 {
-        return ERR_BUFFER_TOO_SMALL;
-    }
-
-    let hash_cstr = match CString::new(hash_hex) {
-        Ok(s) => s,
-        Err(_) => return ERR_SIGNING_FAILED,
-    };
-
-    std::ptr::copy_nonoverlapping(hash_cstr.as_ptr(), out_hash, hash_cstr.as_bytes_with_nul().len());
-
-    SUCCESS
 }
 
-/// Returns the error message for a given error code.
-///
-/// # Arguments
-/// * `error_code` - The error code to get a message for
-///
-/// # Returns
-/// * Static string pointer describing the error
-#[no_mangle]
-pub extern "C" fn stark_get_error_message(error_code: i32) -> *const c_char {
-    let msg = match error_code {
-        SUCCESS => "Success\0",
-        ERR_NULL_POINTER => "Null pointer provided\0",
-        ERR_INVALID_UTF8 => "Invalid UTF-8 string\0",
-        ERR_INVALID_HEX => "Invalid hexadecimal value\0",
-        ERR_SIGNING_FAILED => "Signing operation failed\0",
-        ERR_BUFFER_TOO_SMALL => "Output buffer too small\0",
-        _ => "Unknown error\0",
+pub fn get_private_key_from_eth_signature(signature: &str) -> Result<Felt, String> {
+    let eth_sig_truncated = signature.trim_start_matches("0x");
+    if eth_sig_truncated.len() < 64 {
+        return Err("Invalid signature length".to_string());
+    }
+    let r = &eth_sig_truncated[..64];
+    let r_bytes = hex::decode(r).map_err(|e| format!("Failed to decode r as hex: {:?}", e))?;
+    let r_int = BigUint::from_bytes_be(&r_bytes);
+
+    let ground_key = grind_key(r_int);
+    return Ok(Felt::from_hex(&ground_key.to_str_radix(16)).unwrap());
+}
+
+pub fn sign_message(message: &Felt, private_key: &Felt) -> Result<StarkSignature, String> {
+    return ecdsa_sign(private_key, &message)
+        .map(|extended_signature| StarkSignature {
+            r: extended_signature.r,
+            s: extended_signature.s,
+            v: extended_signature.v,
+        })
+        .map_err(|e| format!("Failed to sign message: {:?}", e));
+}
+
+// these functions are designed to be called from other languages, such as Python or JavaScript,
+// so they take string arguments.
+pub fn get_order_hash(
+    position_id: String,
+    base_asset_id_hex: String,
+    base_amount: String,
+    quote_asset_id_hex: String,
+    quote_amount: String,
+    fee_asset_id_hex: String,
+    fee_amount: String,
+    expiration: String,
+    salt: String,
+    user_public_key_hex: String,
+    domain_name: String,
+    domain_version: String,
+    domain_chain_id: String,
+    domain_revision: String,
+) -> Result<Felt, String> {
+    let base_asset_id = Felt::from_hex(&base_asset_id_hex)
+        .map_err(|e| format!("Invalid base_asset_id_hex: {:?}", e))?;
+    let quote_asset_id = Felt::from_hex(&quote_asset_id_hex)
+        .map_err(|e| format!("Invalid quote_asset_id_hex: {:?}", e))?;
+    let fee_asset_id = Felt::from_hex(&fee_asset_id_hex)
+        .map_err(|e| format!("Invalid fee_asset_id_hex: {:?}", e))?;
+    let user_key = Felt::from_hex(&user_public_key_hex)
+        .map_err(|e| format!("Invalid user_public_key_hex: {:?}", e))?;
+
+    let position_id = u32::from_str_radix(&position_id, 10)
+        .map_err(|e| format!("Invalid position_id: {:?}", e))?;
+    let base_amount = i64::from_str_radix(&base_amount, 10)
+        .map_err(|e| format!("Invalid base_amount: {:?}", e))?;
+    let quote_amount = i64::from_str_radix(&quote_amount, 10)
+        .map_err(|e| format!("Invalid quote_amount: {:?}", e))?;
+    let fee_amount =
+        u64::from_str_radix(&fee_amount, 10).map_err(|e| format!("Invalid fee_amount: {:?}", e))?;
+    let expiration =
+        u64::from_str_radix(&expiration, 10).map_err(|e| format!("Invalid expiration: {:?}", e))?;
+    let salt = u64::from_str_radix(&salt, 10).map_err(|e| format!("Invalid salt: {:?}", e))?;
+    let revision = u32::from_str_radix(&domain_revision, 10)
+        .map_err(|e| format!("Invalid domain_revision: {:?}", e))?;
+
+    let order = Order {
+        position_id: PositionId { value: position_id },
+        base_asset_id: AssetId {
+            value: base_asset_id,
+        },
+        base_amount,
+        quote_asset_id: AssetId {
+            value: quote_asset_id,
+        },
+        quote_amount,
+        fee_asset_id: AssetId {
+            value: fee_asset_id,
+        },
+        fee_amount,
+        expiration: Timestamp {
+            seconds: expiration,
+        },
+        salt: salt
+            .try_into()
+            .map_err(|e| format!("Invalid salt vault: {:?}", e))?,
     };
-    msg.as_ptr() as *const c_char
+    let domain = StarknetDomain {
+        name: domain_name,
+        version: domain_version,
+        chain_id: domain_chain_id,
+        revision,
+    };
+    order
+        .message_hash(&domain, user_key)
+        .map_err(|e| format!("Failed to compute message hash: {:?}", e))
+}
+
+pub fn get_limit_order_hash(
+    source_position_id: String,
+    receive_position_id: String,
+    base_asset_id_hex: String,
+    base_amount: String,
+    quote_asset_id_hex: String,
+    quote_amount: String,
+    fee_asset_id_hex: String,
+    fee_amount: String,
+    expiration: String,
+    salt: String,
+    user_public_key_hex: String,
+    domain_name: String,
+    domain_version: String,
+    domain_chain_id: String,
+    domain_revision: String,
+) -> Result<Felt, String> {
+    let base_asset_id = Felt::from_hex(&base_asset_id_hex)
+        .map_err(|e| format!("Invalid base_asset_id_hex: {:?}", e))?;
+    let quote_asset_id = Felt::from_hex(&quote_asset_id_hex)
+        .map_err(|e| format!("Invalid quote_asset_id_hex: {:?}", e))?;
+    let fee_asset_id = Felt::from_hex(&fee_asset_id_hex)
+        .map_err(|e| format!("Invalid fee_asset_id_hex: {:?}", e))?;
+    let user_key = Felt::from_hex(&user_public_key_hex)
+        .map_err(|e| format!("Invalid user_public_key_hex: {:?}", e))?;
+
+    let source_position_id = u32::from_str_radix(&source_position_id, 10)
+        .map_err(|e| format!("Invalid source_position_id: {:?}", e))?;
+    let receive_position_id = u32::from_str_radix(&receive_position_id, 10)
+        .map_err(|e| format!("Invalid receive_position_id: {:?}", e))?;
+    let base_amount = i64::from_str_radix(&base_amount, 10)
+        .map_err(|e| format!("Invalid base_amount: {:?}", e))?;
+    let quote_amount = i64::from_str_radix(&quote_amount, 10)
+        .map_err(|e| format!("Invalid quote_amount: {:?}", e))?;
+    let fee_amount =
+        u64::from_str_radix(&fee_amount, 10).map_err(|e| format!("Invalid fee_amount: {:?}", e))?;
+    let expiration =
+        u64::from_str_radix(&expiration, 10).map_err(|e| format!("Invalid expiration: {:?}", e))?;
+    let salt = u64::from_str_radix(&salt, 10).map_err(|e| format!("Invalid salt: {:?}", e))?;
+    let revision = u32::from_str_radix(&domain_revision, 10)
+        .map_err(|e| format!("Invalid domain_revision: {:?}", e))?;
+
+    let limit_order = LimitOrder {
+        source_position: PositionId {
+            value: source_position_id,
+        },
+        receive_position: PositionId {
+            value: receive_position_id,
+        },
+        base_asset_id: AssetId {
+            value: base_asset_id,
+        },
+        base_amount,
+        quote_asset_id: AssetId {
+            value: quote_asset_id,
+        },
+        quote_amount,
+        fee_asset_id: AssetId {
+            value: fee_asset_id,
+        },
+        fee_amount,
+        expiration: Timestamp {
+            seconds: expiration,
+        },
+        salt: salt
+            .try_into()
+            .map_err(|e| format!("Invalid salt vault: {:?}", e))?,
+    };
+    let domain = StarknetDomain {
+        name: domain_name,
+        version: domain_version,
+        chain_id: domain_chain_id,
+        revision,
+    };
+
+    limit_order
+        .message_hash(&domain, user_key)
+        .map_err(|e| format!("Failed to compute message hash: {:?}", e))
+}
+
+pub fn get_transfer_hash(
+    recipient_position_id: String,
+    sender_position_id: String,
+    collateral_id_hex: String,
+    amount: String,
+    expiration: String,
+    salt: String,
+    user_public_key_hex: String,
+    domain_name: String,
+    domain_version: String,
+    domain_chain_id: String,
+    domain_revision: String,
+) -> Result<Felt, String> {
+    let collateral_id = Felt::from_hex(&collateral_id_hex)
+        .map_err(|e| format!("Invalid collateral_id_hex: {:?}", e))?;
+    let user_key = Felt::from_hex(&user_public_key_hex)
+        .map_err(|e| format!("Invalid user_public_key_hex: {:?}", e))?;
+
+    let recipient = u32::from_str_radix(&recipient_position_id, 10)
+        .map_err(|e| format!("Invalid recipient_position_id: {:?}", e))?;
+    let position_id = u32::from_str_radix(&sender_position_id, 10)
+        .map_err(|e| format!("Invalid sender_position_id: {:?}", e))?;
+    let amount =
+        u64::from_str_radix(&amount, 10).map_err(|e| format!("Invalid amount: {:?}", e))?;
+    let expiration =
+        u64::from_str_radix(&expiration, 10).map_err(|e| format!("Invalid expiration: {:?}", e))?;
+    let salt = Felt::from_dec_str(&salt).map_err(|e| format!("Invalid salt: {:?}", e))?;
+    let revision = u32::from_str_radix(&domain_revision, 10)
+        .map_err(|e| format!("Invalid domain_revision: {:?}", e))?;
+
+    let transfer_args = TransferArgs {
+        recipient: PositionId { value: recipient },
+        position_id: PositionId { value: position_id },
+        collateral_id: AssetId {
+            value: collateral_id,
+        },
+        amount,
+        expiration: Timestamp {
+            seconds: expiration,
+        },
+        salt,
+    };
+    let domain = StarknetDomain {
+        name: domain_name,
+        version: domain_version,
+        chain_id: domain_chain_id,
+        revision,
+    };
+    transfer_args
+        .message_hash(&domain, user_key)
+        .map_err(|e| format!("Failed to compute message hash: {:?}", e))
+}
+
+pub fn get_withdrawal_hash(
+    recipient_hex: String,
+    position_id: String,
+    collateral_id_hex: String,
+    amount: String,
+    expiration: String,
+    salt: String,
+    user_public_key_hex: String,
+    domain_name: String,
+    domain_version: String,
+    domain_chain_id: String,
+    domain_revision: String,
+) -> Result<Felt, String> {
+    let collateral_id = Felt::from_hex(&collateral_id_hex)
+        .map_err(|e| format!("Invalid collateral_id_hex: {:?}", e))?;
+    let user_key = Felt::from_hex(&user_public_key_hex)
+        .map_err(|e| format!("Invalid user_public_key_hex: {:?}", e))?;
+
+    let recipient =
+        Felt::from_hex(&recipient_hex).map_err(|e| format!("Invalid recipient_hex: {:?}", e))?;
+    let position_id = u32::from_str_radix(&position_id, 10)
+        .map_err(|e| format!("Invalid position_id: {:?}", e))?;
+    let amount =
+        u64::from_str_radix(&amount, 10).map_err(|e| format!("Invalid amount: {:?}", e))?;
+    let expiration =
+        u64::from_str_radix(&expiration, 10).map_err(|e| format!("Invalid expiration: {:?}", e))?;
+    let salt = Felt::from_dec_str(&salt).map_err(|e| format!("Invalid salt: {:?}", e))?;
+    let revision = u32::from_str_radix(&domain_revision, 10)
+        .map_err(|e| format!("Invalid domain_revision: {:?}", e))?;
+
+    let withdrawal_args = starknet_messages::WithdrawalArgs {
+        recipient,
+        position_id: PositionId { value: position_id },
+        collateral_id: AssetId {
+            value: collateral_id,
+        },
+        amount,
+        expiration: Timestamp {
+            seconds: expiration,
+        },
+        salt,
+    };
+    let domain = StarknetDomain {
+        name: domain_name,
+        version: domain_version,
+        chain_id: domain_chain_id,
+        revision,
+    };
+    withdrawal_args
+        .message_hash(&domain, user_key)
+        .map_err(|e| {
+            format!(
+                "Failed to compute message hash for withdrawal args: {:?}",
+                e
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
 
     #[test]
-    fn test_get_public_key() {
-        // Known test vector
-        let private_key = CString::new("0x1").unwrap();
-        let mut out_buf = vec![0u8; 128];
+    fn test_get_private_key_from_eth_signature() {
+        let signature = "0x9ef64d5936681edf44b4a7ad713f3bc24065d4039562af03fccf6a08d6996eab367df11439169b417b6a6d8ce81d409edb022597ce193916757c7d5d9cbf97301c";
+        let result = get_private_key_from_eth_signature(signature);
 
-        unsafe {
-            let result = stark_get_public_key(
-                private_key.as_ptr(),
-                out_buf.as_mut_ptr() as *mut c_char,
-                out_buf.len(),
-            );
-            assert_eq!(result, SUCCESS);
-
-            let out_str = CStr::from_ptr(out_buf.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap();
-            assert!(out_str.starts_with("0x"));
-            assert_eq!(out_str.len(), 66); // 0x + 64 hex chars
+        match result {
+            Ok(private_key) => {
+                assert_eq!(private_key, Felt::from_dec_str("3554363360756768076148116215296798451844584215587910826843139626172125285444").unwrap());
+            }
+            Err(err) => {
+                panic!("Expected Ok, got Err: {}", err);
+            }
         }
     }
 
     #[test]
-    fn test_sign_and_format() {
-        let private_key = CString::new("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").unwrap();
-        let message = CString::new("0xdeadbeef").unwrap();
-        let mut r_buf = vec![0u8; 128];
-        let mut s_buf = vec![0u8; 128];
+    fn test_get_transfer_msg() {
+        let recipient_position_id = "1".to_string();
+        let sender_position_id = "2".to_string();
+        let collateral_id_hex = "0x3".to_string();
+        let amount = "4".to_string();
+        let expiration = "5".to_string();
+        let salt = "6".to_string();
+        let user_public_key_hex =
+            "0x5d05989e9302dcebc74e241001e3e3ac3f4402ccf2f8e6f74b034b07ad6a904".to_string();
+        let domain_name = "Perpetuals".to_string();
+        let domain_version = "v0".to_string();
+        let domain_chain_id = "SN_SEPOLIA".to_string();
+        let domain_revision = "1".to_string();
 
-        unsafe {
-            let result = stark_sign(
-                private_key.as_ptr(),
-                message.as_ptr(),
-                r_buf.as_mut_ptr() as *mut c_char,
-                s_buf.as_mut_ptr() as *mut c_char,
-                r_buf.len(),
-                s_buf.len(),
-            );
-            assert_eq!(result, SUCCESS);
+        let result = get_transfer_hash(
+            recipient_position_id,
+            sender_position_id,
+            collateral_id_hex,
+            amount,
+            expiration,
+            salt,
+            user_public_key_hex,
+            domain_name,
+            domain_version,
+            domain_chain_id,
+            domain_revision,
+        );
 
-            let r_str = CStr::from_ptr(r_buf.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap();
-            let s_str = CStr::from_ptr(s_buf.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap();
-
-            assert!(r_str.starts_with("0x"));
-            assert!(s_str.starts_with("0x"));
+        match result {
+            Ok(hash) => {
+                assert_eq!(
+                    hash,
+                    Felt::from_hex(
+                        "0x56c7b21d13b79a33d7700dda20e22246c25e89818249504148174f527fc3f8f"
+                    )
+                    .unwrap()
+                );
+            }
+            Err(err) => {
+                panic!("Expected Ok, got Err: {}", err);
+            }
         }
     }
 
     #[test]
-    fn test_pedersen_hash() {
-        let a = CString::new("0x1").unwrap();
-        let b = CString::new("0x2").unwrap();
-        let mut out_buf = vec![0u8; 128];
+    fn test_get_order_hash() {
+        let position_id = "100".to_string();
+        let base_asset_id_hex = "0x2".to_string();
+        let base_amount = "100".to_string();
+        let quote_asset_id_hex = "0x1".to_string();
+        let quote_amount = "-156".to_string();
+        let fee_asset_id_hex = "0x1".to_string();
+        let fee_amount = "74".to_string();
+        let expiration = "100".to_string();
+        let salt = "123".to_string();
+        let user_public_key_hex =
+            "0x5d05989e9302dcebc74e241001e3e3ac3f4402ccf2f8e6f74b034b07ad6a904".to_string();
+        let domain_name = "Perpetuals".to_string();
+        let domain_version = "v0".to_string();
+        let domain_chain_id = "SN_SEPOLIA".to_string();
+        let domain_revision = "1".to_string();
 
-        unsafe {
-            let result = stark_pedersen_hash(
-                a.as_ptr(),
-                b.as_ptr(),
-                out_buf.as_mut_ptr() as *mut c_char,
-                out_buf.len(),
-            );
-            assert_eq!(result, SUCCESS);
+        let result = get_order_hash(
+            position_id,
+            base_asset_id_hex,
+            base_amount,
+            quote_asset_id_hex,
+            quote_amount,
+            fee_asset_id_hex,
+            fee_amount,
+            expiration,
+            salt,
+            user_public_key_hex,
+            domain_name,
+            domain_version,
+            domain_chain_id,
+            domain_revision,
+        );
 
-            let hash_str = CStr::from_ptr(out_buf.as_ptr() as *const c_char)
-                .to_str()
-                .unwrap();
-            assert!(hash_str.starts_with("0x"));
+        match result {
+            Ok(hash) => {
+                assert_eq!(
+                    hash,
+                    Felt::from_hex(
+                        "0x4de4c009e0d0c5a70a7da0e2039fb2b99f376d53496f89d9f437e736add6b48"
+                    )
+                    .unwrap()
+                );
+            }
+            Err(err) => {
+                panic!("Expected Ok, got Err: {}", err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_limit_order_hash() {
+        let source_position_id = "100".to_string();
+        let receive_position_id = "200".to_string();
+        let base_asset_id_hex = "0x2".to_string();
+        let base_amount = "100".to_string();
+        let quote_asset_id_hex = "0x1".to_string();
+        let quote_amount = "-156".to_string();
+        let fee_asset_id_hex = "0x1".to_string();
+        let fee_amount = "74".to_string();
+        let expiration = "100".to_string();
+        let salt = "123".to_string();
+        let user_public_key_hex =
+            "0x5d05989e9302dcebc74e241001e3e3ac3f4402ccf2f8e6f74b034b07ad6a904".to_string();
+        let domain_name = "Perpetuals".to_string();
+        let domain_version = "v0".to_string();
+        let domain_chain_id = "SN_SEPOLIA".to_string();
+        let domain_revision = "1".to_string();
+
+        let result = get_limit_order_hash(
+            source_position_id,
+            receive_position_id,
+            base_asset_id_hex,
+            base_amount,
+            quote_asset_id_hex,
+            quote_amount,
+            fee_asset_id_hex,
+            fee_amount,
+            expiration,
+            salt,
+            user_public_key_hex,
+            domain_name,
+            domain_version,
+            domain_chain_id,
+            domain_revision,
+        );
+
+        match result {
+            Ok(hash) => {
+                assert_eq!(
+                    hash,
+                    Felt::from_hex(
+                        "0xa3740f996ec1fbbe00ba85be37b00fc4f5c3ae3958bcc3081fb731eb7a3c59"
+                    )
+                    .unwrap()
+                );
+            }
+            Err(err) => {
+                panic!("Expected Ok, got Err: {}", err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_withdrawal_hash() {
+        let recipient_hex = Felt::from_dec_str(
+            "206642948138484946401984817000601902748248360221625950604253680558965863254",
+        )
+        .unwrap()
+        .to_hex_string();
+        let position_id = "2".to_string();
+        let collateral_id_hex = Felt::from_dec_str(
+            "1386727789535574059419576650469753513512158569780862144831829362722992755422",
+        )
+        .unwrap()
+        .to_hex_string();
+        let amount = "1000".to_string();
+        let expiration = "0".to_string();
+        let salt = "0".to_string();
+        let user_public_key_hex =
+            "0x5D05989E9302DCEBC74E241001E3E3AC3F4402CCF2F8E6F74B034B07AD6A904".to_string();
+        let domain_name = "Perpetuals".to_string();
+        let domain_version = "v0".to_string();
+        let domain_chain_id = "SN_SEPOLIA".to_string();
+        let domain_revision = "1".to_string();
+        let result = get_withdrawal_hash(
+            recipient_hex,
+            position_id,
+            collateral_id_hex,
+            amount,
+            expiration,
+            salt,
+            user_public_key_hex,
+            domain_name,
+            domain_version,
+            domain_chain_id,
+            domain_revision,
+        );
+        match result {
+            Ok(hash) => {
+                assert_eq!(
+                    hash,
+                    Felt::from_dec_str(
+                        "2182119571682827544073774098906745929330860211691330979324731407862023927178"
+                    )
+                    .unwrap()
+                );
+            }
+            Err(err) => {
+                panic!("Expected Ok, got Err: {}", err);
+            }
         }
     }
 }

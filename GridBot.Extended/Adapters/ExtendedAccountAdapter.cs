@@ -36,38 +36,16 @@ internal sealed class ExtendedAccountAdapter : IAccountClient
     public async Task<AccountInfo> GetAccountAsync(CancellationToken ct = default)
     {
         var accountInfo = await _httpClient.GetAccountInfoAsync(ct);
-        var balances = await _httpClient.GetBalancesAsync(ct);
+        var balance = await _httpClient.GetBalanceAsync(ct);
         var positions = await _httpClient.GetPositionsAsync(ct);
 
-        // Sync nonce from account info if available
-        if (accountInfo.Nonce > 0)
-        {
-            _nonceManager.SyncFromServer(accountInfo.Nonce);
-        }
-
-        // Calculate collateral from balances
-        decimal collateral = 0m;
-        foreach (var balance in balances)
-        {
-            if (decimal.TryParse(balance.Total, NumberStyles.Any, CultureInfo.InvariantCulture, out var total))
-            {
-                collateral += total;
-            }
-        }
-
-        // Calculate available balance
-        decimal availableBalance = 0m;
-        foreach (var balance in balances)
-        {
-            if (decimal.TryParse(balance.Available, NumberStyles.Any, CultureInfo.InvariantCulture, out var available))
-            {
-                availableBalance += available;
-            }
-        }
+        // Get balance values (API returns single balance object, not a list)
+        var collateral = balance?.Balance ?? 0m;
+        var availableBalance = balance?.AvailableForTrade ?? 0m;
+        var equity = balance?.Equity ?? 0m;
 
         // Build position dictionary
         var positionDict = new Dictionary<string, PositionInfo>();
-        decimal totalUnrealizedPnl = 0m;
 
         foreach (var pos in positions)
         {
@@ -75,16 +53,15 @@ internal sealed class ExtendedAccountAdapter : IAccountClient
             {
                 var posInfo = MapPosition(pos);
                 positionDict[pos.Market] = posInfo;
-                totalUnrealizedPnl += posInfo.UnrealizedPnl;
             }
         }
 
-        // Portfolio value = collateral + unrealized PnL
-        var portfolioValue = collateral + totalUnrealizedPnl;
+        // Portfolio value = equity (which already includes unrealized PnL)
+        var portfolioValue = equity;
 
         return new AccountInfo
         {
-            AccountId = accountInfo.Address,
+            AccountId = accountInfo.AccountId.ToString(),
             Collateral = collateral,
             AvailableBalance = availableBalance,
             PortfolioValue = portfolioValue,
