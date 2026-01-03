@@ -2476,3 +2476,57 @@ The "Invalid StarkEx signature" (error 1101) issue is **RESOLVED**.
 The native signer replacement is complete and working:
 - Poseidon hash + SNIP-12 typed structured data (matching Python SDK exactly)
 - Successfully placing orders on Extended DEX mainnet
+
+---
+
+# Session: GridBot.Extended README Documentation
+
+## Date: 2026-01-03
+
+## Task Summary
+Created comprehensive README documentation for the GridBot.Extended project.
+
+## What Was Done
+Created `GridBot.Extended/README.md` with:
+
+1. **Prerequisites Section**
+   - Native signing library requirements (Windows/Linux)
+   - NuGet package dependencies
+
+2. **Configuration Section**
+   - Complete appsettings.json structure for ExtendedNetworks
+   - Configuration field descriptions and requirements
+   - Security notes for private key storage
+
+3. **Initialization Section**
+   - Multi-network setup using `AddExtendedNetworks()` and `IExtendedNetworkExchangeFactory`
+   - Single-network setup using `AddExtendedExchange()`
+
+4. **API Examples**
+   - **Creating Limit Orders**: Complete example with signing flow using `StarkSigner`, `StarkAmountCalculator`, and `CreateOrderRequest`
+   - **Creating Market Orders**: Using LIMIT + IOC with slippage
+   - **Canceling Orders**: Single cancel and mass cancel
+   - **Getting Positions**: `GetPositionsAsync()` usage
+   - **Getting Order History**: `GetOrdersAsync()` with market filter
+   - **Getting Balance**: `GetAccountInfoAsync()` and `GetBalanceAsync()`
+   - **Market Data**: Markets, order book, candles, funding rates
+
+5. **WebSocket Streaming Section**
+   - Subscribing to account updates
+   - Monitoring order, trade, balance, position updates
+   - Connection state monitoring
+
+6. **Architecture Section**
+   - Project structure overview
+   - Key component descriptions
+   - Rate limit information
+
+7. **Error Handling and Best Practices**
+
+## Key Files
+- Created: `GridBot.Extended/README.md`
+
+## Notes
+- Examples are based on the actual debug endpoints in `GridBot.ApiService/Program.cs`
+- The signing flow uses random nonces (not sequential) per the Python SDK pattern
+- HTTP 200 on order creation does NOT mean the order is active - WebSocket confirmation is required
